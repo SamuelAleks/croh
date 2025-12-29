@@ -1,4 +1,39 @@
-import { Button, VerticalBox, HorizontalBox, TabWidget, LineEdit, ListView, ProgressIndicator, StandardButton, GroupBox } from "std-widgets.slint";
+import { Button, VerticalBox, HorizontalBox, TabWidget, LineEdit, ProgressIndicator, GroupBox, ScrollView, Palette } from "std-widgets.slint";
+
+// ============================================================================
+// Theme Colors (Material Dark inspired)
+// ============================================================================
+
+global Theme {
+    // Primary colors
+    out property <color> primary: #6750A4;
+    out property <color> primary-container: #EADDFF;
+    out property <color> on-primary: #FFFFFF;
+    out property <color> on-primary-container: #21005D;
+    
+    // Surface colors
+    out property <color> surface: #1C1B1F;
+    out property <color> surface-variant: #49454F;
+    out property <color> surface-container: #211F26;
+    out property <color> surface-container-high: #2B2930;
+    out property <color> on-surface: #E6E1E5;
+    out property <color> on-surface-variant: #CAC4D0;
+    
+    // Accent colors
+    out property <color> success: #4CAF50;
+    out property <color> error: #F2B8B5;
+    out property <color> on-error: #601410;
+    out property <color> warning: #FFB74D;
+    out property <color> info: #03A9F4;
+    
+    // Outline
+    out property <color> outline: #938F99;
+    out property <color> outline-variant: #49454F;
+    
+    // Specific UI elements
+    out property <color> send-color: #81C784;
+    out property <color> receive-color: #64B5F6;
+}
 
 // ============================================================================
 // Structs for data binding
@@ -47,38 +82,79 @@ export global AppLogic {
 // Components
 // ============================================================================
 
+component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <color> icon-color: Theme.on-surface;
+    callback clicked();
+    
+    width: 32px;
+    height: 32px;
+    border-radius: 16px;
+    background: touch.has-hover ? Theme.surface-variant.with-alpha(0.3) : transparent;
+    
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    
+    Text {
+        text: icon;
+        font-size: 16px;
+        color: icon-color;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
 component FileListItem inherits Rectangle {
     in property <string> file-name;
     in property <string> file-size;
     in property <int> index;
     
-    height: 36px;
-    background: Math.mod(index, 2) == 0 ? #f8f9fa : #ffffff;
+    height: 48px;
+    background: touch.has-hover ? Theme.surface-container-high : transparent;
+    border-radius: 8px;
+    
+    touch := TouchArea {}
     
     HorizontalBox {
-        padding: 8px;
+        padding: 12px;
         spacing: 12px;
         
-        Text {
-            text: "📄";
-            vertical-alignment: center;
+        Rectangle {
+            width: 36px;
+            height: 36px;
+            background: Theme.primary.with-alpha(0.2);
+            border-radius: 8px;
+            
+            Text {
+                text: "📄";
+                font-size: 18px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
         }
         
-        Text {
-            text: file-name;
-            vertical-alignment: center;
+        VerticalBox {
             horizontal-stretch: 1;
-            overflow: elide;
+            alignment: center;
+            spacing: 2px;
+            
+            Text {
+                text: file-name;
+                color: Theme.on-surface;
+                overflow: elide;
+            }
+            
+            Text {
+                text: file-size;
+                font-size: 12px;
+                color: Theme.on-surface-variant;
+            }
         }
         
-        Text {
-            text: file-size;
-            vertical-alignment: center;
-            color: #6c757d;
-        }
-        
-        Button {
-            text: "✕";
+        IconButton {
+            icon: "✕";
+            icon-color: Theme.on-surface-variant;
             clicked => { AppLogic.remove-file(index); }
         }
     }
@@ -87,41 +163,58 @@ component FileListItem inherits Rectangle {
 component TransferListItem inherits Rectangle {
     in property <TransferItem> transfer;
     
-    height: 60px;
-    background: #ffffff;
-    border-radius: 4px;
-    border-width: 1px;
-    border-color: #dee2e6;
+    height: 72px;
+    background: Theme.surface-container;
+    border-radius: 12px;
     
     HorizontalBox {
-        padding: 12px;
-        spacing: 12px;
+        padding: 16px;
+        spacing: 16px;
         
         // Direction indicator
-        Text {
-            text: transfer.transfer-type == "send" ? "↑" : "↓";
-            font-size: 18px;
-            color: transfer.transfer-type == "send" ? #28a745 : #007bff;
-            vertical-alignment: center;
+        Rectangle {
+            width: 40px;
+            height: 40px;
+            background: transfer.transfer-type == "send" ? Theme.send-color.with-alpha(0.2) : Theme.receive-color.with-alpha(0.2);
+            border-radius: 20px;
+            
+            Text {
+                text: transfer.transfer-type == "send" ? "↑" : "↓";
+                font-size: 20px;
+                color: transfer.transfer-type == "send" ? Theme.send-color : Theme.receive-color;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
         }
         
         // Transfer info
         VerticalBox {
             horizontal-stretch: 1;
             spacing: 4px;
+            alignment: center;
             
             HorizontalBox {
                 Text {
                     text: transfer.files;
                     font-weight: 500;
+                    color: Theme.on-surface;
                     overflow: elide;
                     horizontal-stretch: 1;
                 }
                 
-                Text {
-                    text: transfer.code != "" ? "Code: " + transfer.code : "";
-                    color: #6c757d;
-                    font-size: 12px;
+                if transfer.code != "": Rectangle {
+                    background: Theme.primary.with-alpha(0.2);
+                    border-radius: 4px;
+                    height: 24px;
+                    width: code-text.preferred-width + 16px;
+                    
+                    code-text := Text {
+                        text: transfer.code;
+                        color: Theme.primary-container;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
                 }
             }
             
@@ -131,7 +224,7 @@ component TransferListItem inherits Rectangle {
                 if transfer.status == "running": ProgressIndicator {
                     progress: transfer.progress / 100.0;
                     horizontal-stretch: 1;
-                    height: 8px;
+                    height: 4px;
                 }
                 
                 Text {
@@ -140,10 +233,10 @@ component TransferListItem inherits Rectangle {
                           transfer.status == "completed" ? "✓ Completed" :
                           transfer.status == "failed" ? "✗ " + transfer.error :
                           transfer.status == "cancelled" ? "Cancelled" :
-                          "Pending...";
-                    color: transfer.status == "completed" ? #28a745 :
-                           transfer.status == "failed" ? #dc3545 :
-                           #6c757d;
+                          "Waiting...";
+                    color: transfer.status == "completed" ? Theme.success :
+                           transfer.status == "failed" ? Theme.error :
+                           Theme.on-surface-variant;
                     font-size: 12px;
                 }
             }
@@ -155,186 +248,315 @@ component TransferListItem inherits Rectangle {
             clicked => { AppLogic.cancel-transfer(transfer.id); }
         }
         
-        if transfer.status == "completed" && transfer.transfer-type == "receive": Button {
-            text: "📂";
+        if transfer.status == "completed" && transfer.transfer-type == "receive": IconButton {
+            icon: "📂";
             clicked => { AppLogic.open-folder(transfer.id); }
         }
     }
 }
 
-component SendPanel inherits VerticalBox {
-    padding: 20px;
-    spacing: 16px;
+component DropZone inherits Rectangle {
+    callback clicked();
     
-    Text {
-        text: "Send Files";
-        font-size: 24px;
-        font-weight: 600;
+    height: 160px;
+    border-radius: 16px;
+    border-width: 2px;
+    border-color: touch.has-hover ? Theme.primary : Theme.outline-variant;
+    background: touch.has-hover ? Theme.primary.with-alpha(0.08) : Theme.surface-container;
+    
+    touch := TouchArea {
+        clicked => { root.clicked(); }
     }
     
-    // Drop zone / file picker
-    Rectangle {
-        height: 120px;
-        border-radius: 8px;
-        border-width: 2px;
-        border-color: #dee2e6;
-        background: #f8f9fa;
+    VerticalBox {
+        alignment: center;
+        spacing: 12px;
         
-        TouchArea {
+        Rectangle {
+            width: 64px;
+            height: 64px;
+            background: Theme.primary.with-alpha(0.2);
+            border-radius: 32px;
+            
+            Text {
+                text: "📁";
+                font-size: 32px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        
+        Text {
+            text: "Click to select files";
+            color: Theme.on-surface;
+            font-size: 16px;
+            horizontal-alignment: center;
+        }
+        
+        Text {
+            text: "or drag and drop here";
+            color: Theme.on-surface-variant;
+            font-size: 14px;
+            horizontal-alignment: center;
+        }
+    }
+}
+
+component SendPanel inherits Rectangle {
+    background: Theme.surface;
+    
+    VerticalBox {
+        padding: 24px;
+        spacing: 20px;
+        
+        Text {
+            text: "Send Files";
+            font-size: 28px;
+            font-weight: 600;
+            color: Theme.on-surface;
+        }
+        
+        DropZone {
             clicked => { AppLogic.browse-files(); }
+        }
+        
+        // Selected files list
+        if AppLogic.selected-files.length > 0: Rectangle {
+            background: Theme.surface-container;
+            border-radius: 16px;
+            vertical-stretch: 1;
+            
+            VerticalBox {
+                padding: 16px;
+                spacing: 8px;
+                
+                HorizontalBox {
+                    Text {
+                        text: "Selected Files";
+                        font-weight: 600;
+                        color: Theme.on-surface;
+                        horizontal-stretch: 1;
+                    }
+                    
+                    Rectangle {
+                        background: Theme.primary;
+                        border-radius: 12px;
+                        width: 24px;
+                        height: 24px;
+                        
+                        Text {
+                            text: AppLogic.selected-files.length;
+                            color: Theme.on-primary;
+                            font-size: 12px;
+                            font-weight: 600;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                
+                ScrollView {
+                    vertical-stretch: 1;
+                    
+                    VerticalBox {
+                        spacing: 4px;
+                        
+                        for file[index] in AppLogic.selected-files: FileListItem {
+                            file-name: file.name;
+                            file-size: file.size;
+                            index: index;
+                        }
+                    }
+                }
+                
+                HorizontalBox {
+                    spacing: 12px;
+                    
+                    Button {
+                        text: "Clear All";
+                        clicked => { AppLogic.clear-files(); }
+                    }
+                    
+                    Rectangle { horizontal-stretch: 1; }
+                    
+                    Button {
+                        text: "📤 Send Files";
+                        primary: true;
+                        enabled: AppLogic.selected-files.length > 0;
+                        clicked => { AppLogic.start-send(); }
+                    }
+                }
+            }
+        }
+        
+        // Show send button when no files
+        if AppLogic.selected-files.length == 0: Rectangle {
+            vertical-stretch: 1;
+        }
+        
+        if AppLogic.selected-files.length == 0: Button {
+            text: "📤 Send Files";
+            primary: true;
+            enabled: false;
+        }
+    }
+}
+
+component ReceivePanel inherits Rectangle {
+    in-out property <string> receive-code: "";
+    
+    background: Theme.surface;
+    
+    VerticalBox {
+        padding: 24px;
+        spacing: 20px;
+        
+        Text {
+            text: "Receive Files";
+            font-size: 28px;
+            font-weight: 600;
+            color: Theme.on-surface;
+        }
+        
+        Text {
+            text: "Enter the code shared by the sender";
+            color: Theme.on-surface-variant;
+            font-size: 16px;
+        }
+        
+        Rectangle {
+            background: Theme.surface-container;
+            border-radius: 16px;
+            height: 140px;
+            
+            VerticalBox {
+                padding: 24px;
+                spacing: 16px;
+                alignment: center;
+                
+                LineEdit {
+                    placeholder-text: "e.g., 7-alpha-beta-gamma";
+                    text <=> receive-code;
+                    font-size: 18px;
+                }
+                
+                Button {
+                    text: "📥 Receive";
+                    primary: true;
+                    enabled: receive-code != "";
+                    clicked => { 
+                        AppLogic.start-receive(receive-code);
+                        receive-code = "";
+                    }
+                }
+            }
+        }
+        
+        // Spacer
+        Rectangle {
+            vertical-stretch: 1;
+        }
+    }
+}
+
+component PeersPanel inherits Rectangle {
+    background: Theme.surface;
+    
+    VerticalBox {
+        padding: 24px;
+        spacing: 20px;
+        
+        Text {
+            text: "Trusted Peers";
+            font-size: 28px;
+            font-weight: 600;
+            color: Theme.on-surface;
+        }
+        
+        Rectangle {
+            vertical-stretch: 1;
+            background: Theme.surface-container;
+            border-radius: 16px;
             
             VerticalBox {
                 alignment: center;
+                spacing: 16px;
+                
+                Rectangle {
+                    width: 80px;
+                    height: 80px;
+                    background: Theme.primary.with-alpha(0.2);
+                    border-radius: 40px;
+                    
+                    Text {
+                        text: "👥";
+                        font-size: 40px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
                 
                 Text {
-                    text: "📁";
-                    font-size: 32px;
+                    text: "No trusted peers yet";
+                    color: Theme.on-surface;
+                    font-size: 16px;
                     horizontal-alignment: center;
                 }
                 
                 Text {
-                    text: "Click to select files";
+                    text: "Peer-to-peer connections coming soon";
+                    color: Theme.on-surface-variant;
+                    font-size: 14px;
                     horizontal-alignment: center;
-                    color: #6c757d;
                 }
             }
-        }
-    }
-    
-    // Selected files list
-    if AppLogic.selected-files.length > 0: GroupBox {
-        title: "Selected Files (" + AppLogic.selected-files.length + ")";
-        vertical-stretch: 1;
-        
-        VerticalBox {
-            for file[index] in AppLogic.selected-files: FileListItem {
-                file-name: file.name;
-                file-size: file.size;
-                index: index;
-            }
-            
-            HorizontalBox {
-                padding-top: 8px;
-                Button {
-                    text: "Clear All";
-                    clicked => { AppLogic.clear-files(); }
-                }
-            }
-        }
-    }
-    
-    // Send button
-    Button {
-        text: "📤 Send Files";
-        enabled: AppLogic.selected-files.length > 0;
-        clicked => { AppLogic.start-send(); }
-    }
-}
-
-component ReceivePanel inherits VerticalBox {
-    in-out property <string> receive-code: "";
-    
-    padding: 20px;
-    spacing: 16px;
-    
-    Text {
-        text: "Receive Files";
-        font-size: 24px;
-        font-weight: 600;
-    }
-    
-    Text {
-        text: "Enter the code shared by the sender:";
-        color: #6c757d;
-    }
-    
-    HorizontalBox {
-        spacing: 12px;
-        
-        LineEdit {
-            placeholder-text: "e.g., 7-alpha-beta-gamma";
-            text <=> receive-code;
-            horizontal-stretch: 1;
         }
         
         Button {
-            text: "📥 Receive";
-            enabled: receive-code != "";
-            clicked => { 
-                AppLogic.start-receive(receive-code);
-                receive-code = "";
-            }
+            text: "+ Add Trusted Peer";
+            enabled: false;
         }
-    }
-    
-    // Spacer
-    Rectangle {
-        vertical-stretch: 1;
-    }
-}
-
-component PeersPanel inherits VerticalBox {
-    padding: 20px;
-    spacing: 16px;
-    
-    Text {
-        text: "Trusted Peers";
-        font-size: 24px;
-        font-weight: 600;
-    }
-    
-    Text {
-        text: "Peer-to-peer connections will be available in a future update.";
-        color: #6c757d;
-    }
-    
-    Rectangle {
-        vertical-stretch: 1;
-        background: #f8f9fa;
-        border-radius: 8px;
-        
-        VerticalBox {
-            alignment: center;
-            
-            Text {
-                text: "👥";
-                font-size: 48px;
-                horizontal-alignment: center;
-            }
-            
-            Text {
-                text: "No trusted peers yet";
-                horizontal-alignment: center;
-                color: #6c757d;
-            }
-        }
-    }
-    
-    Button {
-        text: "+ Add Trusted Peer";
-        enabled: false;
     }
 }
 
 component TransfersPanel inherits Rectangle {
-    background: #f8f9fa;
-    border-width: 1px;
-    border-color: #dee2e6;
+    background: Theme.surface-container;
     
     VerticalBox {
-        padding: 12px;
-        spacing: 8px;
+        padding: 16px;
+        spacing: 12px;
         
-        Text {
-            text: "Active Transfers";
-            font-weight: 600;
-            color: #495057;
+        HorizontalBox {
+            Text {
+                text: "Transfers";
+                font-weight: 600;
+                font-size: 16px;
+                color: Theme.on-surface;
+            }
+            
+            Rectangle { horizontal-stretch: 1; }
+            
+            if AppLogic.transfers.length > 0: Rectangle {
+                background: Theme.primary;
+                border-radius: 10px;
+                width: 20px;
+                height: 20px;
+                
+                Text {
+                    text: AppLogic.transfers.length;
+                    color: Theme.on-primary;
+                    font-size: 11px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
         }
         
         if AppLogic.transfers.length == 0: Text {
             text: "No active transfers";
-            color: #6c757d;
-            font-size: 12px;
+            color: Theme.on-surface-variant;
+            font-size: 14px;
         }
         
         for transfer in AppLogic.transfers: TransferListItem {
@@ -349,26 +571,35 @@ component TransfersPanel inherits Rectangle {
 
 export component MainWindow inherits Window {
     title: "Croc GUI";
-    icon: @image-url("");
     min-width: 600px;
     min-height: 500px;
     preferred-width: 800px;
-    preferred-height: 600px;
-    background: #ffffff;
+    preferred-height: 650px;
+    background: Theme.surface;
     
     VerticalBox {
+        spacing: 0;
+        
         // Header
         Rectangle {
-            height: 50px;
-            background: #343a40;
+            height: 56px;
+            background: Theme.surface-container-high;
             
             HorizontalBox {
-                padding: 12px;
+                padding-left: 20px;
+                padding-right: 20px;
+                spacing: 12px;
                 
                 Text {
-                    text: "🐊 Croc GUI";
-                    color: white;
-                    font-size: 18px;
+                    text: "🐊";
+                    font-size: 24px;
+                    vertical-alignment: center;
+                }
+                
+                Text {
+                    text: "Croc";
+                    color: Theme.on-surface;
+                    font-size: 20px;
                     font-weight: 600;
                     vertical-alignment: center;
                 }
@@ -377,37 +608,47 @@ export component MainWindow inherits Window {
                     horizontal-stretch: 1;
                 }
                 
-                Text {
-                    text: AppLogic.app-status;
-                    color: #adb5bd;
-                    vertical-alignment: center;
+                Rectangle {
+                    background: Theme.surface-variant;
+                    border-radius: 4px;
+                    height: 28px;
+                    width: status-text.preferred-width + 16px;
+                    
+                    status-text := Text {
+                        text: AppLogic.app-status;
+                        color: Theme.on-surface-variant;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
                 }
             }
         }
         
         // Main content with tabs
         TabWidget {
+            vertical-stretch: 1;
+            
             Tab {
-                title: "📤 Send";
+                title: "Send";
                 SendPanel {}
             }
             
             Tab {
-                title: "📥 Receive";
+                title: "Receive";
                 ReceivePanel {}
             }
             
             Tab {
-                title: "👥 Peers";
+                title: "Peers";
                 PeersPanel {}
             }
         }
         
         // Transfers panel at bottom
         TransfersPanel {
-            min-height: 100px;
-            max-height: 200px;
+            min-height: 120px;
+            max-height: 220px;
         }
     }
 }
-
