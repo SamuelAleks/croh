@@ -6,7 +6,7 @@ Cargo.lock
 # IDE
 .idea/
 .vscode/
-*.md
+*.zip
 *.swp
 *.swo
 *~
@@ -24,4 +24,6 @@ Thumbs.db
 # Local configuration
 .env
 .env.local
+
+/misc/
 
