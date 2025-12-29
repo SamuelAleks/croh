@@ -1,0 +1,33 @@
+[package]
+name = "croc-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native desktop GUI for croc file transfer"
+
+[dependencies]
+# Core library
+croc-gui-core = { workspace = true }
+
+# UI Framework
+slint = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# File dialogs
+rfd = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+
+# Date/time
+chrono = { workspace = true }
+
+[build-dependencies]
+slint-build = "1.9"
+

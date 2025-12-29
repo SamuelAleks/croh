@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/gui",
+    "crates/daemon",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Croc GUI Contributors"]
+repository = "https://github.com/croc-gui/croc-gui"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.43", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# UI Framework
+slint = "1.9"
+
+# File dialogs
+rfd = "0.15"
+
+# UUID generation
+uuid = { version = "1.11", features = ["v4"] }
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Regex for parsing
+regex = "1.11"
+
+# Cross-platform directories
+dirs = "5.0"
+
+# Internal crates
+croc-gui-core = { path = "crates/core" }
+
