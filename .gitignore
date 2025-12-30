@@ -25,5 +25,9 @@ Thumbs.db
 .env
 .env.local
 
+# Markdown (except README)
+*.md
+!README.md
+
 /misc/
 
