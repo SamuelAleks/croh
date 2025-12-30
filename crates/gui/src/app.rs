@@ -768,12 +768,13 @@ impl App {
                 let code_str = code.to_string();
                 info!("Copying code to clipboard: {}", code_str);
                 
-                // Copy to clipboard using clipboard crate or platform-specific
+                // Copy to clipboard using platform-specific methods
                 #[cfg(target_os = "windows")]
                 {
                     use std::process::Command;
-                    let _ = Command::new("cmd")
-                        .args(["/C", &format!("echo {}| clip", code_str)])
+                    // Use PowerShell's Set-Clipboard to avoid newline issues with echo
+                    let _ = Command::new("powershell")
+                        .args(["-Command", &format!("Set-Clipboard -Value '{}'", code_str)])
                         .output();
                 }
                 

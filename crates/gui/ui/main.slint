@@ -487,13 +487,14 @@ component SettingRow inherits Rectangle {
     in property <string> label;
     in property <string> sublabel: "";
 
-    min-height: sublabel == "" ? 40px : 52px;
+    height: sublabel == "" ? 36px : 48px;
 
     HorizontalLayout {
-        padding: Theme.spacing-sm;
+        padding-left: Theme.spacing-sm;
+        padding-right: Theme.spacing-sm;
         spacing: Theme.spacing-md;
-        alignment: center;
 
+        // Label section - left aligned, vertically centered
         VerticalLayout {
             horizontal-stretch: 1;
             alignment: center;
@@ -513,7 +514,11 @@ component SettingRow inherits Rectangle {
             }
         }
 
-        @children
+        // Controls section - right aligned, vertically centered
+        VerticalLayout {
+            alignment: center;
+            @children
+        }
     }
 }
 
@@ -529,14 +534,15 @@ component Section inherits Rectangle {
     border-width: 1px;
     border-color: Theme.border;
 
-    VerticalBox {
+    VerticalLayout {
         padding: Theme.spacing-sm;
-        spacing: Theme.spacing-sm;
+        spacing: 4px;
 
         if title != "": Text {
             text: title;
             font-size: 11px;
-            color: Theme.text-dim;
+            font-weight: 500;
+            color: Theme.text-muted;
         }
 
         @children
@@ -893,6 +899,36 @@ component SettingsPanel inherits Rectangle {
 }
 
 // ============================================================================
+// Resize Handle (draggable divider)
+// ============================================================================
+
+component ResizeHandle inherits Rectangle {
+    callback dragged(length);
+
+    height: 6px;
+    background: touch.has-hover || touch.pressed ? Theme.border-focus : Theme.border;
+
+    touch := TouchArea {
+        mouse-cursor: row-resize;
+        moved => {
+            if (self.pressed) {
+                root.dragged(self.mouse-y);
+            }
+        }
+    }
+
+    // Visual grip indicator
+    Rectangle {
+        x: (parent.width - 40px) / 2;
+        y: 2px;
+        width: 40px;
+        height: 2px;
+        background: touch.has-hover || touch.pressed ? Theme.accent : Theme.text-muted;
+        border-radius: 1px;
+    }
+}
+
+// ============================================================================
 // Transfers Panel (bottom bar) - grows with window
 // ============================================================================
 
@@ -951,6 +987,7 @@ export component MainWindow inherits Window {
     background: Theme.bg-dark;
 
     property <int> active-tab: 0;
+    property <length> transfers-height: 150px;
 
     VerticalLayout {
         spacing: 0;
@@ -1001,18 +1038,27 @@ export component MainWindow inherits Window {
             }
         }
 
-        // Content - does not stretch
+        // Content - stretches to fill remaining space
         Rectangle {
+            vertical-stretch: 1;
+
             if active-tab == 0: SendPanel {}
             if active-tab == 1: ReceivePanel {}
             if active-tab == 2: PeersPanel {}
             if active-tab == 3: SettingsPanel {}
         }
 
-        // Transfers bar - grows with window
+        // Resize handle
+        ResizeHandle {
+            dragged(delta) => {
+                // Subtract delta to resize (dragging up = larger transfers pane)
+                transfers-height = clamp(transfers-height - delta, 60px, 400px);
+            }
+        }
+
+        // Transfers bar - user-resizable height
         TransfersBar {
-            vertical-stretch: 1;
-            min-height: 60px;
+            height: transfers-height;
         }
     }
 }
