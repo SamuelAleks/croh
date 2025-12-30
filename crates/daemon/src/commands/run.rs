@@ -1,8 +1,18 @@
 //! Run command - starts the daemon service.
 
 use anyhow::Result;
-use croc_gui_core::Config;
-use tracing::info;
+use croc_gui_core::{platform, Config, TransferManager};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tracing::{error, info, warn};
+
+/// Daemon state shared across the service.
+pub struct DaemonState {
+    #[allow(dead_code)] // Used for future features
+    pub config: Config,
+    pub transfer_manager: TransferManager,
+    pub running: bool,
+}
 
 pub async fn execute(config_path: Option<String>) -> Result<()> {
     // Load configuration
@@ -14,17 +24,163 @@ pub async fn execute(config_path: Option<String>) -> Result<()> {
         Config::load_with_env()?
     };
 
+    info!("Croc Daemon v{}", env!("CARGO_PKG_VERSION"));
     info!("Download directory: {:?}", config.download_dir);
 
-    // Ensure download directory exists
+    // Ensure directories exist
     std::fs::create_dir_all(&config.download_dir)?;
+    std::fs::create_dir_all(platform::data_dir())?;
+
+    // Initialize daemon state
+    let state = Arc::new(RwLock::new(DaemonState {
+        config,
+        transfer_manager: TransferManager::new(),
+        running: true,
+    }));
+
+    // Set up signal handlers for graceful shutdown
+    let shutdown_state = state.clone();
+    
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        
+        let mut sigterm = signal(SignalKind::terminate())?;
+        let mut sigint = signal(SignalKind::interrupt())?;
+        let mut sighup = signal(SignalKind::hangup())?;
+        
+        let state_clone = shutdown_state.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = sigterm.recv() => {
+                    info!("Received SIGTERM");
+                }
+                _ = sigint.recv() => {
+                    info!("Received SIGINT");
+                }
+                _ = sighup.recv() => {
+                    info!("Received SIGHUP - reloading config");
+                    // Reload config on SIGHUP
+                    if let Ok(new_config) = Config::load_with_env() {
+                        let mut state = state_clone.write().await;
+                        state.config = new_config;
+                        info!("Configuration reloaded");
+                    }
+                    return; // Don't shutdown on SIGHUP
+                }
+            }
+            
+            // Initiate shutdown
+            let mut state = state_clone.write().await;
+            state.running = false;
+        });
+    }
+    
+    #[cfg(windows)]
+    {
+        let state_clone = shutdown_state.clone();
+        tokio::spawn(async move {
+            if let Ok(()) = tokio::signal::ctrl_c().await {
+                info!("Received Ctrl+C");
+                let mut state = state_clone.write().await;
+                state.running = false;
+            }
+        });
+    }
 
     info!("Daemon running. Press Ctrl+C to stop.");
+    
+    // Write PID file
+    let pid_file = platform::data_dir().join("daemon.pid");
+    std::fs::write(&pid_file, std::process::id().to_string())?;
+    info!("PID file written to: {:?}", pid_file);
 
-    // Wait for shutdown signal
-    tokio::signal::ctrl_c().await?;
+    // Main service loop
+    loop {
+        // Check if we should shut down
+        {
+            let state_guard = state.read().await;
+            if !state_guard.running {
+                break;
+            }
+        }
 
-    info!("Shutting down...");
+        // Sleep a bit before checking again
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+
+    // Graceful shutdown
+    info!("Initiating graceful shutdown...");
+    
+    // Cancel any active transfers
+    {
+        let state_guard = state.read().await;
+        let active = state_guard.transfer_manager.list_active().await;
+        if !active.is_empty() {
+            warn!("Cancelling {} active transfer(s)", active.len());
+            // In a real implementation, we'd properly cancel each transfer
+        }
+    }
+
+    // Clean up temporary files
+    let upload_dir = platform::upload_dir();
+    if upload_dir.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&upload_dir) {
+            error!("Failed to clean up upload directory: {}", e);
+        } else {
+            info!("Cleaned up temporary upload directory");
+        }
+    }
+
+    // Remove PID file
+    if let Err(e) = std::fs::remove_file(&pid_file) {
+        warn!("Failed to remove PID file: {}", e);
+    }
+
+    info!("Daemon stopped gracefully");
     Ok(())
 }
 
+/// Check if the daemon is running by reading the PID file.
+pub fn is_daemon_running() -> Option<u32> {
+    let pid_file = platform::data_dir().join("daemon.pid");
+    
+    if !pid_file.exists() {
+        return None;
+    }
+
+    let pid_str = std::fs::read_to_string(&pid_file).ok()?;
+    let pid: u32 = pid_str.trim().parse().ok()?;
+
+    // Check if process is still running
+    #[cfg(unix)]
+    {
+        use std::process::Command;
+        let output = Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .ok()?;
+        
+        if output.status.success() {
+            return Some(pid);
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+        let output = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {}", pid)])
+            .output()
+            .ok()?;
+        
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stdout.contains(&pid.to_string()) {
+            return Some(pid);
+        }
+    }
+
+    // PID file exists but process is dead - clean up stale PID file
+    let _ = std::fs::remove_file(&pid_file);
+    None
+}

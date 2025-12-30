@@ -1,0 +1,33 @@
+[Unit]
+Description=Croc GUI Daemon - Headless file transfer service
+Documentation=https://github.com/croc-gui/croc-gui
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/croc-daemon run
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+# User/Group - runs as current user
+User=%i
+Group=%i
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/croc-gui %h/.config/croc-gui %h/Downloads
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+# Environment
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target
+

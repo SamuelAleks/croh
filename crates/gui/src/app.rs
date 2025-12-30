@@ -1,8 +1,9 @@
 //! Application state and callback handling.
 
 use croc_gui_core::{
-    croc::{CrocEvent, CrocOptions, CrocProcess},
-    files, Config, Transfer, TransferId, TransferManager, TransferStatus, TransferType,
+    config::Theme,
+    croc::{find_croc_executable, CrocEvent, CrocOptions, CrocProcess},
+    files, platform, Config, Transfer, TransferId, TransferManager, TransferStatus, TransferType,
 };
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
 use std::collections::HashMap;
@@ -11,7 +12,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
-use crate::{AppLogic, MainWindow, SelectedFile, TransferItem};
+use crate::{AppLogic, AppSettings, MainWindow, SelectedFile, TransferItem};
 
 /// Application state.
 pub struct App {
@@ -47,8 +48,52 @@ impl App {
 
     /// Set up all UI callbacks.
     pub fn setup_callbacks(&self, window: &MainWindow) {
+        // Initialize settings in UI
+        self.init_settings(window);
+        
         self.setup_file_callbacks(window);
         self.setup_transfer_callbacks(window);
+        self.setup_settings_callbacks(window);
+    }
+
+    /// Initialize settings in the UI.
+    fn init_settings(&self, _window: &MainWindow) {
+        let config = self.config.clone();
+        let window_weak = self.window.clone();
+
+        // Load settings synchronously for initial display
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            rt.block_on(async {
+                let config_guard = config.read().await;
+                
+                // Check if croc is found
+                let (croc_path, croc_found) = match find_croc_executable() {
+                    Ok(path) => (path.to_string_lossy().to_string(), true),
+                    Err(_) => ("Not found".to_string(), false),
+                };
+
+                let settings = AppSettings {
+                    download_dir: SharedString::from(config_guard.download_dir.to_string_lossy().to_string()),
+                    default_relay: SharedString::from(config_guard.default_relay.as_deref().unwrap_or("")),
+                    theme: SharedString::from(match config_guard.theme {
+                        Theme::System => "system",
+                        Theme::Light => "light",
+                        Theme::Dark => "dark",
+                    }),
+                    croc_path: SharedString::from(croc_path),
+                    croc_found: croc_found,
+                };
+
+                if let Some(window) = window_weak.upgrade() {
+                    window.global::<AppLogic>().set_settings(settings);
+                }
+            });
+        });
     }
 
     fn setup_file_callbacks(&self, window: &MainWindow) {
@@ -500,6 +545,55 @@ impl App {
             }
         });
 
+        // Copy code callback
+        window.global::<AppLogic>().on_copy_code({
+            let window_weak = window_weak.clone();
+
+            move |code| {
+                let code_str = code.to_string();
+                info!("Copying code to clipboard: {}", code_str);
+                
+                // Copy to clipboard using clipboard crate or platform-specific
+                #[cfg(target_os = "windows")]
+                {
+                    use std::process::Command;
+                    let _ = Command::new("cmd")
+                        .args(["/C", &format!("echo {}| clip", code_str)])
+                        .output();
+                }
+                
+                #[cfg(target_os = "macos")]
+                {
+                    use std::process::Command;
+                    let _ = Command::new("sh")
+                        .args(["-c", &format!("echo -n '{}' | pbcopy", code_str)])
+                        .output();
+                }
+                
+                #[cfg(target_os = "linux")]
+                {
+                    use std::process::Command;
+                    let _ = Command::new("sh")
+                        .args(["-c", &format!("echo -n '{}' | xclip -selection clipboard", code_str)])
+                        .output();
+                }
+                
+                // Update UI to show copied state
+                if let Some(window) = window_weak.upgrade() {
+                    window.global::<AppLogic>().set_copied_code(SharedString::from(code_str.clone()));
+                    
+                    // Clear after 2 seconds
+                    let window_weak = window_weak.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        if let Some(window) = window_weak.upgrade() {
+                            window.global::<AppLogic>().set_copied_code(SharedString::from(""));
+                        }
+                    });
+                }
+            }
+        });
+
         // Open folder callback
         window.global::<AppLogic>().on_open_folder({
             let config = config.clone();
@@ -519,11 +613,113 @@ impl App {
                         let download_dir = config_guard.download_dir.clone();
                         drop(config_guard);
 
-                        if let Err(e) = croc_gui_core::platform::open_in_explorer(&download_dir) {
+                        if let Err(e) = platform::open_in_explorer(&download_dir) {
                             error!("Failed to open folder: {}", e);
                         }
                     });
                 });
+            }
+        });
+    }
+
+    fn setup_settings_callbacks(&self, window: &MainWindow) {
+        let window_weak = self.window.clone();
+        let config = self.config.clone();
+
+        // Browse download directory
+        window.global::<AppLogic>().on_browse_download_dir({
+            let window_weak = window_weak.clone();
+            let config = config.clone();
+
+            move || {
+                let window_weak = window_weak.clone();
+                let config = config.clone();
+
+                std::thread::spawn(move || {
+                    let folder = rfd::FileDialog::new()
+                        .set_title("Select Download Directory")
+                        .pick_folder();
+
+                    if let Some(path) = folder {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .unwrap();
+
+                        rt.block_on(async {
+                            let mut config_guard = config.write().await;
+                            config_guard.download_dir = path.clone();
+                            drop(config_guard);
+
+                            // Update UI
+                            if let Some(window) = window_weak.upgrade() {
+                                let mut settings = window.global::<AppLogic>().get_settings();
+                                settings.download_dir = SharedString::from(path.to_string_lossy().to_string());
+                                window.global::<AppLogic>().set_settings(settings);
+                            }
+                        });
+                    }
+                });
+            }
+        });
+
+        // Save settings
+        window.global::<AppLogic>().on_save_settings({
+            let window_weak = window_weak.clone();
+            let config = config.clone();
+
+            move |download_dir, relay, theme| {
+                let download_dir = download_dir.to_string();
+                let relay = relay.to_string();
+                let theme = theme.to_string();
+                
+                info!("Saving settings: download_dir={}, relay={}, theme={}", download_dir, relay, theme);
+
+                let window_weak = window_weak.clone();
+                let config = config.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        let mut config_guard = config.write().await;
+                        
+                        config_guard.download_dir = PathBuf::from(&download_dir);
+                        config_guard.default_relay = if relay.is_empty() { None } else { Some(relay) };
+                        config_guard.theme = match theme.as_str() {
+                            "light" => Theme::Light,
+                            "dark" => Theme::Dark,
+                            _ => Theme::System,
+                        };
+
+                        // Save to file
+                        if let Err(e) = config_guard.save() {
+                            error!("Failed to save config: {}", e);
+                            update_status(&window_weak, &format!("Failed to save: {}", e));
+                        } else {
+                            info!("Settings saved successfully");
+                            update_status(&window_weak, "Settings saved");
+                        }
+                    });
+                });
+            }
+        });
+
+        // Open config folder
+        window.global::<AppLogic>().on_open_config_folder({
+            move || {
+                info!("Opening config folder");
+                let config_dir = platform::config_dir();
+                
+                // Ensure directory exists
+                let _ = std::fs::create_dir_all(&config_dir);
+                
+                if let Err(e) = platform::open_in_explorer(&config_dir) {
+                    error!("Failed to open config folder: {}", e);
+                }
             }
         });
     }
