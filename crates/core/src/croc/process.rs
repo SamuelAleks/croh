@@ -8,10 +8,13 @@ use super::{
 use crate::error::{Error, Result};
 use std::path::Path;
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 /// Events emitted by a croc process.
 #[derive(Debug, Clone)]
@@ -109,10 +112,27 @@ impl CrocProcess {
 
     /// Spawn the croc process and set up output monitoring.
     async fn spawn(mut cmd: Command) -> Result<(Self, CrocProcessHandle)> {
-        // Configure process
+        // Configure process stdio
         cmd.stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .stdin(Stdio::null());
+            .stderr(Stdio::piped());
+
+        // On Windows, we need special handling to prevent croc from waiting on stdin.
+        // We use DETACHED_PROCESS to create a new process group, which helps with
+        // stdin handling while still allowing network functionality.
+        // Note: CREATE_NO_WINDOW (0x08000000) breaks croc's local network discovery.
+        #[cfg(windows)]
+        {
+            // DETACHED_PROCESS = 0x00000008
+            // Creates a new process group without a console, but preserves networking.
+            const DETACHED_PROCESS: u32 = 0x00000008;
+            cmd.creation_flags(DETACHED_PROCESS);
+            cmd.stdin(Stdio::null());
+        }
+
+        #[cfg(not(windows))]
+        {
+            cmd.stdin(Stdio::null());
+        }
 
         info!("Spawning croc: {:?}", cmd);
 
@@ -125,7 +145,7 @@ impl CrocProcess {
         let (event_tx, event_rx) = mpsc::channel(100);
         let (handle_tx, handle_rx) = mpsc::channel(100);
 
-        // Take stdout/stderr
+        // Take stdout/stderr for monitoring
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
 
@@ -138,8 +158,7 @@ impl CrocProcess {
             let tx = event_tx.clone();
             let handle_tx = handle_tx.clone();
             tokio::spawn(async move {
-                let reader = BufReader::new(stdout);
-                read_lines_cr_lf(reader, tx, handle_tx, false).await;
+                read_lines_cr_lf(stdout, tx, handle_tx, false).await;
             });
         }
 
@@ -148,8 +167,7 @@ impl CrocProcess {
             let tx = event_tx.clone();
             let handle_tx = handle_tx;
             tokio::spawn(async move {
-                let reader = BufReader::new(stderr);
-                read_lines_cr_lf(reader, tx, handle_tx, true).await;
+                read_lines_cr_lf(stderr, tx, handle_tx, true).await;
             });
         }
 
@@ -200,40 +218,52 @@ impl CrocProcessHandle {
 
 /// Read lines from a reader, treating both \r and \n as line terminators.
 /// This is necessary because croc uses \r for progress updates.
-async fn read_lines_cr_lf<R: AsyncBufReadExt + Unpin>(
+async fn read_lines_cr_lf<R: AsyncReadExt + Unpin>(
     mut reader: R,
     tx: mpsc::Sender<CrocEvent>,
     handle_tx: mpsc::Sender<CrocEvent>,
     is_stderr: bool,
 ) {
+    let stream_name = if is_stderr { "stderr" } else { "stdout" };
+    info!("Starting to read from {}", stream_name);
+
     let mut line_buffer = String::with_capacity(256);
+    let mut read_buf = [0u8; 4096]; // Read in chunks to avoid blocking
+    let mut total_bytes_read: u64 = 0;
+    let mut read_count: u64 = 0;
 
     loop {
-        // Use fill_buf to get available data without blocking for a specific delimiter
-        let available = match reader.fill_buf().await {
-            Ok(buf) if buf.is_empty() => break, // EOF
-            Ok(buf) => buf.to_vec(),
-            Err(e) => {
-                debug!("Error reading: {}", e);
+        // Read available data - this won't block waiting for a specific amount
+        debug!("{}: Waiting for read...", stream_name);
+        match reader.read(&mut read_buf).await {
+            Ok(0) => {
+                info!("{}: EOF after {} bytes in {} reads", stream_name, total_bytes_read, read_count);
                 break;
             }
-        };
+            Ok(n) => {
+                total_bytes_read += n as u64;
+                read_count += 1;
+                debug!("{}: Read {} bytes (total: {})", stream_name, n, total_bytes_read);
 
-        let bytes_read = available.len();
-        reader.consume(bytes_read);
-
-        // Convert to string and process
-        if let Ok(chunk) = String::from_utf8(available) {
-            for ch in chunk.chars() {
-                if ch == '\r' || ch == '\n' {
-                    let line = line_buffer.trim();
-                    if !line.is_empty() {
-                        process_line(line, &tx, &handle_tx, is_stderr).await;
+                // Process the bytes we read, filtering out non-printable chars except newlines
+                for &byte in &read_buf[..n] {
+                    let ch = byte as char;
+                    if ch == '\r' || ch == '\n' {
+                        let line = line_buffer.trim();
+                        if !line.is_empty() {
+                            process_line(line, &tx, &handle_tx, is_stderr).await;
+                        }
+                        line_buffer.clear();
+                    } else if byte >= 32 && byte < 127 {
+                        // Only keep printable ASCII characters
+                        line_buffer.push(ch);
                     }
-                    line_buffer.clear();
-                } else {
-                    line_buffer.push(ch);
+                    // Skip ANSI escape codes and other control characters
                 }
+            }
+            Err(e) => {
+                error!("{}: Error reading: {}", stream_name, e);
+                break;
             }
         }
     }
@@ -241,8 +271,11 @@ async fn read_lines_cr_lf<R: AsyncBufReadExt + Unpin>(
     // Process any remaining data
     let line = line_buffer.trim();
     if !line.is_empty() {
+        info!("{}: Processing remaining buffer: {}", stream_name, line);
         process_line(line, &tx, &handle_tx, is_stderr).await;
     }
+
+    info!("{}: Reader finished", stream_name);
 }
 
 /// Process a single line and emit appropriate events.
