@@ -130,6 +130,18 @@ pub fn detect_error(line: &str) -> Option<String> {
         return Some("Permission denied".to_string());
     }
 
+    if lower.contains("room") && lower.contains("not ready") {
+        return Some("Connection failed - peer may have disconnected".to_string());
+    }
+
+    if lower.contains("peer disconnected") {
+        return Some("Peer disconnected".to_string());
+    }
+
+    if lower.contains("no peers found") {
+        return Some("No peers found".to_string());
+    }
+
     None
 }
 

@@ -85,6 +85,7 @@ export global AppLogic {
     callback start-send();
     callback start-receive(string);
     callback cancel-transfer(string);
+    callback remove-transfer(string);
     callback copy-code(string);
     callback open-folder(string);
     callback browse-download-dir();
@@ -345,11 +346,19 @@ component TransferCard inherits Rectangle {
                 }
             }
 
+            // Speed (if running and available)
+            if transfer.status == "running" && transfer.speed != "": Text {
+                text: transfer.speed;
+                font-size: 10px;
+                color: #888888;
+                vertical-alignment: center;
+            }
+
             // Progress % (if running)
             if transfer.status == "running": Text {
                 text: Math.round(transfer.progress) + "%";
                 font-size: 10px;
-                color: #666666;
+                color: transfer.progress > 0 ? Theme.accent : #666666;
                 vertical-alignment: center;
             }
 
@@ -371,18 +380,37 @@ component TransferCard inherits Rectangle {
                 icon-color: Theme.error;
                 clicked => { AppLogic.cancel-transfer(transfer.id); }
             }
+
+            // Remove button (if completed, failed, or cancelled)
+            if transfer.status == "completed" || transfer.status == "failed" || transfer.status == "cancelled": IconBtn {
+                icon: "×";
+                icon-color: Theme.text-muted;
+                clicked => { AppLogic.remove-transfer(transfer.id); }
+            }
         }
 
-        // Progress bar (thin)
-        if transfer.status == "running" && transfer.progress > 0: Rectangle {
-            height: 2px;
+        // Progress bar (thin) - always show when running
+        if transfer.status == "running": Rectangle {
+            height: 3px;
             background: #e0e0e0;
+            border-radius: 1px;
 
             Rectangle {
                 x: 0;
-                width: parent.width * (transfer.progress / 100.0);
+                width: transfer.progress > 0 ? parent.width * (transfer.progress / 100.0) : 0;
                 height: parent.height;
                 background: Theme.accent;
+                border-radius: 1px;
+            }
+
+            // Indeterminate animation indicator when progress is 0
+            if transfer.progress == 0: Rectangle {
+                x: mod(animation-tick() / 50ms, parent.width / 1px) * 1px;
+                width: 40px;
+                height: parent.height;
+                background: Theme.accent;
+                opacity: 0.5;
+                border-radius: 1px;
             }
         }
 

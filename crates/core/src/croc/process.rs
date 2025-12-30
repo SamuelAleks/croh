@@ -8,7 +8,7 @@ use super::{
 use crate::error::{Error, Result};
 use std::path::Path;
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -78,28 +78,30 @@ impl CrocProcess {
     pub async fn receive(
         code: &str,
         options: &CrocOptions,
-        working_dir: Option<&Path>,
+        output_dir: Option<&Path>,
     ) -> Result<(Self, CrocProcessHandle)> {
         let croc_path = find_croc_executable()?;
 
         let mut cmd = Command::new(&croc_path);
 
-        if let Some(dir) = working_dir {
-            cmd.current_dir(dir);
-        }
-
-        // Add global args (like --debug) before subcommand
+        // Add global args (like --debug) before the code
         for arg in options.to_global_args() {
             cmd.arg(arg);
         }
 
-        cmd.arg("receive");
-
-        // Add subcommand-specific options (includes --yes for auto-accept)
+        // Add receive-specific options as global args (--yes, --overwrite, --out are global)
         for arg in options.to_receive_args() {
             cmd.arg(arg);
         }
 
+        // Set output directory using --out flag (not current_dir)
+        if let Some(dir) = output_dir {
+            cmd.arg("--out");
+            cmd.arg(dir);
+        }
+
+        // Just pass the code - croc automatically knows it's a receive operation
+        // There is no "receive" subcommand in croc!
         cmd.arg(code);
 
         Self::spawn(cmd).await
@@ -131,75 +133,23 @@ impl CrocProcess {
         let _ = event_tx.send(CrocEvent::Started).await;
         let _ = handle_tx.send(CrocEvent::Started).await;
 
-        // Spawn task to monitor stdout
+        // Spawn task to monitor stdout - use CR/LF aware reading for progress
         if let Some(stdout) = stdout {
             let tx = event_tx.clone();
             let handle_tx = handle_tx.clone();
             tokio::spawn(async move {
                 let reader = BufReader::new(stdout);
-                let mut lines = reader.lines();
-
-                while let Ok(Some(line)) = lines.next_line().await {
-                    debug!("croc stdout: {}", line);
-                    let _ = tx.send(CrocEvent::Output(line.clone())).await;
-                    let _ = handle_tx.send(CrocEvent::Output(line.clone())).await;
-
-                    // Parse the line for events
-                    if let Some(code) = parse_code(&line) {
-                        let _ = tx.send(CrocEvent::CodeReady(code.clone())).await;
-                        let _ = handle_tx.send(CrocEvent::CodeReady(code)).await;
-                    }
-
-                    if let Some(progress) = parse_progress(&line) {
-                        let _ = tx.send(CrocEvent::Progress(progress.clone())).await;
-                        let _ = handle_tx.send(CrocEvent::Progress(progress)).await;
-                    }
-
-                    if detect_completion(&line) {
-                        let _ = tx.send(CrocEvent::Completed).await;
-                        let _ = handle_tx.send(CrocEvent::Completed).await;
-                    }
-
-                    if let Some(error) = detect_error(&line) {
-                        let _ = tx.send(CrocEvent::Failed(error.clone())).await;
-                        let _ = handle_tx.send(CrocEvent::Failed(error)).await;
-                    }
-                }
+                read_lines_cr_lf(reader, tx, handle_tx, false).await;
             });
         }
 
-        // Spawn task to monitor stderr
+        // Spawn task to monitor stderr - use CR/LF aware reading for progress
         if let Some(stderr) = stderr {
             let tx = event_tx.clone();
             let handle_tx = handle_tx;
             tokio::spawn(async move {
                 let reader = BufReader::new(stderr);
-                let mut lines = reader.lines();
-
-                while let Ok(Some(line)) = lines.next_line().await {
-                    debug!("croc stderr: {}", line);
-                    
-                    // Stderr often contains progress for croc
-                    if let Some(progress) = parse_progress(&line) {
-                        let _ = tx.send(CrocEvent::Progress(progress.clone())).await;
-                        let _ = handle_tx.send(CrocEvent::Progress(progress)).await;
-                    }
-
-                    if let Some(code) = parse_code(&line) {
-                        let _ = tx.send(CrocEvent::CodeReady(code.clone())).await;
-                        let _ = handle_tx.send(CrocEvent::CodeReady(code)).await;
-                    }
-
-                    if let Some(error) = detect_error(&line) {
-                        let _ = tx.send(CrocEvent::Failed(error.clone())).await;
-                        let _ = handle_tx.send(CrocEvent::Failed(error)).await;
-                    }
-
-                    if detect_completion(&line) {
-                        let _ = tx.send(CrocEvent::Completed).await;
-                        let _ = handle_tx.send(CrocEvent::Completed).await;
-                    }
-                }
+                read_lines_cr_lf(reader, tx, handle_tx, true).await;
             });
         }
 
@@ -245,6 +195,91 @@ impl CrocProcessHandle {
     /// Wait for the next event.
     pub async fn next_event(&mut self) -> Option<CrocEvent> {
         self.events.recv().await
+    }
+}
+
+/// Read lines from a reader, treating both \r and \n as line terminators.
+/// This is necessary because croc uses \r for progress updates.
+async fn read_lines_cr_lf<R: AsyncBufReadExt + Unpin>(
+    mut reader: R,
+    tx: mpsc::Sender<CrocEvent>,
+    handle_tx: mpsc::Sender<CrocEvent>,
+    is_stderr: bool,
+) {
+    let mut line_buffer = String::with_capacity(256);
+
+    loop {
+        // Use fill_buf to get available data without blocking for a specific delimiter
+        let available = match reader.fill_buf().await {
+            Ok(buf) if buf.is_empty() => break, // EOF
+            Ok(buf) => buf.to_vec(),
+            Err(e) => {
+                debug!("Error reading: {}", e);
+                break;
+            }
+        };
+
+        let bytes_read = available.len();
+        reader.consume(bytes_read);
+
+        // Convert to string and process
+        if let Ok(chunk) = String::from_utf8(available) {
+            for ch in chunk.chars() {
+                if ch == '\r' || ch == '\n' {
+                    let line = line_buffer.trim();
+                    if !line.is_empty() {
+                        process_line(line, &tx, &handle_tx, is_stderr).await;
+                    }
+                    line_buffer.clear();
+                } else {
+                    line_buffer.push(ch);
+                }
+            }
+        }
+    }
+
+    // Process any remaining data
+    let line = line_buffer.trim();
+    if !line.is_empty() {
+        process_line(line, &tx, &handle_tx, is_stderr).await;
+    }
+}
+
+/// Process a single line and emit appropriate events.
+async fn process_line(
+    line: &str,
+    tx: &mpsc::Sender<CrocEvent>,
+    handle_tx: &mpsc::Sender<CrocEvent>,
+    is_stderr: bool,
+) {
+    if is_stderr {
+        debug!("croc stderr: {}", line);
+    } else {
+        debug!("croc stdout: {}", line);
+    }
+
+    let _ = tx.send(CrocEvent::Output(line.to_string())).await;
+    let _ = handle_tx.send(CrocEvent::Output(line.to_string())).await;
+
+    // Parse the line for events
+    if let Some(code) = parse_code(line) {
+        let _ = tx.send(CrocEvent::CodeReady(code.clone())).await;
+        let _ = handle_tx.send(CrocEvent::CodeReady(code)).await;
+    }
+
+    if let Some(progress) = parse_progress(line) {
+        let _ = tx.send(CrocEvent::Progress(progress.clone())).await;
+        let _ = handle_tx.send(CrocEvent::Progress(progress)).await;
+    }
+
+    if detect_completion(line) {
+        let _ = tx.send(CrocEvent::Completed).await;
+        let _ = handle_tx.send(CrocEvent::Completed).await;
+    }
+
+    if let Some(error) = detect_error(line) {
+        let _ = tx.send(CrocEvent::Failed(error.clone())).await;
+        let _ = handle_tx.send(CrocEvent::Failed(error)).await;
     }
 }
 

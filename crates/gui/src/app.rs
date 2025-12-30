@@ -410,6 +410,59 @@ impl App {
                                     }
                                 }
 
+                                // Check if transfer completed via process exit
+                                let current_status = transfer_manager
+                                    .get(&transfer_id)
+                                    .await
+                                    .map(|t| t.status.clone());
+
+                                // If still running, check process exit status
+                                if current_status == Some(TransferStatus::Running) {
+                                    match process.wait().await {
+                                        Ok(status) if status.success() => {
+                                            info!("Send process exited successfully");
+                                            let _ = transfer_manager
+                                                .update(&transfer_id, |t| {
+                                                    t.status = TransferStatus::Completed;
+                                                    t.progress = 100.0;
+                                                    t.completed_at = Some(chrono::Utc::now());
+                                                })
+                                                .await;
+                                            update_status(&window_weak, "Transfer completed!");
+                                            update_transfers_ui(&window_weak, &transfer_manager).await;
+
+                                            // Clear selected files
+                                            let mut files_guard = selected_files.write().await;
+                                            files_guard.clear();
+                                            let _ = slint::invoke_from_event_loop({
+                                                let window_weak = window_weak.clone();
+                                                move || {
+                                                    if let Some(window) = window_weak.upgrade() {
+                                                        let model: ModelRc<SelectedFile> =
+                                                            ModelRc::new(VecModel::from(Vec::new()));
+                                                        window.global::<AppLogic>().set_selected_files(model);
+                                                    }
+                                                }
+                                            });
+                                        }
+                                        Ok(status) => {
+                                            warn!("Send process exited with status: {:?}", status);
+                                            let _ = transfer_manager
+                                                .update(&transfer_id, |t| {
+                                                    t.status = TransferStatus::Failed;
+                                                    t.error = Some("Transfer failed".to_string());
+                                                    t.completed_at = Some(chrono::Utc::now());
+                                                })
+                                                .await;
+                                            update_status(&window_weak, "Transfer failed");
+                                            update_transfers_ui(&window_weak, &transfer_manager).await;
+                                        }
+                                        Err(e) => {
+                                            error!("Failed to get process status: {}", e);
+                                        }
+                                    }
+                                }
+
                                 // Remove from active processes
                                 active_processes.write().await.remove(&id_str);
                             }
@@ -571,6 +624,45 @@ impl App {
                                     }
                                 }
 
+                                // Check if transfer completed via process exit
+                                let current_status = transfer_manager
+                                    .get(&transfer_id)
+                                    .await
+                                    .map(|t| t.status.clone());
+
+                                // If still running, check process exit status
+                                if current_status == Some(TransferStatus::Running) {
+                                    match process.wait().await {
+                                        Ok(status) if status.success() => {
+                                            info!("Receive process exited successfully");
+                                            let _ = transfer_manager
+                                                .update(&transfer_id, |t| {
+                                                    t.status = TransferStatus::Completed;
+                                                    t.progress = 100.0;
+                                                    t.completed_at = Some(chrono::Utc::now());
+                                                })
+                                                .await;
+                                            update_status(&window_weak, "Receive completed!");
+                                            update_transfers_ui(&window_weak, &transfer_manager).await;
+                                        }
+                                        Ok(status) => {
+                                            warn!("Receive process exited with status: {:?}", status);
+                                            let _ = transfer_manager
+                                                .update(&transfer_id, |t| {
+                                                    t.status = TransferStatus::Failed;
+                                                    t.error = Some("Transfer failed".to_string());
+                                                    t.completed_at = Some(chrono::Utc::now());
+                                                })
+                                                .await;
+                                            update_status(&window_weak, "Receive failed");
+                                            update_transfers_ui(&window_weak, &transfer_manager).await;
+                                        }
+                                        Err(e) => {
+                                            error!("Failed to get process status: {}", e);
+                                        }
+                                    }
+                                }
+
                                 // Remove from active processes
                                 active_processes.write().await.remove(&id_str);
                             }
@@ -627,6 +719,33 @@ impl App {
                             .await;
 
                         update_status(&window_weak, "Transfer cancelled");
+                        update_transfers_ui(&window_weak, &transfer_manager).await;
+                    });
+                });
+            }
+        });
+
+        // Remove transfer callback
+        window.global::<AppLogic>().on_remove_transfer({
+            let transfer_manager = transfer_manager.clone();
+            let window_weak = window_weak.clone();
+
+            move |id| {
+                let id_str = id.to_string();
+                info!("Remove transfer requested: {}", id_str);
+
+                let transfer_manager = transfer_manager.clone();
+                let window_weak = window_weak.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        let transfer_id = TransferId(id_str);
+                        let _ = transfer_manager.remove(&transfer_id).await;
                         update_transfers_ui(&window_weak, &transfer_manager).await;
                     });
                 });
@@ -880,7 +999,10 @@ impl App {
 
 /// Update the transfers list in the UI.
 async fn update_transfers_ui(window_weak: &Weak<MainWindow>, manager: &TransferManager) {
-    let transfers = manager.list().await;
+    let mut transfers = manager.list().await;
+
+    // Sort by started_at descending (newest first)
+    transfers.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
     let items: Vec<TransferItem> = transfers
         .iter()
