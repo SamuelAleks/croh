@@ -90,9 +90,15 @@ pub fn detect_completion(line: &str) -> bool {
 /// Detect if an error occurred.
 pub fn detect_error(line: &str) -> Option<String> {
     let lower = line.to_lowercase();
-    
-    // Common error patterns
-    if lower.contains("error") {
+
+    // Ignore debug lines - they often contain "error" in normal debug output
+    // Debug lines look like: [debug] timestamp file.go:line: message
+    if lower.starts_with("[debug]") || lower.contains("].go:") {
+        return None;
+    }
+
+    // Common error patterns - be more specific than just "error"
+    if lower.contains("error:") || lower.contains("error connecting") || lower.contains("transfer error") {
         return Some(line.to_string());
     }
     
@@ -214,6 +220,10 @@ mod tests {
         assert!(detect_error("Error: connection failed").is_some());
         assert!(detect_error("incorrect code phrase").is_some());
         assert!(detect_error("sending file...").is_none());
+
+        // Debug lines should be ignored even if they contain "error"
+        assert!(detect_error("[debug] 15:26:50 compress.go:50: error copying data: unexpected EOF").is_none());
+        assert!(detect_error("[debug] croc.go:1506: problem with decoding").is_none());
     }
 
     #[test]

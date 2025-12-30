@@ -53,9 +53,15 @@ impl CrocProcess {
         let croc_path = find_croc_executable()?;
 
         let mut cmd = Command::new(&croc_path);
+
+        // Add global args (like --debug) before subcommand
+        for arg in options.to_global_args() {
+            cmd.arg(arg);
+        }
+
         cmd.arg("send");
 
-        // Add options
+        // Add subcommand-specific options
         for arg in options.to_send_args() {
             cmd.arg(arg);
         }
@@ -77,18 +83,23 @@ impl CrocProcess {
         let croc_path = find_croc_executable()?;
 
         let mut cmd = Command::new(&croc_path);
-        
+
         if let Some(dir) = working_dir {
             cmd.current_dir(dir);
         }
-        
-        cmd.arg("--yes"); // Auto-accept
-        
-        // Add options
+
+        // Add global args (like --debug) before subcommand
+        for arg in options.to_global_args() {
+            cmd.arg(arg);
+        }
+
+        cmd.arg("receive");
+
+        // Add subcommand-specific options (includes --yes for auto-accept)
         for arg in options.to_receive_args() {
             cmd.arg(arg);
         }
-        
+
         cmd.arg(code);
 
         Self::spawn(cmd).await

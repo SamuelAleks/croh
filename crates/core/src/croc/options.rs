@@ -69,6 +69,9 @@ pub struct CrocOptions {
 
     /// Overwrite existing files without prompting (receive only).
     pub overwrite: bool,
+
+    /// Enable debug/verbose output from croc.
+    pub debug: bool,
 }
 
 impl CrocOptions {
@@ -119,6 +122,12 @@ impl CrocOptions {
         self
     }
 
+    /// Enable debug output.
+    pub fn with_debug(mut self, debug: bool) -> Self {
+        self.debug = debug;
+        self
+    }
+
     /// Convert options to command-line arguments for send command.
     pub fn to_send_args(&self) -> Vec<String> {
         let mut args = Vec::new();
@@ -126,6 +135,11 @@ impl CrocOptions {
         if let Some(ref code) = self.code {
             args.push("--code".to_string());
             args.push(code.clone());
+        }
+
+        // --no-local is send-only
+        if self.no_local {
+            args.push("--no-local".to_string());
         }
 
         self.add_common_args(&mut args);
@@ -168,10 +182,17 @@ impl CrocOptions {
             args.push("--relay".to_string());
             args.push(relay.clone());
         }
+    }
 
-        if self.no_local {
-            args.push("--no-local".to_string());
+    /// Get global arguments that must come before the subcommand.
+    pub fn to_global_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+
+        if self.debug {
+            args.push("--debug".to_string());
         }
+
+        args
     }
 }
 

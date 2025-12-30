@@ -2,7 +2,7 @@
 
 use croc_gui_core::{
     config::Theme,
-    croc::{find_croc_executable, CrocEvent, CrocOptions, CrocProcess},
+    croc::{find_croc_executable, refresh_croc_cache, CrocEvent, CrocOptions, CrocProcess},
     files, platform, Config, Transfer, TransferId, TransferManager, TransferStatus, TransferType,
 };
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
@@ -61,7 +61,7 @@ impl App {
         let config = self.config.clone();
         let window_weak = self.window.clone();
 
-        // Load settings synchronously for initial display
+        // Load settings in background thread
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -70,28 +70,36 @@ impl App {
 
             rt.block_on(async {
                 let config_guard = config.read().await;
-                
+
                 // Check if croc is found
                 let (croc_path, croc_found) = match find_croc_executable() {
                     Ok(path) => (path.to_string_lossy().to_string(), true),
                     Err(_) => ("Not found".to_string(), false),
                 };
 
-                let settings = AppSettings {
-                    download_dir: SharedString::from(config_guard.download_dir.to_string_lossy().to_string()),
-                    default_relay: SharedString::from(config_guard.default_relay.as_deref().unwrap_or("")),
-                    theme: SharedString::from(match config_guard.theme {
-                        Theme::System => "system",
-                        Theme::Light => "light",
-                        Theme::Dark => "dark",
-                    }),
-                    croc_path: SharedString::from(croc_path),
-                    croc_found: croc_found,
+                let download_dir = config_guard.download_dir.to_string_lossy().to_string();
+                let default_relay = config_guard.default_relay.clone().unwrap_or_default();
+                let theme = match config_guard.theme {
+                    Theme::System => "system",
+                    Theme::Light => "light",
+                    Theme::Dark => "dark",
                 };
 
-                if let Some(window) = window_weak.upgrade() {
-                    window.global::<AppLogic>().set_settings(settings);
-                }
+                drop(config_guard);
+
+                // Update UI on main thread
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(window) = window_weak.upgrade() {
+                        let settings = AppSettings {
+                            download_dir: SharedString::from(download_dir),
+                            default_relay: SharedString::from(default_relay),
+                            theme: SharedString::from(theme),
+                            croc_path: SharedString::from(croc_path),
+                            croc_found,
+                        };
+                        window.global::<AppLogic>().set_settings(settings);
+                    }
+                });
             });
         });
     }
@@ -145,12 +153,26 @@ impl App {
                         rt.block_on(async {
                             let mut files_guard = selected_files.write().await;
                             files_guard.extend(new_files);
+                            // Convert to sendable data
+                            let files_data: Vec<_> = files_guard.iter().map(|f| {
+                                (f.name.clone(), files::format_size(f.size), f.path.clone())
+                            }).collect();
+                            drop(files_guard);
 
                             // Update UI on main thread
-                            if let Some(window) = window_weak.upgrade() {
-                                let model = files_to_model(&files_guard);
-                                window.global::<AppLogic>().set_selected_files(model);
-                            }
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(window) = window_weak.upgrade() {
+                                    let items: Vec<SelectedFile> = files_data.into_iter()
+                                        .map(|(name, size, path)| SelectedFile {
+                                            name: SharedString::from(name),
+                                            size: SharedString::from(size),
+                                            path: SharedString::from(path),
+                                        })
+                                        .collect();
+                                    let model = ModelRc::new(VecModel::from(items));
+                                    window.global::<AppLogic>().set_selected_files(model);
+                                }
+                            });
                         });
                     }
                 });
@@ -166,20 +188,25 @@ impl App {
                 let selected_files = selected_files.clone();
                 let window_weak = window_weak.clone();
 
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
 
-                rt.block_on(async {
-                    let mut files_guard = selected_files.write().await;
-                    files_guard.clear();
+                    rt.block_on(async {
+                        let mut files_guard = selected_files.write().await;
+                        files_guard.clear();
+                        drop(files_guard);
 
-                    if let Some(window) = window_weak.upgrade() {
-                        let model: ModelRc<SelectedFile> =
-                            ModelRc::new(VecModel::from(Vec::new()));
-                        window.global::<AppLogic>().set_selected_files(model);
-                    }
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(window) = window_weak.upgrade() {
+                                let model: ModelRc<SelectedFile> =
+                                    ModelRc::new(VecModel::from(Vec::new()));
+                                window.global::<AppLogic>().set_selected_files(model);
+                            }
+                        });
+                    });
                 });
             }
         });
@@ -194,21 +221,37 @@ impl App {
                 let window_weak = window_weak.clone();
                 let index = index as usize;
 
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
 
-                rt.block_on(async {
-                    let mut files_guard = selected_files.write().await;
-                    if index < files_guard.len() {
-                        files_guard.remove(index);
+                    rt.block_on(async {
+                        let mut files_guard = selected_files.write().await;
+                        if index < files_guard.len() {
+                            files_guard.remove(index);
+                            // Convert to sendable data
+                            let files_data: Vec<_> = files_guard.iter().map(|f| {
+                                (f.name.clone(), files::format_size(f.size), f.path.clone())
+                            }).collect();
+                            drop(files_guard);
 
-                        if let Some(window) = window_weak.upgrade() {
-                            let model = files_to_model(&files_guard);
-                            window.global::<AppLogic>().set_selected_files(model);
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(window) = window_weak.upgrade() {
+                                    let items: Vec<SelectedFile> = files_data.into_iter()
+                                        .map(|(name, size, path)| SelectedFile {
+                                            name: SharedString::from(name),
+                                            size: SharedString::from(size),
+                                            path: SharedString::from(path),
+                                        })
+                                        .collect();
+                                    let model = ModelRc::new(VecModel::from(items));
+                                    window.global::<AppLogic>().set_selected_files(model);
+                                }
+                            });
                         }
-                    }
+                    });
                 });
             }
         });
@@ -227,6 +270,7 @@ impl App {
             let selected_files = selected_files.clone();
             let transfer_manager = transfer_manager.clone();
             let active_processes = active_processes.clone();
+            let config = config.clone();
 
             move || {
                 info!("Start send requested");
@@ -234,6 +278,7 @@ impl App {
                 let selected_files = selected_files.clone();
                 let transfer_manager = transfer_manager.clone();
                 let active_processes = active_processes.clone();
+                let config = config.clone();
 
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
@@ -269,8 +314,17 @@ impl App {
                         update_transfers_ui(&window_weak, &transfer_manager).await;
                         update_status(&window_weak, "Starting send...");
 
-                        // Start croc process
-                        let options = CrocOptions::new();
+                        // Start croc process with relay from config
+                        let config_guard = config.read().await;
+                        let mut options = CrocOptions::new();
+                        if let Some(ref relay) = config_guard.default_relay {
+                            if !relay.is_empty() {
+                                info!("Using custom relay: {}", relay);
+                                options = options.with_relay(relay.clone());
+                            }
+                        }
+                        drop(config_guard);
+
                         match CrocProcess::send(&file_paths, &options).await {
                             Ok((mut process, _handle)) => {
                                 let id_str = transfer_id.to_string();
@@ -399,9 +453,10 @@ impl App {
                         .unwrap();
 
                     rt.block_on(async {
-                        // Get download directory
+                        // Get download directory and relay from config
                         let config_guard = config.read().await;
                         let download_dir = config_guard.download_dir.clone();
+                        let default_relay = config_guard.default_relay.clone();
                         drop(config_guard);
 
                         // Ensure download directory exists
@@ -410,6 +465,32 @@ impl App {
                             update_status(&window_weak, &format!("Error: {}", e));
                             return;
                         }
+
+                        // Canonicalize the path to ensure it's valid
+                        let download_dir = match std::fs::canonicalize(&download_dir) {
+                            Ok(p) => {
+                                // On Windows, canonicalize returns paths with \\?\ prefix
+                                // which can cause issues with some programs. Strip it if present.
+                                #[cfg(target_os = "windows")]
+                                {
+                                    let path_str = p.to_string_lossy();
+                                    if path_str.starts_with(r"\\?\") {
+                                        PathBuf::from(&path_str[4..])
+                                    } else {
+                                        p
+                                    }
+                                }
+                                #[cfg(not(target_os = "windows"))]
+                                p
+                            }
+                            Err(e) => {
+                                error!("Failed to canonicalize download dir: {}", e);
+                                update_status(&window_weak, &format!("Invalid path: {}", e));
+                                return;
+                            }
+                        };
+
+                        info!("Using download directory: {:?}", download_dir);
 
                         // Create transfer
                         let mut transfer = Transfer::new_receive(code.clone());
@@ -425,8 +506,15 @@ impl App {
                         update_transfers_ui(&window_weak, &transfer_manager).await;
                         update_status(&window_weak, "Receiving...");
 
-                        // Start croc process
-                        let options = CrocOptions::new();
+                        // Start croc process with relay from config
+                        let mut options = CrocOptions::new();
+                        if let Some(ref relay) = default_relay {
+                            if !relay.is_empty() {
+                                info!("Using custom relay: {}", relay);
+                                options = options.with_relay(relay.clone());
+                            }
+                        }
+
                         match CrocProcess::receive(&code, &options, Some(&download_dir)).await {
                             Ok((mut process, _handle)) => {
                                 let id_str = transfer_id.to_string();
@@ -713,30 +801,81 @@ impl App {
             move || {
                 info!("Opening config folder");
                 let config_dir = platform::config_dir();
-                
+
                 // Ensure directory exists
                 let _ = std::fs::create_dir_all(&config_dir);
-                
+
                 if let Err(e) = platform::open_in_explorer(&config_dir) {
                     error!("Failed to open config folder: {}", e);
                 }
             }
         });
+
+        // Refresh croc detection
+        window.global::<AppLogic>().on_refresh_croc({
+            let window_weak = window_weak.clone();
+
+            move || {
+                info!("Refreshing croc detection");
+                let window_weak = window_weak.clone();
+
+                std::thread::spawn(move || {
+                    // Clear cache and re-detect
+                    let (croc_path, croc_found) = match refresh_croc_cache() {
+                        Ok(path) => (path.to_string_lossy().to_string(), true),
+                        Err(_) => ("Not found".to_string(), false),
+                    };
+
+                    let croc_path_clone = croc_path.clone();
+
+                    // Use invoke_from_event_loop to update UI on main thread
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(window) = window_weak.upgrade() {
+                            let mut settings = window.global::<AppLogic>().get_settings();
+                            settings.croc_path = SharedString::from(croc_path_clone);
+                            settings.croc_found = croc_found;
+                            window.global::<AppLogic>().set_settings(settings);
+
+                            if croc_found {
+                                window.global::<AppLogic>().set_app_status(SharedString::from("Croc found!"));
+                            } else {
+                                window.global::<AppLogic>().set_app_status(SharedString::from("Croc not found"));
+                            }
+                        }
+                    });
+                });
+            }
+        });
+
+        // Install croc - open GitHub releases page
+        window.global::<AppLogic>().on_install_croc({
+            move || {
+                info!("Opening croc releases page");
+                let url = "https://github.com/schollz/croc/releases";
+
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = std::process::Command::new("cmd")
+                        .args(["/C", "start", "", url])
+                        .spawn();
+                }
+
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = std::process::Command::new("open")
+                        .arg(url)
+                        .spawn();
+                }
+
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = std::process::Command::new("xdg-open")
+                        .arg(url)
+                        .spawn();
+                }
+            }
+        });
     }
-}
-
-/// Convert internal file data to Slint model.
-fn files_to_model(files: &[SelectedFileData]) -> ModelRc<SelectedFile> {
-    let items: Vec<SelectedFile> = files
-        .iter()
-        .map(|f| SelectedFile {
-            name: SharedString::from(&f.name),
-            size: SharedString::from(files::format_size(f.size)),
-            path: SharedString::from(&f.path),
-        })
-        .collect();
-
-    ModelRc::new(VecModel::from(items))
 }
 
 /// Update the transfers list in the UI.
@@ -766,18 +905,25 @@ async fn update_transfers_ui(window_weak: &Weak<MainWindow>, manager: &TransferM
         })
         .collect();
 
-    if let Some(window) = window_weak.upgrade() {
-        window
-            .global::<AppLogic>()
-            .set_transfers(ModelRc::new(VecModel::from(items)));
-    }
+    let window_weak = window_weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(window) = window_weak.upgrade() {
+            window
+                .global::<AppLogic>()
+                .set_transfers(ModelRc::new(VecModel::from(items)));
+        }
+    });
 }
 
 /// Update the status bar.
 fn update_status(window_weak: &Weak<MainWindow>, status: &str) {
-    if let Some(window) = window_weak.upgrade() {
-        window
-            .global::<AppLogic>()
-            .set_app_status(SharedString::from(status));
-    }
+    let window_weak = window_weak.clone();
+    let status = status.to_string();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(window) = window_weak.upgrade() {
+            window
+                .global::<AppLogic>()
+                .set_app_status(SharedString::from(status));
+        }
+    });
 }

@@ -11,7 +11,7 @@ mod options;
 mod output;
 mod process;
 
-pub use executable::find_croc_executable;
+pub use executable::{find_croc_executable, refresh_croc_cache};
 pub use options::{CrocOptions, Curve, HashAlgorithm, validate_croc_code};
 pub use output::{parse_code, parse_progress, detect_completion, detect_error, Progress};
 pub use process::{CrocProcess, CrocProcessHandle, CrocEvent};

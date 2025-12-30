@@ -49,15 +49,27 @@ impl Config {
 
         if config_path.exists() {
             let contents = std::fs::read_to_string(&config_path)?;
-            let config: Config = serde_json::from_str(&contents)?;
+            let mut config: Config = serde_json::from_str(&contents)?;
+            config.fix_invalid_values();
             Ok(config)
         } else {
             Ok(Config::default())
         }
     }
 
+    /// Fix any invalid or empty values with sensible defaults.
+    fn fix_invalid_values(&mut self) {
+        // If download_dir is empty, use the default
+        if self.download_dir.as_os_str().is_empty() {
+            self.download_dir = platform::default_download_dir();
+        }
+    }
+
     /// Save configuration to the default config file.
-    pub fn save(&self) -> Result<()> {
+    pub fn save(&mut self) -> Result<()> {
+        // Fix any invalid values before saving
+        self.fix_invalid_values();
+
         let config_path = platform::config_file_path();
 
         // Ensure parent directory exists
