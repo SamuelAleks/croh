@@ -120,3 +120,5 @@ echo
 echo "Configuration: $CONFIG_DIR/config.json"
 echo "Data directory: $DATA_DIR"
 
+
+

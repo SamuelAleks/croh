@@ -73,3 +73,5 @@ if ($RemoveData) {
 Write-Host ""
 Write-Host "Uninstallation complete." -ForegroundColor Green
 
+
+
