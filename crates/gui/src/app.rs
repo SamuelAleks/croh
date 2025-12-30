@@ -2,7 +2,7 @@
 
 use croc_gui_core::{
     config::Theme,
-    croc::{find_croc_executable, refresh_croc_cache, CrocEvent, CrocOptions, CrocProcess},
+    croc::{find_croc_executable, refresh_croc_cache, CrocEvent, CrocOptions, CrocProcess, HashAlgorithm},
     files, platform, Config, Transfer, TransferId, TransferManager, TransferStatus, TransferType,
 };
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
@@ -317,6 +317,14 @@ impl App {
                         // Start croc process with relay from config
                         let config_guard = config.read().await;
                         let mut options = CrocOptions::new();
+
+                        // On Windows, use imohash to work around a bug in the winget croc binary
+                        // that causes hashing to freeze at 50% for larger files.
+                        #[cfg(windows)]
+                        {
+                            options = options.with_hash(HashAlgorithm::Imohash);
+                        }
+
                         if let Some(ref relay) = config_guard.default_relay {
                             if !relay.is_empty() {
                                 info!("Using custom relay: {}", relay);
