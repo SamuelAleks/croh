@@ -306,6 +306,17 @@ async fn process_line(
     }
 
     if detect_completion(line) {
+        // Send a 100% progress event first, then completion
+        // This ensures the UI shows full progress before marking complete
+        let final_progress = Progress {
+            percentage: 100.0,
+            speed: String::new(),
+            current_file: None,
+            bytes_transferred: None,
+            total_bytes: None,
+        };
+        let _ = tx.send(CrocEvent::Progress(final_progress.clone())).await;
+        let _ = handle_tx.send(CrocEvent::Progress(final_progress)).await;
         let _ = tx.send(CrocEvent::Completed).await;
         let _ = handle_tx.send(CrocEvent::Completed).await;
     }

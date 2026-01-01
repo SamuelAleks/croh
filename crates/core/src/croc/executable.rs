@@ -184,10 +184,10 @@ fn find_exe_recursive(dir: &PathBuf, exe_name: &str, depth: u32) -> Option<PathB
 
 #[cfg(target_os = "linux")]
 fn find_in_common_locations() -> Option<PathBuf> {
-    let locations = [
-        PathBuf::from("/usr/bin/croc"),
-        PathBuf::from("/usr/local/bin/croc"),
-        PathBuf::from("/snap/bin/croc"),
+    let locations: [Option<PathBuf>; 6] = [
+        Some(PathBuf::from("/usr/bin/croc")),
+        Some(PathBuf::from("/usr/local/bin/croc")),
+        Some(PathBuf::from("/snap/bin/croc")),
         dirs::home_dir().map(|h| h.join(".local").join("bin").join("croc")),
         dirs::home_dir().map(|h| h.join("bin").join("croc")),
         dirs::home_dir().map(|h| h.join("go").join("bin").join("croc")),

@@ -81,10 +81,13 @@ pub fn parse_code(line: &str) -> Option<String> {
 /// Detect if the transfer has completed successfully.
 pub fn detect_completion(line: &str) -> bool {
     let lower = line.to_lowercase();
-    lower.contains("file(s) sent") 
+    lower.contains("file(s) sent")
         || lower.contains("file(s) received")
         || lower.contains("sent ")  // "Sent filename.txt"
         || (lower.contains("received") && lower.contains("written"))
+        || lower.contains("transfer complete")
+        || (lower.contains("100%") && lower.contains("done"))
+        || lower.contains("successfully")
 }
 
 /// Detect if an error occurred.

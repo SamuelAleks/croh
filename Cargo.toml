@@ -47,6 +47,9 @@ regex = "1.11"
 # Cross-platform directories
 dirs = "5.0"
 
+# Clipboard
+arboard = "3.4"
+
 # Internal crates
 croc-gui-core = { path = "crates/core" }
 

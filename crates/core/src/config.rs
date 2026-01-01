@@ -1,5 +1,6 @@
 //! Configuration management for Croc GUI.
 
+use crate::croc::{Curve, HashAlgorithm};
 use crate::error::Result;
 use crate::platform;
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,22 @@ pub struct Config {
 
     /// Path to croc executable (None = auto-detect).
     pub croc_path: Option<PathBuf>,
+
+    /// Default hash algorithm for file verification.
+    #[serde(default)]
+    pub default_hash: Option<HashAlgorithm>,
+
+    /// Default elliptic curve for PAKE encryption.
+    #[serde(default)]
+    pub default_curve: Option<Curve>,
+
+    /// Bandwidth throttle limit (e.g., "1M", "500K").
+    #[serde(default)]
+    pub throttle: Option<String>,
+
+    /// Force relay-only transfers (disable local network).
+    #[serde(default)]
+    pub no_local: bool,
 }
 
 impl Default for Config {
@@ -38,6 +55,10 @@ impl Default for Config {
             default_relay: None,
             theme: Theme::default(),
             croc_path: None,
+            default_hash: None,
+            default_curve: None,
+            throttle: None,
+            no_local: false,
         }
     }
 }

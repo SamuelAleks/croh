@@ -129,6 +129,7 @@ impl CrocOptions {
     }
 
     /// Convert options to command-line arguments for send command.
+    /// These come AFTER the "send" subcommand.
     pub fn to_send_args(&self) -> Vec<String> {
         let mut args = Vec::new();
 
@@ -142,11 +143,17 @@ impl CrocOptions {
             args.push("--no-local".to_string());
         }
 
-        self.add_common_args(&mut args);
+        // --hash is send-only (not a global option)
+        if let Some(ref hash) = self.hash {
+            args.push("--hash".to_string());
+            args.push(hash.as_str().to_string());
+        }
+
         args
     }
 
     /// Convert options to command-line arguments for receive command.
+    /// These are global args that come BEFORE the code.
     pub fn to_receive_args(&self) -> Vec<String> {
         let mut args = Vec::new();
 
@@ -157,39 +164,31 @@ impl CrocOptions {
             args.push("--overwrite".to_string());
         }
 
-        self.add_common_args(&mut args);
         args
     }
 
-    /// Add common arguments shared between send and receive.
-    fn add_common_args(&self, args: &mut Vec<String>) {
+    /// Get global arguments that must come before the subcommand.
+    /// These include --curve, --relay, --throttleUpload, --debug, etc.
+    pub fn to_global_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+
+        if self.debug {
+            args.push("--debug".to_string());
+        }
+
         if let Some(ref curve) = self.curve {
             args.push("--curve".to_string());
             args.push(curve.as_str().to_string());
         }
 
-        if let Some(ref hash) = self.hash {
-            args.push("--hash".to_string());
-            args.push(hash.as_str().to_string());
-        }
-
         if let Some(ref throttle) = self.throttle {
-            args.push("--throttle".to_string());
+            args.push("--throttleUpload".to_string());
             args.push(throttle.clone());
         }
 
         if let Some(ref relay) = self.relay {
             args.push("--relay".to_string());
             args.push(relay.clone());
-        }
-    }
-
-    /// Get global arguments that must come before the subcommand.
-    pub fn to_global_args(&self) -> Vec<String> {
-        let mut args = Vec::new();
-
-        if self.debug {
-            args.push("--debug".to_string());
         }
 
         args
@@ -237,28 +236,43 @@ mod tests {
     fn test_send_args() {
         let opts = CrocOptions::new()
             .with_code("my-custom-code")
-            .with_curve(Curve::P256)
+            .with_hash(HashAlgorithm::Imohash)
             .with_no_local(true);
 
         let args = opts.to_send_args();
         assert!(args.contains(&"--code".to_string()));
         assert!(args.contains(&"my-custom-code".to_string()));
-        assert!(args.contains(&"--curve".to_string()));
-        assert!(args.contains(&"p256".to_string()));
+        assert!(args.contains(&"--hash".to_string()));
+        assert!(args.contains(&"imohash".to_string()));
         assert!(args.contains(&"--no-local".to_string()));
     }
 
     #[test]
     fn test_receive_args() {
         let opts = CrocOptions::new()
-            .with_overwrite(true)
-            .with_relay("relay.example.com");
+            .with_overwrite(true);
 
         let args = opts.to_receive_args();
         assert!(args.contains(&"--yes".to_string()));
         assert!(args.contains(&"--overwrite".to_string()));
+    }
+
+    #[test]
+    fn test_global_args() {
+        let opts = CrocOptions::new()
+            .with_curve(Curve::P256)
+            .with_relay("relay.example.com")
+            .with_throttle("1M")
+            .with_debug(true);
+
+        let args = opts.to_global_args();
+        assert!(args.contains(&"--curve".to_string()));
+        assert!(args.contains(&"p256".to_string()));
         assert!(args.contains(&"--relay".to_string()));
         assert!(args.contains(&"relay.example.com".to_string()));
+        assert!(args.contains(&"--throttleUpload".to_string()));
+        assert!(args.contains(&"1M".to_string()));
+        assert!(args.contains(&"--debug".to_string()));
     }
 }
 

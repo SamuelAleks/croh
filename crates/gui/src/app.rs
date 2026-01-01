@@ -2,7 +2,7 @@
 
 use croc_gui_core::{
     config::Theme,
-    croc::{find_croc_executable, refresh_croc_cache, CrocEvent, CrocOptions, CrocProcess, HashAlgorithm},
+    croc::{find_croc_executable, refresh_croc_cache, Curve, CrocEvent, CrocOptions, CrocProcess, HashAlgorithm},
     files, platform, Config, Transfer, TransferId, TransferManager, TransferStatus, TransferType,
 };
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
@@ -85,6 +85,16 @@ impl App {
                     Theme::Dark => "dark",
                 };
 
+                // Transfer options
+                let hash_algorithm = config_guard.default_hash
+                    .map(|h| h.as_str().to_string())
+                    .unwrap_or_default();
+                let curve = config_guard.default_curve
+                    .map(|c| c.as_str().to_string())
+                    .unwrap_or_default();
+                let throttle = config_guard.throttle.clone().unwrap_or_default();
+                let no_local = config_guard.no_local;
+
                 drop(config_guard);
 
                 // Update UI on main thread
@@ -96,6 +106,10 @@ impl App {
                             theme: SharedString::from(theme),
                             croc_path: SharedString::from(croc_path),
                             croc_found,
+                            hash_algorithm: SharedString::from(hash_algorithm),
+                            curve: SharedString::from(curve),
+                            throttle: SharedString::from(throttle),
+                            no_local,
                         };
                         window.global::<AppLogic>().set_settings(settings);
                     }
@@ -272,8 +286,9 @@ impl App {
             let active_processes = active_processes.clone();
             let config = config.clone();
 
-            move || {
-                info!("Start send requested");
+            move |custom_code| {
+                let custom_code = custom_code.to_string();
+                info!("Start send requested with custom_code: {:?}", if custom_code.is_empty() { "auto" } else { &custom_code });
                 let window_weak = window_weak.clone();
                 let selected_files = selected_files.clone();
                 let transfer_manager = transfer_manager.clone();
@@ -314,17 +329,37 @@ impl App {
                         update_transfers_ui(&window_weak, &transfer_manager).await;
                         update_status(&window_weak, "Starting send...");
 
-                        // Start croc process with relay from config
+                        // Start croc process with options from config
                         let config_guard = config.read().await;
                         let mut options = CrocOptions::new();
 
-                        // On Windows, use imohash to work around a bug in the winget croc binary
-                        // that causes hashing to freeze at 50% for larger files.
-                        #[cfg(windows)]
-                        {
-                            options = options.with_hash(HashAlgorithm::Imohash);
+                        // Apply custom code if provided
+                        if !custom_code.is_empty() {
+                            options = options.with_code(custom_code);
                         }
 
+                        // Apply hash algorithm from config, default to md5 (xxhash can hang on large files)
+                        let hash = config_guard.default_hash.unwrap_or(HashAlgorithm::Md5);
+                        options = options.with_hash(hash);
+
+                        // Apply curve from config
+                        if let Some(curve) = config_guard.default_curve {
+                            options = options.with_curve(curve);
+                        }
+
+                        // Apply throttle from config
+                        if let Some(ref throttle) = config_guard.throttle {
+                            if !throttle.is_empty() {
+                                options = options.with_throttle(throttle.clone());
+                            }
+                        }
+
+                        // Apply no-local from config
+                        if config_guard.no_local {
+                            options = options.with_no_local(true);
+                        }
+
+                        // Apply relay from config
                         if let Some(ref relay) = config_guard.default_relay {
                             if !relay.is_empty() {
                                 info!("Using custom relay: {}", relay);
@@ -567,14 +602,34 @@ impl App {
                         update_transfers_ui(&window_weak, &transfer_manager).await;
                         update_status(&window_weak, "Receiving...");
 
-                        // Start croc process with relay from config
+                        // Start croc process with options from config
+                        let config_guard = config.read().await;
                         let mut options = CrocOptions::new();
+
+                        // Apply hash algorithm from config, default to md5 (xxhash can hang on large files)
+                        let hash = config_guard.default_hash.unwrap_or(HashAlgorithm::Md5);
+                        options = options.with_hash(hash);
+
+                        // Apply curve from config
+                        if let Some(curve) = config_guard.default_curve {
+                            options = options.with_curve(curve);
+                        }
+
+                        // Apply throttle from config
+                        if let Some(ref throttle) = config_guard.throttle {
+                            if !throttle.is_empty() {
+                                options = options.with_throttle(throttle.clone());
+                            }
+                        }
+
+                        // Apply relay from config
                         if let Some(ref relay) = default_relay {
                             if !relay.is_empty() {
                                 info!("Using custom relay: {}", relay);
                                 options = options.with_relay(relay.clone());
                             }
                         }
+                        drop(config_guard);
 
                         match CrocProcess::receive(&code, &options, Some(&download_dir)).await {
                             Ok((mut process, _handle)) => {
@@ -767,37 +822,33 @@ impl App {
             move |code| {
                 let code_str = code.to_string();
                 info!("Copying code to clipboard: {}", code_str);
-                
-                // Copy to clipboard using platform-specific methods
-                #[cfg(target_os = "windows")]
-                {
-                    use std::process::Command;
-                    // Use PowerShell's Set-Clipboard to avoid newline issues with echo
-                    let _ = Command::new("powershell")
-                        .args(["-Command", &format!("Set-Clipboard -Value '{}'", code_str)])
-                        .output();
-                }
-                
-                #[cfg(target_os = "macos")]
-                {
-                    use std::process::Command;
-                    let _ = Command::new("sh")
-                        .args(["-c", &format!("echo -n '{}' | pbcopy", code_str)])
-                        .output();
-                }
-                
-                #[cfg(target_os = "linux")]
-                {
-                    use std::process::Command;
-                    let _ = Command::new("sh")
-                        .args(["-c", &format!("echo -n '{}' | xclip -selection clipboard", code_str)])
-                        .output();
-                }
-                
+
+                // Spawn a thread to handle clipboard - on Linux/Wayland, clipboard content
+                // is only available while the source process holds it, so we need to keep
+                // the clipboard alive for a bit
+                let code_for_clipboard = code_str.clone();
+                std::thread::spawn(move || {
+                    match arboard::Clipboard::new() {
+                        Ok(mut clipboard) => {
+                            if let Err(e) = clipboard.set_text(&code_for_clipboard) {
+                                error!("Failed to copy to clipboard: {}", e);
+                            } else {
+                                // Keep clipboard alive for 30 seconds on Linux/Wayland
+                                // This allows time for user to paste
+                                #[cfg(target_os = "linux")]
+                                std::thread::sleep(std::time::Duration::from_secs(30));
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to access clipboard: {}", e);
+                        }
+                    }
+                });
+
                 // Update UI to show copied state
                 if let Some(window) = window_weak.upgrade() {
                     window.global::<AppLogic>().set_copied_code(SharedString::from(code_str.clone()));
-                    
+
                     // Clear after 2 seconds
                     let window_weak = window_weak.clone();
                     std::thread::spawn(move || {
@@ -884,12 +935,16 @@ impl App {
             let window_weak = window_weak.clone();
             let config = config.clone();
 
-            move |download_dir, relay, theme| {
+            move |download_dir, relay, theme, hash, curve, throttle, no_local| {
                 let download_dir = download_dir.to_string();
                 let relay = relay.to_string();
                 let theme = theme.to_string();
-                
-                info!("Saving settings: download_dir={}, relay={}, theme={}", download_dir, relay, theme);
+                let hash = hash.to_string();
+                let curve = curve.to_string();
+                let throttle = throttle.to_string();
+
+                info!("Saving settings: download_dir={}, relay={}, theme={}, hash={}, curve={}, throttle={}, no_local={}",
+                      download_dir, relay, theme, hash, curve, throttle, no_local);
 
                 let window_weak = window_weak.clone();
                 let config = config.clone();
@@ -902,7 +957,7 @@ impl App {
 
                     rt.block_on(async {
                         let mut config_guard = config.write().await;
-                        
+
                         config_guard.download_dir = PathBuf::from(&download_dir);
                         config_guard.default_relay = if relay.is_empty() { None } else { Some(relay) };
                         config_guard.theme = match theme.as_str() {
@@ -910,6 +965,23 @@ impl App {
                             "dark" => Theme::Dark,
                             _ => Theme::System,
                         };
+
+                        // Save transfer options
+                        config_guard.default_hash = match hash.as_str() {
+                            "xxhash" => Some(HashAlgorithm::Xxhash),
+                            "imohash" => Some(HashAlgorithm::Imohash),
+                            "md5" => Some(HashAlgorithm::Md5),
+                            _ => None,
+                        };
+                        config_guard.default_curve = match curve.as_str() {
+                            "siec" => Some(Curve::Siec),
+                            "p256" => Some(Curve::P256),
+                            "p384" => Some(Curve::P384),
+                            "p521" => Some(Curve::P521),
+                            _ => None,
+                        };
+                        config_guard.throttle = if throttle.is_empty() { None } else { Some(throttle) };
+                        config_guard.no_local = no_local;
 
                         // Save to file
                         if let Err(e) = config_guard.save() {

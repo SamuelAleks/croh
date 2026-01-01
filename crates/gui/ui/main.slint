@@ -72,6 +72,11 @@ export struct AppSettings {
     theme: string,
     croc-path: string,
     croc-found: bool,
+    // Transfer options
+    hash-algorithm: string,  // "xxhash", "imohash", "md5", or "" for default
+    curve: string,           // "siec", "p256", "p384", "p521", or "" for default
+    throttle: string,        // bandwidth limit e.g. "1M", "500K", or "" for unlimited
+    no-local: bool,          // force relay-only transfers
 }
 
 // ============================================================================
@@ -82,18 +87,19 @@ export global AppLogic {
     callback browse-files();
     callback clear-files();
     callback remove-file(int);
-    callback start-send();
+    callback start-send(string);  // custom code phrase (empty = auto-generate)
     callback start-receive(string);
     callback cancel-transfer(string);
     callback remove-transfer(string);
     callback copy-code(string);
     callback open-folder(string);
     callback browse-download-dir();
-    callback save-settings(string, string, string);
+    // save-settings: download-dir, relay, theme, hash, curve, throttle, no-local
+    callback save-settings(string, string, string, string, string, string, bool);
     callback open-config-folder();
     callback refresh-croc();
     callback install-croc();
-    
+
     in property <[SelectedFile]> selected-files: [];
     in property <[TransferItem]> transfers: [];
     in property <string> app-status: "Ready";
@@ -104,6 +110,10 @@ export global AppLogic {
         theme: "dark",
         croc-path: "",
         croc-found: false,
+        hash-algorithm: "",
+        curve: "",
+        throttle: "",
+        no-local: false,
     };
 }
 
@@ -597,6 +607,8 @@ component PillTabs inherits Rectangle {
 // ============================================================================
 
 component SendPanel inherits Rectangle {
+    in-out property <string> custom-code: "";
+
     background: Theme.bg-dark;
 
     VerticalBox {
@@ -658,6 +670,26 @@ component SendPanel inherits Rectangle {
                     }
                 }
 
+                // Custom code input (optional)
+                HorizontalLayout {
+                    spacing: 6px;
+                    padding-top: 4px;
+
+                    Text {
+                        text: "Code:";
+                        font-size: 11px;
+                        color: #666666;
+                        vertical-alignment: center;
+                    }
+
+                    LineEdit {
+                        horizontal-stretch: 1;
+                        text <=> custom-code;
+                        placeholder-text: "auto-generate";
+                        font-size: 11px;
+                    }
+                }
+
                 HorizontalLayout {
                     spacing: Theme.spacing-sm;
                     padding-top: 4px;
@@ -673,7 +705,10 @@ component SendPanel inherits Rectangle {
                         label: "Send";
                         primary: true;
                         enabled: AppLogic.selected-files.length > 0;
-                        clicked => { AppLogic.start-send(); }
+                        clicked => {
+                            AppLogic.start-send(custom-code);
+                            custom-code = "";
+                        }
                     }
                 }
             }
@@ -774,6 +809,14 @@ component SettingsPanel inherits Rectangle {
     in-out property <string> download-dir: AppLogic.settings.download-dir;
     in-out property <string> relay: AppLogic.settings.default-relay;
     in-out property <int> theme-idx: AppLogic.settings.theme == "light" ? 1 : AppLogic.settings.theme == "dark" ? 2 : 0;
+    // Transfer options
+    in-out property <int> hash-idx: AppLogic.settings.hash-algorithm == "imohash" ? 1 :
+                                     AppLogic.settings.hash-algorithm == "md5" ? 2 : 0;
+    in-out property <int> curve-idx: AppLogic.settings.curve == "p256" ? 1 :
+                                      AppLogic.settings.curve == "p384" ? 2 :
+                                      AppLogic.settings.curve == "p521" ? 3 : 0;
+    in-out property <string> throttle: AppLogic.settings.throttle;
+    in-out property <bool> no-local: AppLogic.settings.no-local;
 
     background: Theme.bg-dark;
 
@@ -809,6 +852,75 @@ component SettingsPanel inherits Rectangle {
                         width: 160px;
                         text <=> relay;
                         placeholder-text: "relay.example.com";
+                        font-size: 12px;
+                    }
+                }
+
+                SettingRow {
+                    label: "Force Relay Only";
+                    sublabel: "Disable local network transfers";
+
+                    Rectangle {
+                        width: 40px;
+                        height: 22px;
+                        border-radius: 11px;
+                        background: no-local ? Theme.accent : Theme.bg-hover;
+                        border-width: 1px;
+                        border-color: Theme.border;
+
+                        toggle-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { no-local = !no-local; }
+                        }
+
+                        Rectangle {
+                            x: no-local ? parent.width - self.width - 2px : 2px;
+                            y: 2px;
+                            width: 18px;
+                            height: 18px;
+                            border-radius: 9px;
+                            background: #ffffff;
+
+                            animate x { duration: 150ms; easing: ease-out; }
+                        }
+                    }
+                }
+            }
+
+            // Transfer Options
+            Section {
+                title: "Transfer Options";
+
+                SettingRow {
+                    label: "Hash Algorithm";
+                    sublabel: "File verification method";
+
+                    ComboBox {
+                        width: 110px;
+                        model: ["xxhash", "imohash", "md5"];
+                        current-index <=> hash-idx;
+                    }
+                }
+
+                SettingRow {
+                    label: "Encryption Curve";
+                    sublabel: "PAKE elliptic curve";
+
+                    ComboBox {
+                        width: 110px;
+                        model: ["siec", "p256", "p384", "p521"];
+                        current-index <=> curve-idx;
+                    }
+                }
+
+                SettingRow {
+                    label: "Bandwidth Limit";
+                    sublabel: "e.g. 1M, 500K (empty = unlimited)";
+
+                    LineEdit {
+                        width: 110px;
+                        text <=> throttle;
+                        placeholder-text: "unlimited";
                         font-size: 12px;
                     }
                 }
@@ -889,7 +1001,11 @@ component SettingsPanel inherits Rectangle {
                         AppLogic.save-settings(
                             download-dir,
                             relay,
-                            theme-idx == 0 ? "system" : theme-idx == 1 ? "light" : "dark"
+                            theme-idx == 0 ? "system" : theme-idx == 1 ? "light" : "dark",
+                            hash-idx == 0 ? "xxhash" : hash-idx == 1 ? "imohash" : "md5",
+                            curve-idx == 0 ? "siec" : curve-idx == 1 ? "p256" : curve-idx == 2 ? "p384" : "p521",
+                            throttle,
+                            no-local
                         );
                     }
                 }

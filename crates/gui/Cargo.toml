@@ -28,6 +28,9 @@ anyhow = { workspace = true }
 # Date/time
 chrono = { workspace = true }
 
+# Clipboard
+arboard = { workspace = true }
+
 [build-dependencies]
 slint-build = "1.9"
 
