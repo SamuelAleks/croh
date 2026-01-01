@@ -1,0 +1,281 @@
+//! Iroh endpoint wrapper for managing peer connections.
+//!
+//! Provides a managed Iroh endpoint with protocol handler registration
+//! and connection lifecycle management.
+
+use crate::error::{Error, Result};
+use crate::iroh::identity::Identity;
+use crate::iroh::protocol::{ControlMessage, ALPN_CONTROL};
+use iroh::{Endpoint, NodeId, RelayMode, RelayUrl};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::AsyncWriteExt;
+use tracing::{debug, info, warn};
+
+/// Default timeout for connection attempts.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Maximum message size (1MB).
+const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
+
+/// Wrapper around an Iroh endpoint with control protocol support.
+#[derive(Clone)]
+pub struct IrohEndpoint {
+    endpoint: Endpoint,
+    identity: Arc<Identity>,
+}
+
+impl IrohEndpoint {
+    /// Create a new Iroh endpoint from an identity.
+    pub async fn new(identity: Identity) -> Result<Self> {
+        let secret_key = identity.secret_key().clone();
+
+        let endpoint = Endpoint::builder()
+            .secret_key(secret_key)
+            .alpns(vec![ALPN_CONTROL.to_vec()])
+            .relay_mode(RelayMode::Default)
+            .bind()
+            .await
+            .map_err(|e| Error::Iroh(format!("failed to create endpoint: {}", e)))?;
+
+        info!(
+            "Iroh endpoint created with node_id: {}",
+            endpoint.node_id()
+        );
+
+        Ok(Self {
+            endpoint,
+            identity: Arc::new(identity),
+        })
+    }
+
+    /// Get the node ID (endpoint ID) as a string.
+    pub fn endpoint_id(&self) -> String {
+        self.endpoint.node_id().to_string()
+    }
+
+    /// Get the node ID.
+    pub fn node_id(&self) -> NodeId {
+        self.endpoint.node_id()
+    }
+
+    /// Get the identity associated with this endpoint.
+    pub fn identity(&self) -> &Identity {
+        &self.identity
+    }
+
+    /// Get the relay URL if connected to a relay.
+    pub fn relay_url(&self) -> Option<RelayUrl> {
+        self.endpoint.home_relay().get().ok().flatten()
+    }
+
+    /// Connect to a remote peer by node ID string.
+    pub async fn connect(&self, remote_id: &str) -> Result<ControlConnection> {
+        let node_id: NodeId = remote_id
+            .parse()
+            .map_err(|e| Error::Iroh(format!("invalid node_id: {}", e)))?;
+
+        self.connect_to_node(node_id).await
+    }
+
+    /// Connect to a remote peer by NodeId.
+    pub async fn connect_to_node(&self, node_id: NodeId) -> Result<ControlConnection> {
+        debug!("Connecting to node: {}", node_id);
+
+        let conn = tokio::time::timeout(CONNECT_TIMEOUT, self.endpoint.connect(node_id, ALPN_CONTROL))
+            .await
+            .map_err(|_| Error::Iroh("connection timeout".to_string()))?
+            .map_err(|e| Error::Iroh(format!("connection failed: {}", e)))?;
+
+        info!("Connected to node: {}", node_id);
+
+        let (send, recv) = conn
+            .open_bi()
+            .await
+            .map_err(|e| Error::Iroh(format!("failed to open stream: {}", e)))?;
+
+        Ok(ControlConnection {
+            remote_id: node_id,
+            send,
+            recv,
+        })
+    }
+
+    /// Accept an incoming connection.
+    pub async fn accept(&self) -> Result<ControlConnection> {
+        let incoming = self
+            .endpoint
+            .accept()
+            .await
+            .ok_or_else(|| Error::Iroh("endpoint closed".to_string()))?;
+
+        let conn = incoming
+            .await
+            .map_err(|e| Error::Iroh(format!("failed to accept connection: {}", e)))?;
+
+        let remote_id = conn
+            .remote_node_id()
+            .map_err(|e| Error::Iroh(format!("failed to get remote node id: {}", e)))?;
+        info!("Accepted connection from: {}", remote_id);
+
+        let alpn = conn.alpn();
+        if alpn.as_deref() != Some(ALPN_CONTROL) {
+            warn!("Unknown ALPN: {:?}", alpn);
+            return Err(Error::Iroh(format!("unknown ALPN: {:?}", alpn)));
+        }
+
+        let (send, recv) = conn
+            .accept_bi()
+            .await
+            .map_err(|e| Error::Iroh(format!("failed to accept stream: {}", e)))?;
+
+        Ok(ControlConnection {
+            remote_id,
+            send,
+            recv,
+        })
+    }
+
+    /// Close the endpoint gracefully.
+    pub async fn close(&self) {
+        self.endpoint.close().await;
+        info!("Iroh endpoint closed");
+    }
+
+    /// Check if the endpoint is still running.
+    pub fn is_closed(&self) -> bool {
+        self.endpoint.is_closed()
+    }
+}
+
+/// A bidirectional connection for sending/receiving control messages.
+pub struct ControlConnection {
+    remote_id: NodeId,
+    send: iroh::endpoint::SendStream,
+    recv: iroh::endpoint::RecvStream,
+}
+
+impl ControlConnection {
+    /// Get the remote node ID.
+    pub fn remote_id(&self) -> NodeId {
+        self.remote_id
+    }
+
+    /// Get the remote node ID as a string.
+    pub fn remote_id_string(&self) -> String {
+        self.remote_id.to_string()
+    }
+
+    /// Send a control message.
+    pub async fn send(&mut self, msg: &ControlMessage) -> Result<()> {
+        let encoded = msg.encode()?;
+        self.send
+            .write_all(&encoded)
+            .await
+            .map_err(|e| Error::Iroh(format!("send failed: {}", e)))?;
+        self.send
+            .flush()
+            .await
+            .map_err(|e| Error::Iroh(format!("flush failed: {}", e)))?;
+        Ok(())
+    }
+
+    /// Receive a control message.
+    pub async fn recv(&mut self) -> Result<ControlMessage> {
+        // Read 4-byte length prefix
+        let mut len_buf = [0u8; 4];
+        self.recv
+            .read_exact(&mut len_buf)
+            .await
+            .map_err(|e| Error::Iroh(format!("recv length failed: {}", e)))?;
+
+        let len = u32::from_be_bytes(len_buf);
+        if len > MAX_MESSAGE_SIZE {
+            return Err(Error::Iroh(format!("message too large: {} bytes", len)));
+        }
+
+        // Read message body
+        let mut buf = vec![0u8; len as usize];
+        self.recv
+            .read_exact(&mut buf)
+            .await
+            .map_err(|e| Error::Iroh(format!("recv body failed: {}", e)))?;
+
+        ControlMessage::decode(&buf)
+    }
+
+    /// Close the connection gracefully.
+    pub async fn close(mut self) -> Result<()> {
+        self.send
+            .finish()
+            .map_err(|e| Error::Iroh(format!("finish failed: {}", e)))?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_endpoint_creation() {
+        let identity = Identity::generate("Test Device".to_string()).unwrap();
+        let endpoint = IrohEndpoint::new(identity).await.unwrap();
+
+        assert!(!endpoint.endpoint_id().is_empty());
+        assert!(!endpoint.is_closed());
+
+        endpoint.close().await;
+        assert!(endpoint.is_closed());
+    }
+
+    #[tokio::test]
+    async fn test_endpoint_connection() {
+        // Create two endpoints
+        let identity1 = Identity::generate("Device 1".to_string()).unwrap();
+        let identity2 = Identity::generate("Device 2".to_string()).unwrap();
+
+        let ep1 = IrohEndpoint::new(identity1).await.unwrap();
+        let ep2 = IrohEndpoint::new(identity2).await.unwrap();
+
+        let ep1_id = ep1.endpoint_id();
+        let ep2_id = ep2.endpoint_id();
+
+        // Spawn acceptor
+        let accept_handle = tokio::spawn(async move {
+            let mut conn = ep1.accept().await.unwrap();
+            let msg = conn.recv().await.unwrap();
+            match msg {
+                ControlMessage::Ping { timestamp } => {
+                    conn.send(&ControlMessage::Pong { timestamp }).await.unwrap();
+                }
+                _ => panic!("unexpected message"),
+            }
+            conn.close().await.unwrap();
+            ep1
+        });
+
+        // Give acceptor time to start
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Connect and send ping
+        let mut conn = ep2.connect(&ep1_id).await.unwrap();
+        conn.send(&ControlMessage::Ping { timestamp: 12345 }).await.unwrap();
+
+        // Receive pong
+        let msg = conn.recv().await.unwrap();
+        match msg {
+            ControlMessage::Pong { timestamp } => assert_eq!(timestamp, 12345),
+            _ => panic!("unexpected message"),
+        }
+
+        conn.close().await.unwrap();
+
+        // Wait for acceptor to finish
+        let ep1 = accept_handle.await.unwrap();
+
+        // Cleanup
+        ep1.close().await;
+        ep2.close().await;
+    }
+}

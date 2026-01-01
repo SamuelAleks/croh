@@ -32,3 +32,18 @@ regex = { workspace = true }
 # Cross-platform directories
 dirs = { workspace = true }
 
+# Iroh networking for trusted peers
+iroh = { workspace = true }
+
+# Random for nonce generation
+rand = "0.8"
+
+# Hex encoding for keys
+hex = "0.4"
+
+# Hostname detection
+hostname = "0.4"
+
+[dev-dependencies]
+tempfile = "3.14"
+

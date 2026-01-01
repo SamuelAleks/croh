@@ -17,6 +17,9 @@ repository = "https://github.com/croc-gui/croc-gui"
 # Async runtime
 tokio = { version = "1.43", features = ["full"] }
 
+# Iroh networking for trusted peers
+iroh = "0.32"
+
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

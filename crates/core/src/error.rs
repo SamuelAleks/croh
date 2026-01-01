@@ -40,6 +40,22 @@ pub enum Error {
     /// Configuration error
     #[error("configuration error: {0}")]
     Config(String),
+
+    /// Iroh networking error
+    #[error("iroh error: {0}")]
+    Iroh(String),
+
+    /// Identity error
+    #[error("identity error: {0}")]
+    Identity(String),
+
+    /// Trust error
+    #[error("trust error: {0}")]
+    Trust(String),
+
+    /// Peer error
+    #[error("peer error: {0}")]
+    Peer(String),
 }
 
 /// Result type alias using our Error type.
