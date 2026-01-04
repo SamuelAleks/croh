@@ -1312,6 +1312,11 @@ impl App {
                         // Use md5 hash (more reliable)
                         options = options.with_hash(HashAlgorithm::Md5);
 
+                        // Apply curve from config (must match receiver's curve)
+                        if let Some(curve) = config_guard.default_curve {
+                            options = options.with_curve(curve);
+                        }
+
                         // Apply relay from config
                         if let Some(ref relay) = config_guard.default_relay {
                             if !relay.is_empty() {
