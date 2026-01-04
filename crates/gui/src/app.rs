@@ -3,8 +3,8 @@
 use croc_gui_core::{
     config::Theme,
     croc::{find_croc_executable, refresh_croc_cache, Curve, CrocEvent, CrocOptions, CrocProcess, HashAlgorithm},
-    files, platform, Config, Identity, PeerStore, Transfer, TransferId, TransferManager,
-    TransferStatus, TransferType, TrustBundle,
+    files, platform, Config, ControlMessage, Identity, IrohEndpoint, PeerStore, Permissions,
+    Transfer, TransferId, TransferManager, TransferStatus, TransferType, TrustedPeer, TrustBundle,
 };
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
 use std::collections::HashMap;
@@ -369,6 +369,8 @@ impl App {
         let transfer_manager = self.transfer_manager.clone();
         let active_processes = self.active_processes.clone();
         let config = self.config.clone();
+        let identity = self.identity.clone();
+        let peer_store = self.peer_store.clone();
 
         // Start send callback
         window.global::<AppLogic>().on_start_send({
@@ -624,6 +626,8 @@ impl App {
             let transfer_manager = transfer_manager.clone();
             let active_processes = active_processes.clone();
             let config = config.clone();
+            let identity = identity.clone();
+            let peer_store = peer_store.clone();
 
             move |code| {
                 let code = code.to_string();
@@ -633,6 +637,8 @@ impl App {
                 let transfer_manager = transfer_manager.clone();
                 let active_processes = active_processes.clone();
                 let config = config.clone();
+                let identity = identity.clone();
+                let peer_store = peer_store.clone();
 
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
@@ -799,6 +805,9 @@ impl App {
                                                 .await;
                                             update_status(&window_weak, "Receive completed!");
                                             update_transfers_ui(&window_weak, &transfer_manager).await;
+
+                                            // Check for trust bundles in received files
+                                            check_and_handle_trust_bundle(&download_dir, &window_weak, &identity, &peer_store).await;
                                         }
                                         Ok(status) => {
                                             warn!("Receive process exited with status: {:?}", status);
@@ -1182,6 +1191,7 @@ impl App {
             let identity = identity.clone();
             let trust_in_progress = trust_in_progress.clone();
             let config = config.clone();
+            let peer_store = peer_store.clone();
 
             move || {
                 info!("Initiating trust...");
@@ -1189,6 +1199,7 @@ impl App {
                 let identity = identity.clone();
                 let trust_in_progress = trust_in_progress.clone();
                 let config = config.clone();
+                let peer_store = peer_store.clone();
 
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
@@ -1285,14 +1296,87 @@ impl App {
                                             update_status(&window_weak, &format!("Share code: {}", code));
                                         }
                                         Some(CrocEvent::Completed) => {
-                                            info!("Trust bundle sent successfully");
-                                            update_status(&window_weak, "Trust bundle sent, waiting for peer...");
-                                            // Keep trust in progress - handshake happens via Iroh
-                                            // For now, just reset since we don't have handshake yet
+                                            info!("Trust bundle sent successfully, starting Iroh endpoint for handshake");
+                                            update_status(&window_weak, "Trust bundle sent, waiting for peer to connect...");
+
+                                            // Create Iroh endpoint and wait for handshake
+                                            let id_clone = id.clone();
+                                            let bundle_nonce = bundle.nonce.clone();
+
+                                            match IrohEndpoint::new(id_clone).await {
+                                                Ok(endpoint) => {
+                                                    info!("Iroh endpoint ready, waiting for incoming connection");
+
+                                                    // Wait for incoming connection with timeout
+                                                    let handshake_result = tokio::time::timeout(
+                                                        std::time::Duration::from_secs(120), // 2 minute timeout
+                                                        wait_for_trust_handshake(&endpoint, &bundle_nonce, &peer_store)
+                                                    ).await;
+
+                                                    match handshake_result {
+                                                        Ok(Ok(peer)) => {
+                                                            info!("Trust established with {}", peer.name);
+                                                            update_status(&window_weak, &format!("Trusted peer added: {}", peer.name));
+
+                                                            // Update peers UI
+                                                            let peers = peer_store.read().await;
+                                                            let peer_items: Vec<_> = peers.list().iter().map(|p| {
+                                                                let last_seen = p.last_seen
+                                                                    .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                                                                    .unwrap_or_else(|| "Never".to_string());
+                                                                (
+                                                                    p.id.clone(),
+                                                                    p.name.clone(),
+                                                                    if p.endpoint_id.len() > 16 {
+                                                                        format!("{}...{}", &p.endpoint_id[..8], &p.endpoint_id[p.endpoint_id.len()-8..])
+                                                                    } else {
+                                                                        p.endpoint_id.clone()
+                                                                    },
+                                                                    "offline".to_string(),
+                                                                    last_seen,
+                                                                )
+                                                            }).collect();
+                                                            drop(peers);
+
+                                                            let window_weak_peers = window_weak.clone();
+                                                            let _ = slint::invoke_from_event_loop(move || {
+                                                                if let Some(window) = window_weak_peers.upgrade() {
+                                                                    let items: Vec<PeerItem> = peer_items.into_iter()
+                                                                        .map(|(id, name, endpoint_id, status, last_seen)| PeerItem {
+                                                                            id: SharedString::from(id),
+                                                                            name: SharedString::from(name),
+                                                                            endpoint_id: SharedString::from(endpoint_id),
+                                                                            status: SharedString::from(status),
+                                                                            last_seen: SharedString::from(last_seen),
+                                                                        })
+                                                                        .collect();
+                                                                    window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));
+                                                                }
+                                                            });
+                                                        }
+                                                        Ok(Err(e)) => {
+                                                            error!("Handshake failed: {}", e);
+                                                            update_status(&window_weak, &format!("Handshake failed: {}", e));
+                                                        }
+                                                        Err(_) => {
+                                                            warn!("Handshake timed out");
+                                                            update_status(&window_weak, "Timed out waiting for peer");
+                                                        }
+                                                    }
+
+                                                    endpoint.close().await;
+                                                }
+                                                Err(e) => {
+                                                    error!("Failed to create Iroh endpoint: {}", e);
+                                                    update_status(&window_weak, &format!("Network error: {}", e));
+                                                }
+                                            }
+
+                                            // Reset trust in progress
                                             *trust_in_progress.write().await = false;
-                                            let window_weak = window_weak.clone();
+                                            let window_weak_done = window_weak.clone();
                                             let _ = slint::invoke_from_event_loop(move || {
-                                                if let Some(window) = window_weak.upgrade() {
+                                                if let Some(window) = window_weak_done.upgrade() {
                                                     window.global::<AppLogic>().set_trust_in_progress(false);
                                                     window.global::<AppLogic>().set_trust_code(SharedString::from(""));
                                                 }
@@ -1502,4 +1586,221 @@ fn update_status(window_weak: &Weak<MainWindow>, status: &str) {
                 .set_app_status(SharedString::from(status));
         }
     });
+}
+
+/// Check for trust bundles in a directory and handle them.
+async fn check_and_handle_trust_bundle(
+    download_dir: &PathBuf,
+    window_weak: &Weak<MainWindow>,
+    identity: &Arc<RwLock<Option<Identity>>>,
+    peer_store: &Arc<RwLock<PeerStore>>,
+) {
+    use croc_gui_core::complete_trust_as_receiver;
+
+    // Look for trust bundle files
+    let bundle_files: Vec<_> = match std::fs::read_dir(download_dir) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|n| TrustBundle::is_trust_bundle_filename(n))
+                    .unwrap_or(false)
+            })
+            .collect(),
+        Err(e) => {
+            error!("Failed to read download dir: {}", e);
+            return;
+        }
+    };
+
+    if bundle_files.is_empty() {
+        return;
+    }
+
+    info!("Found {} potential trust bundle(s)", bundle_files.len());
+
+    for entry in bundle_files {
+        let path = entry.path();
+        let bundle = match TrustBundle::load(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("Failed to load trust bundle {:?}: {}", path, e);
+                continue;
+            }
+        };
+
+        info!("Processing trust bundle from {}", bundle.sender.name);
+
+        // Check if expired
+        if !bundle.is_valid() {
+            warn!("Trust bundle from {} has expired", bundle.sender.name);
+            update_status(window_weak, &format!("Trust bundle from {} expired", bundle.sender.name));
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+
+        update_status(window_weak, &format!("Trust request from {}...", bundle.sender.name));
+
+        // Get our identity
+        let our_identity = {
+            let id_guard = identity.read().await;
+            match id_guard.as_ref() {
+                Some(id) => id.clone(),
+                None => {
+                    error!("No identity available for trust handshake");
+                    update_status(window_weak, "Error: No identity available");
+                    let _ = std::fs::remove_file(&path);
+                    continue;
+                }
+            }
+        };
+
+        // Create Iroh endpoint and connect back
+        let endpoint = match IrohEndpoint::new(our_identity.clone()).await {
+            Ok(ep) => ep,
+            Err(e) => {
+                error!("Failed to create Iroh endpoint: {}", e);
+                update_status(window_weak, &format!("Network error: {}", e));
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
+        };
+
+        update_status(window_weak, &format!("Connecting to {}...", bundle.sender.name));
+
+        // Perform the handshake as receiver
+        match complete_trust_as_receiver(&endpoint, &bundle, &our_identity).await {
+            Ok(result) => {
+                info!("Trust established with {}", result.peer.name);
+                update_status(window_weak, &format!("Trusted peer added: {}", result.peer.name));
+
+                // Add to peer store
+                let mut store = peer_store.write().await;
+                if let Err(e) = store.add(result.peer.clone()) {
+                    error!("Failed to save peer: {}", e);
+                } else {
+                    // Update peers UI
+                    let peer_items: Vec<_> = store.list().iter().map(|p| {
+                        let last_seen = p.last_seen
+                            .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                            .unwrap_or_else(|| "Never".to_string());
+                        (
+                            p.id.clone(),
+                            p.name.clone(),
+                            if p.endpoint_id.len() > 16 {
+                                format!("{}...{}", &p.endpoint_id[..8], &p.endpoint_id[p.endpoint_id.len()-8..])
+                            } else {
+                                p.endpoint_id.clone()
+                            },
+                            "offline".to_string(),
+                            last_seen,
+                        )
+                    }).collect();
+                    drop(store);
+
+                    let window_weak_peers = window_weak.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(window) = window_weak_peers.upgrade() {
+                            let items: Vec<PeerItem> = peer_items.into_iter()
+                                .map(|(id, name, endpoint_id, status, last_seen)| PeerItem {
+                                    id: SharedString::from(id),
+                                    name: SharedString::from(name),
+                                    endpoint_id: SharedString::from(endpoint_id),
+                                    status: SharedString::from(status),
+                                    last_seen: SharedString::from(last_seen),
+                                })
+                                .collect();
+                            window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));
+                        }
+                    });
+                }
+            }
+            Err(e) => {
+                error!("Handshake failed with {}: {}", bundle.sender.name, e);
+                update_status(window_weak, &format!("Trust handshake failed: {}", e));
+            }
+        }
+
+        endpoint.close().await;
+
+        // Clean up the bundle file
+        if let Err(e) = std::fs::remove_file(&path) {
+            warn!("Failed to remove trust bundle file: {}", e);
+        }
+    }
+}
+
+/// Wait for incoming trust handshake from a peer who received our trust bundle.
+async fn wait_for_trust_handshake(
+    endpoint: &IrohEndpoint,
+    expected_nonce: &str,
+    peer_store: &Arc<RwLock<PeerStore>>,
+) -> croc_gui_core::Result<TrustedPeer> {
+    use std::time::Duration;
+
+    info!("Waiting for incoming trust connection...");
+
+    // Accept a connection
+    let mut conn = tokio::time::timeout(Duration::from_secs(120), endpoint.accept())
+        .await
+        .map_err(|_| croc_gui_core::Error::Iroh("timeout waiting for connection".to_string()))??;
+
+    let remote_id = conn.remote_id_string();
+    info!("Accepted connection from: {}", remote_id);
+
+    // Receive the TrustConfirm message
+    let msg = tokio::time::timeout(Duration::from_secs(30), conn.recv())
+        .await
+        .map_err(|_| croc_gui_core::Error::Iroh("timeout waiting for message".to_string()))??;
+
+    match msg {
+        ControlMessage::TrustConfirm {
+            peer: their_peer_info,
+            nonce,
+            permissions: their_permissions,
+        } => {
+            // Verify the nonce
+            if nonce != expected_nonce {
+                warn!("Invalid nonce from {}: expected {}, got {}", remote_id, expected_nonce, nonce);
+                let response = ControlMessage::TrustRevoke {
+                    reason: "invalid nonce".to_string(),
+                };
+                let _ = conn.send(&response).await;
+                return Err(croc_gui_core::Error::Trust("invalid nonce".to_string()));
+            }
+
+            info!("Valid TrustConfirm from {} ({})", their_peer_info.name, remote_id);
+
+            // Send TrustComplete
+            let response = ControlMessage::TrustComplete;
+            conn.send(&response).await?;
+
+            // Create the trusted peer
+            let peer = TrustedPeer::new(
+                their_peer_info.endpoint_id.clone(),
+                their_peer_info.name.clone(),
+                Permissions::all(), // We grant all permissions
+                their_permissions,  // Their permissions to us
+            );
+
+            // Add to peer store
+            let mut store = peer_store.write().await;
+            store.add(peer.clone())?;
+            drop(store);
+
+            // Close connection gracefully
+            let _ = conn.close().await;
+
+            info!("Trust established with {}", peer.name);
+            Ok(peer)
+        }
+        other => {
+            error!("Unexpected message during handshake: {:?}", other);
+            Err(croc_gui_core::Error::Iroh(format!(
+                "unexpected message: expected TrustConfirm, got {:?}",
+                other
+            )))
+        }
+    }
 }
