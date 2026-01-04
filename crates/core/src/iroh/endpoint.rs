@@ -34,14 +34,25 @@ impl IrohEndpoint {
             .secret_key(secret_key)
             .alpns(vec![ALPN_CONTROL.to_vec()])
             .relay_mode(RelayMode::Default)
+            .discovery_n0() // Enable n0 DNS discovery for peer address publishing/resolution
             .bind()
             .await
             .map_err(|e| Error::Iroh(format!("failed to create endpoint: {}", e)))?;
 
-        info!(
-            "Iroh endpoint created with node_id: {}",
-            endpoint.node_id()
-        );
+        // Log full node address for debugging connectivity
+        if let Ok(addr) = endpoint.node_addr().await {
+            info!(
+                "Iroh endpoint created: node_id={}, relay={:?}, direct_addrs={:?}",
+                endpoint.node_id(),
+                addr.relay_url(),
+                addr.direct_addresses().collect::<Vec<_>>()
+            );
+        } else {
+            info!(
+                "Iroh endpoint created with node_id: {}",
+                endpoint.node_id()
+            );
+        }
 
         Ok(Self {
             endpoint,
