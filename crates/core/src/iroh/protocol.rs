@@ -112,6 +112,7 @@ mod tests {
                 endpoint_id: "abc123".to_string(),
                 name: "Test Device".to_string(),
                 version: "0.1.0".to_string(),
+                relay_url: None,
             },
             nonce: "nonce123".to_string(),
             permissions: Permissions::all(),

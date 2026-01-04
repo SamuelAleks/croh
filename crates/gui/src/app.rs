@@ -1244,12 +1244,40 @@ impl App {
                             });
                         }
 
-                        // Create trust bundle
-                        let bundle = TrustBundle::new(&id);
+                        // Create Iroh endpoint first to get the relay URL
+                        let endpoint = match IrohEndpoint::new(id.clone()).await {
+                            Ok(ep) => ep,
+                            Err(e) => {
+                                error!("Failed to create Iroh endpoint: {}", e);
+                                *trust_in_progress.write().await = false;
+                                let window_weak_err = window_weak.clone();
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if let Some(window) = window_weak_err.upgrade() {
+                                        window.global::<AppLogic>().set_trust_in_progress(false);
+                                    }
+                                });
+                                update_status(&window_weak, &format!("Network error: {}", e));
+                                return;
+                            }
+                        };
+
+                        // Wait for relay connection (give it up to 10 seconds)
+                        update_status(&window_weak, "Connecting to relay...");
+                        let relay_url = endpoint.wait_for_relay(std::time::Duration::from_secs(10)).await
+                            .map(|u| u.to_string());
+                        info!("Iroh endpoint ready, relay URL: {:?}", relay_url);
+
+                        if relay_url.is_none() {
+                            warn!("No relay connection established - peer may have connectivity issues");
+                        }
+
+                        // Create trust bundle with the relay URL
+                        let bundle = TrustBundle::new_with_relay(&id, relay_url);
                         let bundle_path = match bundle.save_to_temp() {
                             Ok(path) => path,
                             Err(e) => {
                                 error!("Failed to save trust bundle: {}", e);
+                                endpoint.close().await;
                                 *trust_in_progress.write().await = false;
                                 let window_weak_err = window_weak.clone();
                                 let _ = slint::invoke_from_event_loop(move || {
@@ -1296,81 +1324,72 @@ impl App {
                                             update_status(&window_weak, &format!("Share code: {}", code));
                                         }
                                         Some(CrocEvent::Completed) => {
-                                            info!("Trust bundle sent successfully, starting Iroh endpoint for handshake");
+                                            info!("Trust bundle sent successfully, waiting for peer to connect...");
                                             update_status(&window_weak, "Trust bundle sent, waiting for peer to connect...");
 
-                                            // Create Iroh endpoint and wait for handshake
-                                            let id_clone = id.clone();
+                                            // Use the endpoint we created earlier (to get the relay URL)
                                             let bundle_nonce = bundle.nonce.clone();
 
-                                            match IrohEndpoint::new(id_clone).await {
-                                                Ok(endpoint) => {
-                                                    info!("Iroh endpoint ready, waiting for incoming connection");
+                                            info!("Waiting for incoming connection on existing endpoint");
 
-                                                    // Wait for incoming connection with timeout
-                                                    let handshake_result = tokio::time::timeout(
-                                                        std::time::Duration::from_secs(120), // 2 minute timeout
-                                                        wait_for_trust_handshake(&endpoint, &bundle_nonce, &peer_store)
-                                                    ).await;
+                                            // Wait for incoming connection with timeout
+                                            let handshake_result = tokio::time::timeout(
+                                                std::time::Duration::from_secs(120), // 2 minute timeout
+                                                wait_for_trust_handshake(&endpoint, &bundle_nonce, &peer_store)
+                                            ).await;
 
-                                                    match handshake_result {
-                                                        Ok(Ok(peer)) => {
-                                                            info!("Trust established with {}", peer.name);
-                                                            update_status(&window_weak, &format!("Trusted peer added: {}", peer.name));
+                                            match handshake_result {
+                                                Ok(Ok(peer)) => {
+                                                    info!("Trust established with {}", peer.name);
+                                                    update_status(&window_weak, &format!("Trusted peer added: {}", peer.name));
 
-                                                            // Update peers UI
-                                                            let peers = peer_store.read().await;
-                                                            let peer_items: Vec<_> = peers.list().iter().map(|p| {
-                                                                let last_seen = p.last_seen
-                                                                    .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                                                                    .unwrap_or_else(|| "Never".to_string());
-                                                                (
-                                                                    p.id.clone(),
-                                                                    p.name.clone(),
-                                                                    if p.endpoint_id.len() > 16 {
-                                                                        format!("{}...{}", &p.endpoint_id[..8], &p.endpoint_id[p.endpoint_id.len()-8..])
-                                                                    } else {
-                                                                        p.endpoint_id.clone()
-                                                                    },
-                                                                    "offline".to_string(),
-                                                                    last_seen,
-                                                                )
-                                                            }).collect();
-                                                            drop(peers);
+                                                    // Update peers UI
+                                                    let peers = peer_store.read().await;
+                                                    let peer_items: Vec<_> = peers.list().iter().map(|p| {
+                                                        let last_seen = p.last_seen
+                                                            .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                                                            .unwrap_or_else(|| "Never".to_string());
+                                                        (
+                                                            p.id.clone(),
+                                                            p.name.clone(),
+                                                            if p.endpoint_id.len() > 16 {
+                                                                format!("{}...{}", &p.endpoint_id[..8], &p.endpoint_id[p.endpoint_id.len()-8..])
+                                                            } else {
+                                                                p.endpoint_id.clone()
+                                                            },
+                                                            "offline".to_string(),
+                                                            last_seen,
+                                                        )
+                                                    }).collect();
+                                                    drop(peers);
 
-                                                            let window_weak_peers = window_weak.clone();
-                                                            let _ = slint::invoke_from_event_loop(move || {
-                                                                if let Some(window) = window_weak_peers.upgrade() {
-                                                                    let items: Vec<PeerItem> = peer_items.into_iter()
-                                                                        .map(|(id, name, endpoint_id, status, last_seen)| PeerItem {
-                                                                            id: SharedString::from(id),
-                                                                            name: SharedString::from(name),
-                                                                            endpoint_id: SharedString::from(endpoint_id),
-                                                                            status: SharedString::from(status),
-                                                                            last_seen: SharedString::from(last_seen),
-                                                                        })
-                                                                        .collect();
-                                                                    window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));
-                                                                }
-                                                            });
+                                                    let window_weak_peers = window_weak.clone();
+                                                    let _ = slint::invoke_from_event_loop(move || {
+                                                        if let Some(window) = window_weak_peers.upgrade() {
+                                                            let items: Vec<PeerItem> = peer_items.into_iter()
+                                                                .map(|(id, name, endpoint_id, status, last_seen)| PeerItem {
+                                                                    id: SharedString::from(id),
+                                                                    name: SharedString::from(name),
+                                                                    endpoint_id: SharedString::from(endpoint_id),
+                                                                    status: SharedString::from(status),
+                                                                    last_seen: SharedString::from(last_seen),
+                                                                })
+                                                                .collect();
+                                                            window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));
                                                         }
-                                                        Ok(Err(e)) => {
-                                                            error!("Handshake failed: {}", e);
-                                                            update_status(&window_weak, &format!("Handshake failed: {}", e));
-                                                        }
-                                                        Err(_) => {
-                                                            warn!("Handshake timed out");
-                                                            update_status(&window_weak, "Timed out waiting for peer");
-                                                        }
-                                                    }
-
-                                                    endpoint.close().await;
+                                                    });
                                                 }
-                                                Err(e) => {
-                                                    error!("Failed to create Iroh endpoint: {}", e);
-                                                    update_status(&window_weak, &format!("Network error: {}", e));
+                                                Ok(Err(e)) => {
+                                                    error!("Handshake failed: {}", e);
+                                                    update_status(&window_weak, &format!("Handshake failed: {}", e));
+                                                }
+                                                Err(_) => {
+                                                    warn!("Handshake timed out");
+                                                    update_status(&window_weak, "Timed out waiting for peer");
                                                 }
                                             }
+
+                                            endpoint.close().await;
 
                                             // Reset trust in progress
                                             *trust_in_progress.write().await = false;

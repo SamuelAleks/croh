@@ -48,6 +48,17 @@ pub async fn complete_trust_as_receiver(
         .parse()
         .map_err(|e| Error::Iroh(format!("invalid sender endpoint_id: {}", e)))?;
 
+    // Add the sender's address information to our endpoint so we can connect
+    // This includes the relay URL if provided in the trust bundle
+    let mut node_addr = iroh::NodeAddr::new(sender_node_id);
+    if let Some(ref relay_url) = bundle.sender.relay_url {
+        if let Ok(url) = relay_url.parse() {
+            node_addr = node_addr.with_relay_url(url);
+            info!("Using relay URL: {}", relay_url);
+        }
+    }
+    endpoint.add_node_addr(node_addr)?;
+
     // Connect to the sender
     let mut conn = tokio::time::timeout(
         HANDSHAKE_TIMEOUT,

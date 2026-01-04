@@ -162,6 +162,17 @@ impl Identity {
             endpoint_id: self.endpoint_id.clone(),
             name: self.name.clone(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            relay_url: None, // Relay URL must be set separately from the endpoint
+        }
+    }
+
+    /// Convert to PeerInfo with a relay URL.
+    pub fn to_peer_info_with_relay(&self, relay_url: Option<String>) -> crate::trust::PeerInfo {
+        crate::trust::PeerInfo {
+            endpoint_id: self.endpoint_id.clone(),
+            name: self.name.clone(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            relay_url,
         }
     }
 }

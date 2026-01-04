@@ -69,6 +69,21 @@ impl IrohEndpoint {
         self.endpoint.home_relay().get().ok().flatten()
     }
 
+    /// Wait for a relay connection to be established.
+    /// Returns the relay URL once connected, or None if timeout.
+    pub async fn wait_for_relay(&self, timeout: Duration) -> Option<RelayUrl> {
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(url) = self.relay_url() {
+                return Some(url);
+            }
+            if start.elapsed() > timeout {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     /// Connect to a remote peer by node ID string.
     pub async fn connect(&self, remote_id: &str) -> Result<ControlConnection> {
         let node_id: NodeId = remote_id

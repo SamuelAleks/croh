@@ -30,6 +30,10 @@ pub struct PeerInfo {
 
     /// Software version
     pub version: String,
+
+    /// Relay URL for connectivity (optional, but needed for NAT traversal)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_url: Option<String>,
 }
 
 /// Capabilities that can be offered in a trust relationship.
@@ -83,12 +87,17 @@ pub struct TrustBundle {
 impl TrustBundle {
     /// Create a new trust bundle from an identity.
     pub fn new(identity: &crate::iroh::Identity) -> Self {
+        Self::new_with_relay(identity, None)
+    }
+
+    /// Create a new trust bundle from an identity with a relay URL.
+    pub fn new_with_relay(identity: &crate::iroh::Identity, relay_url: Option<String>) -> Self {
         let now = Utc::now();
         let expires_at = now + Duration::minutes(BUNDLE_VALIDITY_MINUTES);
 
         Self {
             croc_gui_trust: TRUST_BUNDLE_VERSION,
-            sender: identity.to_peer_info(),
+            sender: identity.to_peer_info_with_relay(relay_url),
             capabilities_offered: Capability::all(),
             nonce: generate_nonce(),
             created_at: now,
