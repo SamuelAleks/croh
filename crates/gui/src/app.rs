@@ -758,6 +758,9 @@ impl App {
                                             update_status(&window_weak, "Receive completed!");
                                             update_transfers_ui(&window_weak, &transfer_manager)
                                                 .await;
+
+                                            // Check for trust bundles in received files
+                                            check_and_handle_trust_bundle(&download_dir, &window_weak, &identity, &peer_store).await;
                                             break;
                                         }
                                         Some(CrocEvent::Failed(err)) => {
