@@ -1833,6 +1833,10 @@ async fn wait_for_trust_handshake(
             let response = ControlMessage::TrustComplete;
             conn.send(&response).await?;
 
+            // Give the message time to be delivered before closing
+            // QUIC may not deliver data if the endpoint closes too quickly
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
             // Create the trusted peer
             let peer = TrustedPeer::new(
                 their_peer_info.endpoint_id.clone(),
@@ -1849,7 +1853,6 @@ async fn wait_for_trust_handshake(
             // Close connection gracefully
             let _ = conn.close().await;
 
-            info!("Trust established with {}", peer.name);
             Ok(peer)
         }
         other => {

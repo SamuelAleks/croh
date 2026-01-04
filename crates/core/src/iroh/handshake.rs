@@ -140,6 +140,10 @@ pub async fn handle_trust_confirm(
     let response = ControlMessage::TrustComplete;
     conn.send(&response).await?;
 
+    // Give the message time to be delivered before the connection closes
+    // QUIC may not deliver data if the endpoint closes too quickly
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
     // Create the trusted peer
     let peer = TrustedPeer::new(
         their_peer_info.endpoint_id.clone(),

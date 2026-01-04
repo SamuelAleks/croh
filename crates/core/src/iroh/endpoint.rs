@@ -131,7 +131,7 @@ impl IrohEndpoint {
         let remote_id = conn
             .remote_node_id()
             .map_err(|e| Error::Iroh(format!("failed to get remote node id: {}", e)))?;
-        info!("Accepted connection from: {}", remote_id);
+        debug!("Accepted connection from: {}", remote_id);
 
         let alpn = conn.alpn();
         if alpn.as_deref() != Some(ALPN_CONTROL) {
