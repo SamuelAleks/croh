@@ -630,7 +630,17 @@ impl App {
             let peer_store = peer_store.clone();
 
             move |code| {
-                let code = code.to_string();
+                // Sanitize code: remove nul bytes and other control characters
+                let code: String = code.chars()
+                    .filter(|c| !c.is_control() || *c == ' ')
+                    .collect();
+                let code = code.trim().to_string();
+
+                if code.is_empty() {
+                    warn!("Empty code provided");
+                    return;
+                }
+
                 info!("Start receive requested with code: {}", code);
 
                 let window_weak = window_weak.clone();
@@ -1642,114 +1652,134 @@ async fn check_and_handle_trust_bundle(
 
     info!("Found {} potential trust bundle(s)", bundle_files.len());
 
+    // Load all bundles and find the most recent valid one
+    let mut valid_bundles: Vec<(std::path::PathBuf, TrustBundle)> = Vec::new();
+    let mut expired_paths: Vec<std::path::PathBuf> = Vec::new();
+
     for entry in bundle_files {
         let path = entry.path();
-        let bundle = match TrustBundle::load(&path) {
-            Ok(b) => b,
+        match TrustBundle::load(&path) {
+            Ok(bundle) => {
+                if bundle.is_valid() {
+                    valid_bundles.push((path, bundle));
+                } else {
+                    warn!("Trust bundle at {:?} has expired, removing", path);
+                    expired_paths.push(path);
+                }
+            }
             Err(e) => {
                 warn!("Failed to load trust bundle {:?}: {}", path, e);
-                continue;
             }
-        };
-
-        info!("Processing trust bundle from {}", bundle.sender.name);
-
-        // Check if expired
-        if !bundle.is_valid() {
-            warn!("Trust bundle from {} has expired", bundle.sender.name);
-            update_status(window_weak, &format!("Trust bundle from {} expired", bundle.sender.name));
-            let _ = std::fs::remove_file(&path);
-            continue;
         }
+    }
 
-        update_status(window_weak, &format!("Trust request from {}...", bundle.sender.name));
+    // Clean up expired bundles
+    for path in expired_paths {
+        let _ = std::fs::remove_file(&path);
+    }
 
-        // Get our identity
-        let our_identity = {
-            let id_guard = identity.read().await;
-            match id_guard.as_ref() {
-                Some(id) => id.clone(),
-                None => {
-                    error!("No identity available for trust handshake");
-                    update_status(window_weak, "Error: No identity available");
-                    let _ = std::fs::remove_file(&path);
-                    continue;
-                }
-            }
-        };
+    // Sort by creation time, most recent first
+    valid_bundles.sort_by(|a, b| b.1.created_at.cmp(&a.1.created_at));
 
-        // Create Iroh endpoint and connect back
-        let endpoint = match IrohEndpoint::new(our_identity.clone()).await {
-            Ok(ep) => ep,
-            Err(e) => {
-                error!("Failed to create Iroh endpoint: {}", e);
-                update_status(window_weak, &format!("Network error: {}", e));
+    // Only process the most recent valid bundle
+    let (path, bundle) = match valid_bundles.into_iter().next() {
+        Some(b) => b,
+        None => {
+            info!("No valid trust bundles found");
+            return;
+        }
+    };
+
+    info!("Processing most recent trust bundle from {} (created at {})",
+          bundle.sender.name, bundle.created_at);
+
+    update_status(window_weak, &format!("Trust request from {}...", bundle.sender.name));
+
+    // Get our identity
+    let our_identity = {
+        let id_guard = identity.read().await;
+        match id_guard.as_ref() {
+            Some(id) => id.clone(),
+            None => {
+                error!("No identity available for trust handshake");
+                update_status(window_weak, "Error: No identity available");
                 let _ = std::fs::remove_file(&path);
-                continue;
-            }
-        };
-
-        update_status(window_weak, &format!("Connecting to {}...", bundle.sender.name));
-
-        // Perform the handshake as receiver
-        match complete_trust_as_receiver(&endpoint, &bundle, &our_identity).await {
-            Ok(result) => {
-                info!("Trust established with {}", result.peer.name);
-                update_status(window_weak, &format!("Trusted peer added: {}", result.peer.name));
-
-                // Add to peer store
-                let mut store = peer_store.write().await;
-                if let Err(e) = store.add(result.peer.clone()) {
-                    error!("Failed to save peer: {}", e);
-                } else {
-                    // Update peers UI
-                    let peer_items: Vec<_> = store.list().iter().map(|p| {
-                        let last_seen = p.last_seen
-                            .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                            .unwrap_or_else(|| "Never".to_string());
-                        (
-                            p.id.clone(),
-                            p.name.clone(),
-                            if p.endpoint_id.len() > 16 {
-                                format!("{}...{}", &p.endpoint_id[..8], &p.endpoint_id[p.endpoint_id.len()-8..])
-                            } else {
-                                p.endpoint_id.clone()
-                            },
-                            "offline".to_string(),
-                            last_seen,
-                        )
-                    }).collect();
-                    drop(store);
-
-                    let window_weak_peers = window_weak.clone();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(window) = window_weak_peers.upgrade() {
-                            let items: Vec<PeerItem> = peer_items.into_iter()
-                                .map(|(id, name, endpoint_id, status, last_seen)| PeerItem {
-                                    id: SharedString::from(id),
-                                    name: SharedString::from(name),
-                                    endpoint_id: SharedString::from(endpoint_id),
-                                    status: SharedString::from(status),
-                                    last_seen: SharedString::from(last_seen),
-                                })
-                                .collect();
-                            window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));
-                        }
-                    });
-                }
-            }
-            Err(e) => {
-                error!("Handshake failed with {}: {}", bundle.sender.name, e);
-                update_status(window_weak, &format!("Trust handshake failed: {}", e));
+                return;
             }
         }
+    };
 
-        endpoint.close().await;
-
-        // Clean up the bundle file
-        if let Err(e) = std::fs::remove_file(&path) {
-            warn!("Failed to remove trust bundle file: {}", e);
+    // Create Iroh endpoint and connect back
+    let endpoint = match IrohEndpoint::new(our_identity.clone()).await {
+        Ok(ep) => ep,
+        Err(e) => {
+            error!("Failed to create Iroh endpoint: {}", e);
+            update_status(window_weak, &format!("Network error: {}", e));
+            let _ = std::fs::remove_file(&path);
+            return;
         }
+    };
+
+    update_status(window_weak, &format!("Connecting to {}...", bundle.sender.name));
+
+    // Perform the handshake as receiver
+    match complete_trust_as_receiver(&endpoint, &bundle, &our_identity).await {
+        Ok(result) => {
+            info!("Trust established with {}", result.peer.name);
+            update_status(window_weak, &format!("Trusted peer added: {}", result.peer.name));
+
+            // Add to peer store
+            let mut store = peer_store.write().await;
+            if let Err(e) = store.add(result.peer.clone()) {
+                error!("Failed to save peer: {}", e);
+            } else {
+                // Update peers UI
+                let peer_items: Vec<_> = store.list().iter().map(|p| {
+                    let last_seen = p.last_seen
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_else(|| "Never".to_string());
+                    (
+                        p.id.clone(),
+                        p.name.clone(),
+                        if p.endpoint_id.len() > 16 {
+                            format!("{}...{}", &p.endpoint_id[..8], &p.endpoint_id[p.endpoint_id.len()-8..])
+                        } else {
+                            p.endpoint_id.clone()
+                        },
+                        "offline".to_string(),
+                        last_seen,
+                    )
+                }).collect();
+                drop(store);
+
+                let window_weak_peers = window_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(window) = window_weak_peers.upgrade() {
+                        let items: Vec<PeerItem> = peer_items.into_iter()
+                            .map(|(id, name, endpoint_id, status, last_seen)| PeerItem {
+                                id: SharedString::from(id),
+                                name: SharedString::from(name),
+                                endpoint_id: SharedString::from(endpoint_id),
+                                status: SharedString::from(status),
+                                last_seen: SharedString::from(last_seen),
+                            })
+                            .collect();
+                        window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));
+                    }
+                });
+            }
+        }
+        Err(e) => {
+            error!("Handshake failed with {}: {}", bundle.sender.name, e);
+            update_status(window_weak, &format!("Trust handshake failed: {}", e));
+        }
+    }
+
+    endpoint.close().await;
+
+    // Clean up the bundle file
+    if let Err(e) = std::fs::remove_file(&path) {
+        warn!("Failed to remove trust bundle file: {}", e);
     }
 }
 
