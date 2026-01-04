@@ -88,6 +88,21 @@ pub fn detect_completion(line: &str) -> bool {
         || lower.contains("transfer complete")
         || (lower.contains("100%") && lower.contains("done"))
         || lower.contains("successfully")
+        // Also detect completion when we see 100% with matching byte counts like "(462/462 B"
+        || (lower.contains("100%") && is_complete_byte_progress(line))
+}
+
+/// Check if a progress line shows completed byte transfer (e.g., "(462/462 B")
+fn is_complete_byte_progress(line: &str) -> bool {
+    // Look for pattern like (N/N B) where both numbers are the same
+    let bytes_regex = Regex::new(r"\((\d+)/(\d+)\s*B").unwrap();
+
+    if let Some(caps) = bytes_regex.captures(line) {
+        if let (Some(transferred), Some(total)) = (caps.get(1), caps.get(2)) {
+            return transferred.as_str() == total.as_str();
+        }
+    }
+    false
 }
 
 /// Detect if an error occurred.
@@ -228,6 +243,22 @@ mod tests {
         assert!(detect_completion("file(s) sent successfully"));
         assert!(detect_completion("1 file(s) received"));
         assert!(!detect_completion("sending file..."));
+
+        // Test 100% progress with matching byte counts
+        assert!(detect_completion("croc-gui-trust-c13292c2.json 100% || (462/462 B, 910 kB/s)"));
+        assert!(detect_completion("file.txt 100% |████████████| (1024/1024 B, 1.2 MB/s)"));
+
+        // Should not trigger on partial progress
+        assert!(!detect_completion("file.txt 50% |████░░░░| (256/512 B, 1.2 MB/s)"));
+        assert!(!detect_completion("file.txt 100% |████████████| (512/1024 B, 1.2 MB/s)"));
+    }
+
+    #[test]
+    fn test_is_complete_byte_progress() {
+        assert!(is_complete_byte_progress("(462/462 B, 910 kB/s)"));
+        assert!(is_complete_byte_progress("(1024/1024 B)"));
+        assert!(!is_complete_byte_progress("(256/512 B)"));
+        assert!(!is_complete_byte_progress("no bytes here"));
     }
 
     #[test]
