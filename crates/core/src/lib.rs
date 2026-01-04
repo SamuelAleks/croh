@@ -23,7 +23,10 @@ pub mod trust;
 pub use config::Config;
 pub use croc::{CrocOptions, CrocProcess, CrocProcessHandle, find_croc_executable, refresh_croc_cache};
 pub use error::{Error, Result};
-pub use iroh::{ControlConnection, ControlMessage, Identity, IrohEndpoint, ALPN_CONTROL};
+pub use iroh::{
+    complete_trust_as_receiver, accept_trust_connections, HandshakeResult,
+    ControlConnection, ControlMessage, Identity, IrohEndpoint, ALPN_CONTROL
+};
 pub use peers::{PeerStore, Permissions, TrustedPeer};
 pub use transfer::{Transfer, TransferId, TransferManager, TransferStatus, TransferType};
 pub use trust::{Capability, PeerInfo, TrustBundle};

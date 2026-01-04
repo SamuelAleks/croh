@@ -79,6 +79,14 @@ export struct AppSettings {
     no-local: bool,          // force relay-only transfers
 }
 
+export struct PeerItem {
+    id: string,
+    name: string,
+    endpoint-id: string,
+    status: string,          // "online", "offline", "connecting"
+    last-seen: string,
+}
+
 // ============================================================================
 // Application Logic Interface
 // ============================================================================
@@ -100,6 +108,11 @@ export global AppLogic {
     callback refresh-croc();
     callback install-croc();
 
+    // Trusted peers callbacks
+    callback initiate-trust();
+    callback cancel-trust();
+    callback remove-peer(string);  // peer id
+
     in property <[SelectedFile]> selected-files: [];
     in property <[TransferItem]> transfers: [];
     in property <string> app-status: "Ready";
@@ -115,6 +128,12 @@ export global AppLogic {
         throttle: "",
         no-local: false,
     };
+
+    // Trusted peers state
+    in property <[PeerItem]> peers: [];
+    in property <bool> trust-in-progress: false;
+    in property <string> trust-code: "";
+    in property <string> endpoint-id: "";
 }
 
 // ============================================================================
@@ -769,6 +788,68 @@ component ReceivePanel inherits Rectangle {
 // Peers Panel
 // ============================================================================
 
+component PeerCard inherits Rectangle {
+    in property <PeerItem> peer;
+    callback remove-clicked();
+
+    height: 56px;
+    background: Theme.bg-card;
+    border-radius: Theme.radius-sm;
+    border-width: 1px;
+    border-color: Theme.border;
+
+    HorizontalLayout {
+        padding: Theme.spacing-sm;
+        spacing: Theme.spacing-sm;
+
+        // Status indicator
+        Rectangle {
+            width: 8px;
+            height: 8px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 4px;
+            background: peer.status == "online" ? Theme.success :
+                       peer.status == "connecting" ? Theme.warning : Theme.text-muted;
+        }
+
+        // Peer info
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 2px;
+
+            Text {
+                text: peer.name;
+                font-size: 13px;
+                color: Theme.text;
+                overflow: elide;
+            }
+
+            Text {
+                text: peer.endpoint-id;
+                font-size: 11px;
+                font-family: "monospace";
+                color: Theme.text-dim;
+                overflow: elide;
+            }
+        }
+
+        // Last seen
+        Text {
+            text: peer.last-seen;
+            font-size: 11px;
+            color: Theme.text-muted;
+            vertical-alignment: center;
+        }
+
+        // Remove button
+        IconBtn {
+            icon: "✕";
+            icon-color: Theme.text-muted;
+            clicked => { root.remove-clicked(); }
+        }
+    }
+}
+
 component PeersPanel inherits Rectangle {
     background: Theme.bg-dark;
 
@@ -776,25 +857,128 @@ component PeersPanel inherits Rectangle {
         padding: Theme.spacing-md;
         spacing: Theme.spacing-sm;
 
-        Section {
-            vertical-stretch: 1;
+        // Header with Add Peer button
+        HorizontalLayout {
+            spacing: Theme.spacing-sm;
 
+            Text {
+                text: "Trusted Peers";
+                font-size: 14px;
+                font-weight: 600;
+                color: Theme.text;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+
+            // Show endpoint ID (truncated - done in Rust)
+            if AppLogic.endpoint-id != "" : Text {
+                text: "ID: " + AppLogic.endpoint-id;
+                font-size: 10px;
+                font-family: "monospace";
+                color: Theme.text-muted;
+                vertical-alignment: center;
+            }
+
+            CompactButton {
+                label: AppLogic.trust-in-progress ? "Cancel" : "Add Peer";
+                primary: !AppLogic.trust-in-progress;
+                clicked => {
+                    if AppLogic.trust-in-progress {
+                        AppLogic.cancel-trust();
+                    } else {
+                        AppLogic.initiate-trust();
+                    }
+                }
+            }
+        }
+
+        // Trust in progress section
+        if AppLogic.trust-in-progress : Section {
             VerticalBox {
-                alignment: center;
                 spacing: Theme.spacing-sm;
+                padding: Theme.spacing-sm;
 
                 Text {
-                    text: "Trusted Peers";
-                    font-size: 14px;
-                    color: Theme.text;
+                    text: "Share this code with the peer you want to add:";
+                    font-size: 12px;
+                    color: Theme.text-dim;
+                    horizontal-alignment: center;
+                }
+
+                if AppLogic.trust-code != "" : HorizontalLayout {
+                    alignment: center;
+                    spacing: Theme.spacing-sm;
+
+                    Rectangle {
+                        background: Theme.bg-hover;
+                        border-radius: Theme.radius-sm;
+                        height: 36px;
+                        width: trust-code-text.preferred-width + 24px;
+
+                        trust-code-text := Text {
+                            text: AppLogic.trust-code;
+                            font-size: 16px;
+                            font-weight: 600;
+                            font-family: "monospace";
+                            color: Theme.accent;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    CompactButton {
+                        label: AppLogic.copied-code == AppLogic.trust-code ? "Copied!" : "Copy";
+                        clicked => { AppLogic.copy-code(AppLogic.trust-code); }
+                    }
+                }
+
+                if AppLogic.trust-code == "" : Text {
+                    text: "Generating code...";
+                    font-size: 12px;
+                    color: Theme.text-muted;
                     horizontal-alignment: center;
                 }
 
                 Text {
-                    text: "P2P connections coming soon";
-                    font-size: 12px;
+                    text: "Waiting for peer to connect...";
+                    font-size: 11px;
+                    color: Theme.text-muted;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+
+        // Peers list
+        Section {
+            vertical-stretch: 1;
+
+            if AppLogic.peers.length == 0 && !AppLogic.trust-in-progress : VerticalBox {
+                alignment: center;
+                spacing: Theme.spacing-sm;
+
+                Text {
+                    text: "No trusted peers yet";
+                    font-size: 13px;
                     color: Theme.text-dim;
                     horizontal-alignment: center;
+                }
+
+                Text {
+                    text: "Click 'Add Peer' to establish a trusted connection";
+                    font-size: 11px;
+                    color: Theme.text-muted;
+                    horizontal-alignment: center;
+                }
+            }
+
+            if AppLogic.peers.length > 0 : ScrollView {
+                VerticalBox {
+                    spacing: Theme.spacing-xs;
+
+                    for peer in AppLogic.peers : PeerCard {
+                        peer: peer;
+                        remove-clicked => { AppLogic.remove-peer(peer.id); }
+                    }
                 }
             }
         }

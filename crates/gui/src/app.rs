@@ -3,7 +3,8 @@
 use croc_gui_core::{
     config::Theme,
     croc::{find_croc_executable, refresh_croc_cache, Curve, CrocEvent, CrocOptions, CrocProcess, HashAlgorithm},
-    files, platform, Config, Transfer, TransferId, TransferManager, TransferStatus, TransferType,
+    files, platform, Config, Identity, PeerStore, Transfer, TransferId, TransferManager,
+    TransferStatus, TransferType, TrustBundle,
 };
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
 use std::collections::HashMap;
@@ -12,7 +13,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
-use crate::{AppLogic, AppSettings, MainWindow, SelectedFile, TransferItem};
+use crate::{AppLogic, AppSettings, MainWindow, PeerItem, SelectedFile, TransferItem};
 
 /// Application state.
 pub struct App {
@@ -22,6 +23,12 @@ pub struct App {
     /// Active croc processes mapped by transfer ID.
     active_processes: Arc<RwLock<HashMap<String, tokio::task::JoinHandle<()>>>>,
     config: Arc<RwLock<Config>>,
+    /// Identity for Iroh networking.
+    identity: Arc<RwLock<Option<Identity>>>,
+    /// Peer store for trusted peers.
+    peer_store: Arc<RwLock<PeerStore>>,
+    /// Flag to track if trust initiation is in progress.
+    trust_in_progress: Arc<RwLock<bool>>,
 }
 
 /// Internal representation of a selected file.
@@ -36,6 +43,7 @@ impl App {
     /// Create a new App instance.
     pub fn new(window: Weak<MainWindow>) -> Self {
         let config = Config::load_with_env().unwrap_or_default();
+        let peer_store = PeerStore::load().unwrap_or_default();
 
         Self {
             window,
@@ -43,6 +51,9 @@ impl App {
             transfer_manager: TransferManager::new(),
             active_processes: Arc::new(RwLock::new(HashMap::new())),
             config: Arc::new(RwLock::new(config)),
+            identity: Arc::new(RwLock::new(None)),
+            peer_store: Arc::new(RwLock::new(peer_store)),
+            trust_in_progress: Arc::new(RwLock::new(false)),
         }
     }
 
@@ -50,10 +61,13 @@ impl App {
     pub fn setup_callbacks(&self, window: &MainWindow) {
         // Initialize settings in UI
         self.init_settings(window);
-        
+        // Initialize identity and peers
+        self.init_identity_and_peers(window);
+
         self.setup_file_callbacks(window);
         self.setup_transfer_callbacks(window);
         self.setup_settings_callbacks(window);
+        self.setup_peer_callbacks(window);
     }
 
     /// Initialize settings in the UI.
@@ -112,6 +126,84 @@ impl App {
                             no_local,
                         };
                         window.global::<AppLogic>().set_settings(settings);
+                    }
+                });
+            });
+        });
+    }
+
+    /// Initialize identity and load peers.
+    fn init_identity_and_peers(&self, _window: &MainWindow) {
+        let identity_arc = self.identity.clone();
+        let peer_store = self.peer_store.clone();
+        let window_weak = self.window.clone();
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            rt.block_on(async {
+                // Load or create identity
+                match Identity::load_or_create() {
+                    Ok(id) => {
+                        let endpoint_id = id.endpoint_id.clone();
+                        // Truncate for display
+                        let display_id = if endpoint_id.len() > 12 {
+                            format!("{}...{}", &endpoint_id[..6], &endpoint_id[endpoint_id.len()-6..])
+                        } else {
+                            endpoint_id
+                        };
+
+                        *identity_arc.write().await = Some(id);
+                        info!("Identity loaded");
+
+                        // Update UI with endpoint ID
+                        let window_weak_id = window_weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(window) = window_weak_id.upgrade() {
+                                window.global::<AppLogic>().set_endpoint_id(SharedString::from(display_id));
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        error!("Failed to load identity: {}", e);
+                    }
+                }
+
+                // Load peers and update UI
+                let peers = peer_store.read().await;
+                let peer_items: Vec<_> = peers.list().iter().map(|p| {
+                    let last_seen = p.last_seen
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_else(|| "Never".to_string());
+                    (
+                        p.id.clone(),
+                        p.name.clone(),
+                        if p.endpoint_id.len() > 16 {
+                            format!("{}...{}", &p.endpoint_id[..8], &p.endpoint_id[p.endpoint_id.len()-8..])
+                        } else {
+                            p.endpoint_id.clone()
+                        },
+                        "offline".to_string(), // Status - will be updated when we add presence
+                        last_seen,
+                    )
+                }).collect();
+                drop(peers);
+
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(window) = window_weak.upgrade() {
+                        let items: Vec<PeerItem> = peer_items.into_iter()
+                            .map(|(id, name, endpoint_id, status, last_seen)| PeerItem {
+                                id: SharedString::from(id),
+                                name: SharedString::from(name),
+                                endpoint_id: SharedString::from(endpoint_id),
+                                status: SharedString::from(status),
+                                last_seen: SharedString::from(last_seen),
+                            })
+                            .collect();
+                        window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));
                     }
                 });
             });
@@ -1073,6 +1165,287 @@ impl App {
                         .arg(url)
                         .spawn();
                 }
+            }
+        });
+    }
+
+    fn setup_peer_callbacks(&self, window: &MainWindow) {
+        let window_weak = self.window.clone();
+        let identity = self.identity.clone();
+        let peer_store = self.peer_store.clone();
+        let trust_in_progress = self.trust_in_progress.clone();
+        let config = self.config.clone();
+
+        // Initiate trust callback
+        window.global::<AppLogic>().on_initiate_trust({
+            let window_weak = window_weak.clone();
+            let identity = identity.clone();
+            let trust_in_progress = trust_in_progress.clone();
+            let config = config.clone();
+
+            move || {
+                info!("Initiating trust...");
+                let window_weak = window_weak.clone();
+                let identity = identity.clone();
+                let trust_in_progress = trust_in_progress.clone();
+                let config = config.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Check if already in progress
+                        {
+                            let in_progress = trust_in_progress.read().await;
+                            if *in_progress {
+                                warn!("Trust initiation already in progress");
+                                return;
+                            }
+                        }
+
+                        // Get identity
+                        let id = {
+                            let id_guard = identity.read().await;
+                            match id_guard.as_ref() {
+                                Some(id) => id.clone(),
+                                None => {
+                                    error!("No identity available");
+                                    update_status(&window_weak, "Error: No identity");
+                                    return;
+                                }
+                            }
+                        };
+
+                        // Mark as in progress
+                        *trust_in_progress.write().await = true;
+
+                        // Update UI
+                        {
+                            let window_weak = window_weak.clone();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(window) = window_weak.upgrade() {
+                                    window.global::<AppLogic>().set_trust_in_progress(true);
+                                    window.global::<AppLogic>().set_trust_code(SharedString::from(""));
+                                }
+                            });
+                        }
+
+                        // Create trust bundle
+                        let bundle = TrustBundle::new(&id);
+                        let bundle_path = match bundle.save_to_temp() {
+                            Ok(path) => path,
+                            Err(e) => {
+                                error!("Failed to save trust bundle: {}", e);
+                                *trust_in_progress.write().await = false;
+                                let window_weak_err = window_weak.clone();
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if let Some(window) = window_weak_err.upgrade() {
+                                        window.global::<AppLogic>().set_trust_in_progress(false);
+                                    }
+                                });
+                                update_status(&window_weak, &format!("Error: {}", e));
+                                return;
+                            }
+                        };
+
+                        info!("Trust bundle saved to: {:?}", bundle_path);
+
+                        // Start croc send with the bundle file
+                        let config_guard = config.read().await;
+                        let mut options = CrocOptions::new();
+
+                        // Use md5 hash (more reliable)
+                        options = options.with_hash(HashAlgorithm::Md5);
+
+                        // Apply relay from config
+                        if let Some(ref relay) = config_guard.default_relay {
+                            if !relay.is_empty() {
+                                options = options.with_relay(relay.clone());
+                            }
+                        }
+                        drop(config_guard);
+
+                        match CrocProcess::send(&[bundle_path.clone()], &options).await {
+                            Ok((mut process, _handle)) => {
+                                // Monitor for code
+                                loop {
+                                    match process.next_event().await {
+                                        Some(CrocEvent::CodeReady(code)) => {
+                                            info!("Trust code ready: {}", code);
+                                            let window_weak_code = window_weak.clone();
+                                            let code_clone = code.clone();
+                                            let _ = slint::invoke_from_event_loop(move || {
+                                                if let Some(window) = window_weak_code.upgrade() {
+                                                    window.global::<AppLogic>().set_trust_code(SharedString::from(code_clone));
+                                                }
+                                            });
+                                            update_status(&window_weak, &format!("Share code: {}", code));
+                                        }
+                                        Some(CrocEvent::Completed) => {
+                                            info!("Trust bundle sent successfully");
+                                            update_status(&window_weak, "Trust bundle sent, waiting for peer...");
+                                            // Keep trust in progress - handshake happens via Iroh
+                                            // For now, just reset since we don't have handshake yet
+                                            *trust_in_progress.write().await = false;
+                                            let window_weak = window_weak.clone();
+                                            let _ = slint::invoke_from_event_loop(move || {
+                                                if let Some(window) = window_weak.upgrade() {
+                                                    window.global::<AppLogic>().set_trust_in_progress(false);
+                                                    window.global::<AppLogic>().set_trust_code(SharedString::from(""));
+                                                }
+                                            });
+                                            break;
+                                        }
+                                        Some(CrocEvent::Failed(err)) => {
+                                            error!("Trust bundle send failed: {}", err);
+                                            *trust_in_progress.write().await = false;
+                                            let window_weak_fail = window_weak.clone();
+                                            let _ = slint::invoke_from_event_loop(move || {
+                                                if let Some(window) = window_weak_fail.upgrade() {
+                                                    window.global::<AppLogic>().set_trust_in_progress(false);
+                                                    window.global::<AppLogic>().set_trust_code(SharedString::from(""));
+                                                }
+                                            });
+                                            update_status(&window_weak, &format!("Failed: {}", err));
+                                            break;
+                                        }
+                                        Some(CrocEvent::Output(line)) => {
+                                            info!("croc: {}", line);
+                                        }
+                                        Some(_) => {}
+                                        None => {
+                                            // Process ended
+                                            *trust_in_progress.write().await = false;
+                                            let window_weak_end = window_weak.clone();
+                                            let _ = slint::invoke_from_event_loop(move || {
+                                                if let Some(window) = window_weak_end.upgrade() {
+                                                    window.global::<AppLogic>().set_trust_in_progress(false);
+                                                    window.global::<AppLogic>().set_trust_code(SharedString::from(""));
+                                                }
+                                            });
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                // Clean up temp file
+                                let _ = std::fs::remove_file(&bundle_path);
+                            }
+                            Err(e) => {
+                                error!("Failed to start croc for trust: {}", e);
+                                *trust_in_progress.write().await = false;
+                                let window_weak_start_err = window_weak.clone();
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if let Some(window) = window_weak_start_err.upgrade() {
+                                        window.global::<AppLogic>().set_trust_in_progress(false);
+                                    }
+                                });
+                                update_status(&window_weak, &format!("Error: {}", e));
+                                // Clean up temp file
+                                let _ = std::fs::remove_file(&bundle_path);
+                            }
+                        }
+                    });
+                });
+            }
+        });
+
+        // Cancel trust callback
+        window.global::<AppLogic>().on_cancel_trust({
+            let window_weak = window_weak.clone();
+            let trust_in_progress = trust_in_progress.clone();
+
+            move || {
+                info!("Cancelling trust initiation");
+                let window_weak = window_weak.clone();
+                let trust_in_progress = trust_in_progress.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        *trust_in_progress.write().await = false;
+
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(window) = window_weak.upgrade() {
+                                window.global::<AppLogic>().set_trust_in_progress(false);
+                                window.global::<AppLogic>().set_trust_code(SharedString::from(""));
+                            }
+                        });
+                    });
+                });
+            }
+        });
+
+        // Remove peer callback
+        window.global::<AppLogic>().on_remove_peer({
+            let window_weak = window_weak.clone();
+            let peer_store = peer_store.clone();
+
+            move |id| {
+                let id_str = id.to_string();
+                info!("Removing peer: {}", id_str);
+                let window_weak = window_weak.clone();
+                let peer_store = peer_store.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        let mut store = peer_store.write().await;
+                        if let Err(e) = store.remove(&id_str) {
+                            error!("Failed to remove peer: {}", e);
+                            update_status(&window_weak, &format!("Error: {}", e));
+                            return;
+                        }
+
+                        // Update UI
+                        let peer_items: Vec<_> = store.list().iter().map(|p| {
+                            let last_seen = p.last_seen
+                                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                                .unwrap_or_else(|| "Never".to_string());
+                            (
+                                p.id.clone(),
+                                p.name.clone(),
+                                if p.endpoint_id.len() > 16 {
+                                    format!("{}...{}", &p.endpoint_id[..8], &p.endpoint_id[p.endpoint_id.len()-8..])
+                                } else {
+                                    p.endpoint_id.clone()
+                                },
+                                "offline".to_string(),
+                                last_seen,
+                            )
+                        }).collect();
+                        drop(store);
+
+                        let window_weak_ui = window_weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(window) = window_weak_ui.upgrade() {
+                                let items: Vec<PeerItem> = peer_items.into_iter()
+                                    .map(|(id, name, endpoint_id, status, last_seen)| PeerItem {
+                                        id: SharedString::from(id),
+                                        name: SharedString::from(name),
+                                        endpoint_id: SharedString::from(endpoint_id),
+                                        status: SharedString::from(status),
+                                        last_seen: SharedString::from(last_seen),
+                                    })
+                                    .collect();
+                                window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));
+                            }
+                        });
+
+                        update_status(&window_weak, "Peer removed");
+                    });
+                });
             }
         });
     }
