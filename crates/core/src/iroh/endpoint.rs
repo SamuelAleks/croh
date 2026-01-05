@@ -238,6 +238,28 @@ impl ControlConnection {
         ControlMessage::decode(&buf)
     }
 
+    /// Send raw bytes without framing (for file data transfer).
+    pub async fn send_raw(&mut self, data: &[u8]) -> Result<()> {
+        self.send
+            .write_all(data)
+            .await
+            .map_err(|e| Error::Iroh(format!("send_raw failed: {}", e)))?;
+        self.send
+            .flush()
+            .await
+            .map_err(|e| Error::Iroh(format!("flush failed: {}", e)))?;
+        Ok(())
+    }
+
+    /// Receive raw bytes without framing (for file data transfer).
+    pub async fn recv_raw(&mut self, buf: &mut [u8]) -> Result<()> {
+        self.recv
+            .read_exact(buf)
+            .await
+            .map_err(|e| Error::Iroh(format!("recv_raw failed: {}", e)))?;
+        Ok(())
+    }
+
     /// Close the connection gracefully.
     pub async fn close(mut self) -> Result<()> {
         self.send

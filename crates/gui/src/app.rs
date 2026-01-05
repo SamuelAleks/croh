@@ -4,7 +4,8 @@ use croc_gui_core::{
     config::Theme,
     croc::{find_croc_executable, refresh_croc_cache, Curve, CrocEvent, CrocOptions, CrocProcess, HashAlgorithm},
     files, platform, Config, ControlMessage, Identity, IrohEndpoint, PeerStore, Permissions,
-    Transfer, TransferId, TransferManager, TransferStatus, TransferType, TrustedPeer, TrustBundle,
+    Transfer, TransferId, TransferEvent, TransferManager, TransferStatus, TransferType,
+    TrustedPeer, TrustBundle, push_files,
 };
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
 use std::collections::HashMap;
@@ -188,6 +189,8 @@ impl App {
                         },
                         "offline".to_string(), // Status - will be updated when we add presence
                         last_seen,
+                        p.their_permissions.push,
+                        p.their_permissions.pull,
                     )
                 }).collect();
                 drop(peers);
@@ -195,12 +198,14 @@ impl App {
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(window) = window_weak.upgrade() {
                         let items: Vec<PeerItem> = peer_items.into_iter()
-                            .map(|(id, name, endpoint_id, status, last_seen)| PeerItem {
+                            .map(|(id, name, endpoint_id, status, last_seen, can_push, can_pull)| PeerItem {
                                 id: SharedString::from(id),
                                 name: SharedString::from(name),
                                 endpoint_id: SharedString::from(endpoint_id),
                                 status: SharedString::from(status),
                                 last_seen: SharedString::from(last_seen),
+                                can_push,
+                                can_pull,
                             })
                             .collect();
                         window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));
@@ -1377,6 +1382,8 @@ impl App {
                                                             },
                                                             "offline".to_string(),
                                                             last_seen,
+                                                            p.their_permissions.push,
+                                                            p.their_permissions.pull,
                                                         )
                                                     }).collect();
                                                     drop(peers);
@@ -1385,12 +1392,14 @@ impl App {
                                                     let _ = slint::invoke_from_event_loop(move || {
                                                         if let Some(window) = window_weak_peers.upgrade() {
                                                             let items: Vec<PeerItem> = peer_items.into_iter()
-                                                                .map(|(id, name, endpoint_id, status, last_seen)| PeerItem {
+                                                                .map(|(id, name, endpoint_id, status, last_seen, can_push, can_pull)| PeerItem {
                                                                     id: SharedString::from(id),
                                                                     name: SharedString::from(name),
                                                                     endpoint_id: SharedString::from(endpoint_id),
                                                                     status: SharedString::from(status),
                                                                     last_seen: SharedString::from(last_seen),
+                                                                    can_push,
+                                                                    can_pull,
                                                                 })
                                                                 .collect();
                                                             window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));
@@ -1544,6 +1553,8 @@ impl App {
                                 },
                                 "offline".to_string(),
                                 last_seen,
+                                p.their_permissions.push,
+                                p.their_permissions.pull,
                             )
                         }).collect();
                         drop(store);
@@ -1552,12 +1563,14 @@ impl App {
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(window) = window_weak_ui.upgrade() {
                                 let items: Vec<PeerItem> = peer_items.into_iter()
-                                    .map(|(id, name, endpoint_id, status, last_seen)| PeerItem {
+                                    .map(|(id, name, endpoint_id, status, last_seen, can_push, can_pull)| PeerItem {
                                         id: SharedString::from(id),
                                         name: SharedString::from(name),
                                         endpoint_id: SharedString::from(endpoint_id),
                                         status: SharedString::from(status),
                                         last_seen: SharedString::from(last_seen),
+                                        can_push,
+                                        can_pull,
                                     })
                                     .collect();
                                 window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));
@@ -1565,6 +1578,176 @@ impl App {
                         });
 
                         update_status(&window_weak, "Peer removed");
+                    });
+                });
+            }
+        });
+
+        // Push to peer callback
+        window.global::<AppLogic>().on_push_to_peer({
+            let window_weak = window_weak.clone();
+            let peer_store = peer_store.clone();
+            let selected_files = self.selected_files.clone();
+            let transfer_manager = self.transfer_manager.clone();
+            let identity = self.identity.clone();
+
+            move |peer_id| {
+                let peer_id_str = peer_id.to_string();
+                info!("Push to peer requested: {}", peer_id_str);
+                let window_weak = window_weak.clone();
+                let peer_store = peer_store.clone();
+                let selected_files = selected_files.clone();
+                let transfer_manager = transfer_manager.clone();
+                let identity = identity.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Get selected files
+                        let files = selected_files.read().await;
+                        if files.is_empty() {
+                            update_status(&window_weak, "No files selected for push");
+                            return;
+                        }
+                        let file_paths: Vec<PathBuf> = files.iter().map(|f| PathBuf::from(&f.path)).collect();
+                        let file_names: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
+                        drop(files);
+
+                        // Get the peer
+                        let store = peer_store.read().await;
+                        let peer = match store.find_by_id(&peer_id_str) {
+                            Some(p) => p.clone(),
+                            None => {
+                                error!("Peer not found: {}", peer_id_str);
+                                update_status(&window_weak, &format!("Peer not found: {}", peer_id_str));
+                                return;
+                            }
+                        };
+                        drop(store);
+
+                        // Check if peer allows push
+                        if !peer.their_permissions.push {
+                            update_status(&window_weak, &format!("Peer {} does not allow push", peer.name));
+                            return;
+                        }
+
+                        // Get identity
+                        let identity_guard = identity.read().await;
+                        let our_identity = match identity_guard.as_ref() {
+                            Some(id) => id.clone(),
+                            None => {
+                                error!("No identity available");
+                                update_status(&window_weak, "Identity not loaded");
+                                return;
+                            }
+                        };
+                        drop(identity_guard);
+
+                        // Create transfer
+                        let transfer = Transfer::new_iroh_push(
+                            file_names.clone(),
+                            peer.endpoint_id.clone(),
+                            peer.name.clone(),
+                        );
+                        let transfer_id = transfer.id.clone();
+                        let _ = transfer_manager.add(transfer).await;
+
+                        // Update UI with new transfer
+                        update_transfers_ui(&window_weak, &transfer_manager).await;
+                        update_status(&window_weak, &format!("Starting push to {}...", peer.name));
+
+                        // Create endpoint
+                        let endpoint = match IrohEndpoint::new(our_identity).await {
+                            Ok(ep) => ep,
+                            Err(e) => {
+                                error!("Failed to create endpoint: {}", e);
+                                let _ = transfer_manager.update(&transfer_id, |t| {
+                                    t.status = TransferStatus::Failed;
+                                    t.error = Some(e.to_string());
+                                }).await;
+                                update_transfers_ui(&window_weak, &transfer_manager).await;
+                                update_status(&window_weak, &format!("Failed to create endpoint: {}", e));
+                                return;
+                            }
+                        };
+
+                        // Create progress channel
+                        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<TransferEvent>(100);
+
+                        // Spawn progress handler
+                        let transfer_manager_progress = transfer_manager.clone();
+                        let window_weak_progress = window_weak.clone();
+                        let transfer_id_progress = transfer_id.clone();
+                        tokio::spawn(async move {
+                            while let Some(event) = progress_rx.recv().await {
+                                match event {
+                                    TransferEvent::Started { .. } => {
+                                        let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
+                                            t.status = TransferStatus::Running;
+                                        }).await;
+                                        update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                    }
+                                    TransferEvent::Progress { transferred, total, speed, .. } => {
+                                        let progress = if total > 0 { transferred as f64 / total as f64 * 100.0 } else { 0.0 };
+                                        let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
+                                            t.progress = progress;
+                                            t.speed = speed.clone();
+                                            t.transferred = transferred;
+                                            t.total_size = total;
+                                        }).await;
+                                        update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                    }
+                                    TransferEvent::FileComplete { file, .. } => {
+                                        info!("File transferred: {}", file);
+                                    }
+                                    TransferEvent::Complete { .. } => {
+                                        let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
+                                            t.status = TransferStatus::Completed;
+                                            t.progress = 100.0;
+                                            t.completed_at = Some(chrono::Utc::now());
+                                        }).await;
+                                        update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                        update_status(&window_weak_progress, "Push completed successfully");
+                                    }
+                                    TransferEvent::Failed { error, .. } => {
+                                        error!("Transfer failed: {}", error);
+                                        let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
+                                            t.status = TransferStatus::Failed;
+                                            t.error = Some(error.clone());
+                                        }).await;
+                                        update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                        update_status(&window_weak_progress, &format!("Push failed: {}", error));
+                                    }
+                                    TransferEvent::Cancelled { .. } => {
+                                        let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
+                                            t.status = TransferStatus::Cancelled;
+                                        }).await;
+                                        update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                        update_status(&window_weak_progress, "Push cancelled");
+                                    }
+                                }
+                            }
+                        });
+
+                        // Start the push
+                        match push_files(&endpoint, &peer, &file_paths, progress_tx).await {
+                            Ok(_) => {
+                                info!("Push to {} completed", peer.name);
+                            }
+                            Err(e) => {
+                                error!("Push to {} failed: {}", peer.name, e);
+                                let _ = transfer_manager.update(&transfer_id, |t| {
+                                    t.status = TransferStatus::Failed;
+                                    t.error = Some(e.to_string());
+                                }).await;
+                                update_transfers_ui(&window_weak, &transfer_manager).await;
+                                update_status(&window_weak, &format!("Push failed: {}", e));
+                            }
+                        }
                     });
                 });
             }
@@ -1586,6 +1769,8 @@ async fn update_transfers_ui(window_weak: &Weak<MainWindow>, manager: &TransferM
             transfer_type: SharedString::from(match t.transfer_type {
                 TransferType::Send => "send",
                 TransferType::Receive => "receive",
+                TransferType::IrohPush => "push",
+                TransferType::IrohPull => "pull",
             }),
             status: SharedString::from(match t.status {
                 TransferStatus::Pending => "pending",
@@ -1753,6 +1938,8 @@ async fn check_and_handle_trust_bundle(
                         },
                         "offline".to_string(),
                         last_seen,
+                        p.their_permissions.push,
+                        p.their_permissions.pull,
                     )
                 }).collect();
                 drop(store);
@@ -1761,12 +1948,14 @@ async fn check_and_handle_trust_bundle(
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(window) = window_weak_peers.upgrade() {
                         let items: Vec<PeerItem> = peer_items.into_iter()
-                            .map(|(id, name, endpoint_id, status, last_seen)| PeerItem {
+                            .map(|(id, name, endpoint_id, status, last_seen, can_push, can_pull)| PeerItem {
                                 id: SharedString::from(id),
                                 name: SharedString::from(name),
                                 endpoint_id: SharedString::from(endpoint_id),
                                 status: SharedString::from(status),
                                 last_seen: SharedString::from(last_seen),
+                                can_push,
+                                can_pull,
                             })
                             .collect();
                         window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));

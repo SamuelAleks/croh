@@ -39,6 +39,10 @@ pub enum TransferType {
     Send,
     /// Receiving files via croc.
     Receive,
+    /// Push files to trusted peer via Iroh.
+    IrohPush,
+    /// Pull files from trusted peer via Iroh.
+    IrohPull,
 }
 
 /// Status of a transfer.
@@ -105,10 +109,22 @@ pub struct Transfer {
 
     /// Bytes transferred so far.
     pub transferred: u64,
+
+    /// Peer endpoint ID (for Iroh transfers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_endpoint_id: Option<String>,
+
+    /// Peer name (for display, Iroh transfers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_name: Option<String>,
+
+    /// File hashes (for Iroh transfers, BLAKE3 hex).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_hashes: Vec<String>,
 }
 
 impl Transfer {
-    /// Create a new send transfer.
+    /// Create a new send transfer (croc).
     pub fn new_send(files: Vec<String>) -> Self {
         Self {
             id: TransferId::new(),
@@ -123,10 +139,13 @@ impl Transfer {
             completed_at: None,
             total_size: 0,
             transferred: 0,
+            peer_endpoint_id: None,
+            peer_name: None,
+            file_hashes: Vec::new(),
         }
     }
 
-    /// Create a new receive transfer.
+    /// Create a new receive transfer (croc).
     pub fn new_receive(code: String) -> Self {
         Self {
             id: TransferId::new(),
@@ -141,7 +160,68 @@ impl Transfer {
             completed_at: None,
             total_size: 0,
             transferred: 0,
+            peer_endpoint_id: None,
+            peer_name: None,
+            file_hashes: Vec::new(),
         }
+    }
+
+    /// Create a new Iroh push transfer (send to trusted peer).
+    pub fn new_iroh_push(
+        files: Vec<String>,
+        peer_endpoint_id: String,
+        peer_name: String,
+    ) -> Self {
+        Self {
+            id: TransferId::new(),
+            transfer_type: TransferType::IrohPush,
+            status: TransferStatus::Pending,
+            code: None,
+            files,
+            progress: 0.0,
+            speed: String::new(),
+            error: None,
+            started_at: Utc::now(),
+            completed_at: None,
+            total_size: 0,
+            transferred: 0,
+            peer_endpoint_id: Some(peer_endpoint_id),
+            peer_name: Some(peer_name),
+            file_hashes: Vec::new(),
+        }
+    }
+
+    /// Create a new Iroh pull transfer (receive from trusted peer).
+    pub fn new_iroh_pull(
+        files: Vec<String>,
+        peer_endpoint_id: String,
+        peer_name: String,
+    ) -> Self {
+        Self {
+            id: TransferId::new(),
+            transfer_type: TransferType::IrohPull,
+            status: TransferStatus::Pending,
+            code: None,
+            files,
+            progress: 0.0,
+            speed: String::new(),
+            error: None,
+            started_at: Utc::now(),
+            completed_at: None,
+            total_size: 0,
+            transferred: 0,
+            peer_endpoint_id: Some(peer_endpoint_id),
+            peer_name: Some(peer_name),
+            file_hashes: Vec::new(),
+        }
+    }
+
+    /// Check if this is an Iroh-based transfer.
+    pub fn is_iroh_transfer(&self) -> bool {
+        matches!(
+            self.transfer_type,
+            TransferType::IrohPush | TransferType::IrohPull
+        )
     }
 }
 

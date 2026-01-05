@@ -85,6 +85,8 @@ export struct PeerItem {
     endpoint-id: string,
     status: string,          // "online", "offline", "connecting"
     last-seen: string,
+    can-push: bool,          // permission to push files to this peer
+    can-pull: bool,          // permission to pull files from this peer
 }
 
 // ============================================================================
@@ -112,6 +114,8 @@ export global AppLogic {
     callback initiate-trust();
     callback cancel-trust();
     callback remove-peer(string);  // peer id
+    callback push-to-peer(string); // peer id - push selected files to peer
+    callback pull-from-peer(string); // peer id - open browse dialog for peer
 
     in property <[SelectedFile]> selected-files: [];
     in property <[TransferItem]> transfers: [];
@@ -791,6 +795,7 @@ component ReceivePanel inherits Rectangle {
 component PeerCard inherits Rectangle {
     in property <PeerItem> peer;
     callback remove-clicked();
+    callback push-clicked();
 
     height: 56px;
     background: Theme.bg-card;
@@ -839,6 +844,12 @@ component PeerCard inherits Rectangle {
             font-size: 11px;
             color: Theme.text-muted;
             vertical-alignment: center;
+        }
+
+        // Push button (only show if files selected and peer has permission)
+        if peer.can-push && AppLogic.selected-files.length > 0 : CompactButton {
+            label: "Push";
+            clicked => { root.push-clicked(); }
         }
 
         // Remove button
@@ -978,6 +989,7 @@ component PeersPanel inherits Rectangle {
                     for peer in AppLogic.peers : PeerCard {
                         peer: peer;
                         remove-clicked => { AppLogic.remove-peer(peer.id); }
+                        push-clicked => { AppLogic.push-to-peer(peer.id); }
                     }
                 }
             }

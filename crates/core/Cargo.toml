@@ -34,6 +34,10 @@ dirs = { workspace = true }
 
 # Iroh networking for trusted peers
 iroh = { workspace = true }
+iroh-blobs = { workspace = true }
+
+# Hashing for file verification
+blake3 = { workspace = true }
 
 # Random for nonce generation
 rand = "0.8"

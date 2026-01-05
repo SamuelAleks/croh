@@ -31,7 +31,7 @@ pub enum Error {
 
     /// IO error
     #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(String),
 
     /// Serialization error
     #[error("serialization error: {0}")]
@@ -56,8 +56,18 @@ pub enum Error {
     /// Peer error
     #[error("peer error: {0}")]
     Peer(String),
+
+    /// Transfer error
+    #[error("transfer error: {0}")]
+    Transfer(String),
 }
 
 /// Result type alias using our Error type.
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Self {
+        Error::Io(err.to_string())
+    }
+}
 

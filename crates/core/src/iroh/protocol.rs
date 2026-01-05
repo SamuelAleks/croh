@@ -9,6 +9,44 @@ use serde::{Deserialize, Serialize};
 /// ALPN identifier for the control protocol.
 pub const ALPN_CONTROL: &[u8] = b"croc-gui/control/1";
 
+/// ALPN identifier for the blob transfer protocol.
+pub const ALPN_BLOBS: &[u8] = b"croc-gui/blobs/1";
+
+/// Information about a file for transfer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileInfo {
+    /// Relative path (from share root)
+    pub path: String,
+    /// File name
+    pub name: String,
+    /// Size in bytes
+    pub size: u64,
+    /// BLAKE3 hash (hex-encoded)
+    pub hash: String,
+}
+
+/// Request for a specific file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileRequest {
+    /// Path to request
+    pub path: String,
+    /// Optional hash to verify
+    pub hash: Option<String>,
+}
+
+/// Directory entry for browsing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirectoryEntry {
+    /// Entry name
+    pub name: String,
+    /// Whether this is a directory
+    pub is_dir: bool,
+    /// Size in bytes (0 for directories)
+    pub size: u64,
+    /// Last modified timestamp (Unix timestamp, optional)
+    pub modified: Option<i64>,
+}
+
 /// Control messages exchanged between trusted peers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -63,6 +101,106 @@ pub enum ControlMessage {
         version: String,
         /// Number of active transfers
         active_transfers: u32,
+    },
+
+    // ==================== File Transfer Messages ====================
+
+    /// Push offer: sender wants to push files to receiver.
+    PushOffer {
+        /// Unique transfer ID
+        transfer_id: String,
+        /// Files being offered with their hashes and sizes
+        files: Vec<FileInfo>,
+        /// Total size in bytes
+        total_size: u64,
+    },
+
+    /// Push response from receiver.
+    PushResponse {
+        /// Transfer ID from the offer
+        transfer_id: String,
+        /// Whether to accept the push
+        accepted: bool,
+        /// Reason if rejected
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+
+    /// Pull request: requester wants to pull files from provider.
+    PullRequest {
+        /// Unique transfer ID
+        transfer_id: String,
+        /// Files to pull (by path)
+        files: Vec<FileRequest>,
+    },
+
+    /// Pull response with file info.
+    PullResponse {
+        /// Transfer ID from the request
+        transfer_id: String,
+        /// Files available with their hashes (if granted)
+        #[serde(default)]
+        files: Vec<FileInfo>,
+        /// Whether request is granted
+        granted: bool,
+        /// Reason if denied
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+
+    /// Transfer progress update.
+    TransferProgress {
+        /// Transfer ID
+        transfer_id: String,
+        /// Bytes transferred so far
+        transferred: u64,
+        /// Total bytes
+        total: u64,
+        /// Current file being transferred
+        #[serde(skip_serializing_if = "Option::is_none")]
+        current_file: Option<String>,
+    },
+
+    /// Transfer completed successfully.
+    TransferComplete {
+        /// Transfer ID
+        transfer_id: String,
+    },
+
+    /// Transfer failed.
+    TransferFailed {
+        /// Transfer ID
+        transfer_id: String,
+        /// Error message
+        error: String,
+    },
+
+    /// Cancel a transfer.
+    TransferCancel {
+        /// Transfer ID
+        transfer_id: String,
+        /// Reason for cancellation
+        reason: String,
+    },
+
+    // ==================== File Browsing Messages ====================
+
+    /// Browse request: list files in a directory.
+    BrowseRequest {
+        /// Path to browse (None for root/allowed paths)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+
+    /// Browse response.
+    BrowseResponse {
+        /// Path that was browsed
+        path: String,
+        /// Directory entries
+        entries: Vec<DirectoryEntry>,
+        /// Error if any
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 }
 
