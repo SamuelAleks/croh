@@ -26,6 +26,8 @@ pub struct App {
     config: Arc<RwLock<Config>>,
     /// Identity for Iroh networking.
     identity: Arc<RwLock<Option<Identity>>>,
+    /// Shared Iroh endpoint (created once, used for all connections).
+    shared_endpoint: Arc<RwLock<Option<IrohEndpoint>>>,
     /// Peer store for trusted peers.
     peer_store: Arc<RwLock<PeerStore>>,
     /// Flag to track if trust initiation is in progress.
@@ -55,6 +57,7 @@ impl App {
             active_processes: Arc::new(RwLock::new(HashMap::new())),
             config: Arc::new(RwLock::new(config)),
             identity: Arc::new(RwLock::new(None)),
+            shared_endpoint: Arc::new(RwLock::new(None)),
             peer_store: Arc::new(RwLock::new(peer_store)),
             trust_in_progress: Arc::new(RwLock::new(false)),
             listener_shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -80,6 +83,7 @@ impl App {
     /// Start a background listener for incoming peer connections.
     fn start_background_listener(&self) {
         let identity = self.identity.clone();
+        let shared_endpoint = self.shared_endpoint.clone();
         let peer_store = self.peer_store.clone();
         let config = self.config.clone();
         let transfer_manager = self.transfer_manager.clone();
@@ -119,14 +123,20 @@ impl App {
                     }
                 };
 
-                // Create endpoint
+                // Create the shared endpoint (used by all Iroh operations)
                 let endpoint = match IrohEndpoint::new(our_identity).await {
                     Ok(ep) => ep,
                     Err(e) => {
-                        error!("Failed to create background listener endpoint: {}", e);
+                        error!("Failed to create shared Iroh endpoint: {}", e);
                         return;
                     }
                 };
+
+                // Store the endpoint for use by other operations (trust, push, pull)
+                {
+                    let mut ep_guard = shared_endpoint.write().await;
+                    *ep_guard = Some(endpoint.clone());
+                }
 
                 info!("Background listener started, waiting for incoming connections...");
 
@@ -1449,6 +1459,7 @@ impl App {
     fn setup_peer_callbacks(&self, window: &MainWindow) {
         let window_weak = self.window.clone();
         let identity = self.identity.clone();
+        let shared_endpoint = self.shared_endpoint.clone();
         let peer_store = self.peer_store.clone();
         let trust_in_progress = self.trust_in_progress.clone();
         let config = self.config.clone();
@@ -1457,6 +1468,7 @@ impl App {
         window.global::<AppLogic>().on_initiate_trust({
             let window_weak = window_weak.clone();
             let identity = identity.clone();
+            let shared_endpoint = shared_endpoint.clone();
             let trust_in_progress = trust_in_progress.clone();
             let config = config.clone();
             let peer_store = peer_store.clone();
@@ -1465,6 +1477,7 @@ impl App {
                 info!("Initiating trust...");
                 let window_weak = window_weak.clone();
                 let identity = identity.clone();
+                let shared_endpoint = shared_endpoint.clone();
                 let trust_in_progress = trust_in_progress.clone();
                 let config = config.clone();
                 let peer_store = peer_store.clone();
@@ -1512,11 +1525,20 @@ impl App {
                             });
                         }
 
-                        // Create Iroh endpoint first to get the relay URL
-                        let endpoint = match IrohEndpoint::new(id.clone()).await {
-                            Ok(ep) => ep,
-                            Err(e) => {
-                                error!("Failed to create Iroh endpoint: {}", e);
+                        // Wait for shared endpoint to be ready (created by background listener)
+                        update_status(&window_weak, "Waiting for network...");
+                        let wait_start = std::time::Instant::now();
+                        let endpoint = loop {
+                            {
+                                let ep_guard = shared_endpoint.read().await;
+                                if let Some(ep) = ep_guard.as_ref() {
+                                    break ep.clone();
+                                }
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            // Timeout after 30 seconds
+                            if wait_start.elapsed() > std::time::Duration::from_secs(30) {
+                                error!("Timeout waiting for shared endpoint");
                                 *trust_in_progress.write().await = false;
                                 let window_weak_err = window_weak.clone();
                                 let _ = slint::invoke_from_event_loop(move || {
@@ -1524,16 +1546,16 @@ impl App {
                                         window.global::<AppLogic>().set_trust_in_progress(false);
                                     }
                                 });
-                                update_status(&window_weak, &format!("Network error: {}", e));
+                                update_status(&window_weak, "Network not ready - please try again");
                                 return;
                             }
                         };
 
-                        // Wait for relay connection (give it up to 10 seconds)
-                        update_status(&window_weak, "Connecting to relay...");
+                        // Get relay URL from the shared endpoint
+                        update_status(&window_weak, "Getting relay info...");
                         let relay_url = endpoint.wait_for_relay(std::time::Duration::from_secs(10)).await
                             .map(|u| u.to_string());
-                        info!("Iroh endpoint ready, relay URL: {:?}", relay_url);
+                        info!("Using shared endpoint, relay URL: {:?}", relay_url);
 
                         if relay_url.is_none() {
                             warn!("No relay connection established - peer may have connectivity issues");
@@ -1545,7 +1567,7 @@ impl App {
                             Ok(path) => path,
                             Err(e) => {
                                 error!("Failed to save trust bundle: {}", e);
-                                endpoint.close().await;
+                                // Don't close the shared endpoint - it's used by other operations
                                 *trust_in_progress.write().await = false;
                                 let window_weak_err = window_weak.clone();
                                 let _ = slint::invoke_from_event_loop(move || {
@@ -1666,7 +1688,7 @@ impl App {
                                                 }
                                             }
 
-                                            endpoint.close().await;
+                                            // Don't close the shared endpoint - it's used for background listening
 
                                             // Reset trust in progress
                                             *trust_in_progress.write().await = false;
@@ -1839,7 +1861,7 @@ impl App {
             let peer_store = peer_store.clone();
             let selected_files = self.selected_files.clone();
             let transfer_manager = self.transfer_manager.clone();
-            let identity = self.identity.clone();
+            let shared_endpoint = self.shared_endpoint.clone();
 
             move |peer_id| {
                 let peer_id_str = peer_id.to_string();
@@ -1848,7 +1870,7 @@ impl App {
                 let peer_store = peer_store.clone();
                 let selected_files = selected_files.clone();
                 let transfer_manager = transfer_manager.clone();
-                let identity = identity.clone();
+                let shared_endpoint = shared_endpoint.clone();
 
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
@@ -1885,18 +1907,6 @@ impl App {
                             return;
                         }
 
-                        // Get identity
-                        let identity_guard = identity.read().await;
-                        let our_identity = match identity_guard.as_ref() {
-                            Some(id) => id.clone(),
-                            None => {
-                                error!("No identity available");
-                                update_status(&window_weak, "Identity not loaded");
-                                return;
-                            }
-                        };
-                        drop(identity_guard);
-
                         // Create transfer
                         let transfer = Transfer::new_iroh_push(
                             file_names.clone(),
@@ -1910,18 +1920,21 @@ impl App {
                         update_transfers_ui(&window_weak, &transfer_manager).await;
                         update_status(&window_weak, &format!("Starting push to {}...", peer.name));
 
-                        // Create endpoint
-                        let endpoint = match IrohEndpoint::new(our_identity).await {
-                            Ok(ep) => ep,
-                            Err(e) => {
-                                error!("Failed to create endpoint: {}", e);
-                                let _ = transfer_manager.update(&transfer_id, |t| {
-                                    t.status = TransferStatus::Failed;
-                                    t.error = Some(e.to_string());
-                                }).await;
-                                update_transfers_ui(&window_weak, &transfer_manager).await;
-                                update_status(&window_weak, &format!("Failed to create endpoint: {}", e));
-                                return;
+                        // Get the shared endpoint
+                        let endpoint = {
+                            let ep_guard = shared_endpoint.read().await;
+                            match ep_guard.as_ref() {
+                                Some(ep) => ep.clone(),
+                                None => {
+                                    error!("Shared endpoint not ready");
+                                    let _ = transfer_manager.update(&transfer_id, |t| {
+                                        t.status = TransferStatus::Failed;
+                                        t.error = Some("Network not ready".to_string());
+                                    }).await;
+                                    update_transfers_ui(&window_weak, &transfer_manager).await;
+                                    update_status(&window_weak, "Network not ready - please try again");
+                                    return;
+                                }
                             }
                         };
 
