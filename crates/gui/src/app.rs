@@ -2294,6 +2294,9 @@ async fn wait_for_trust_handshake(
             }
 
             info!("Valid TrustConfirm from {} ({})", their_peer_info.name, remote_id);
+            if their_peer_info.relay_url.is_some() {
+                info!("Peer relay URL: {:?}", their_peer_info.relay_url);
+            }
 
             // Send TrustComplete
             let response = ControlMessage::TrustComplete;
@@ -2303,12 +2306,13 @@ async fn wait_for_trust_handshake(
             // QUIC may not deliver data if the endpoint closes too quickly
             tokio::time::sleep(Duration::from_millis(500)).await;
 
-            // Create the trusted peer
-            let peer = TrustedPeer::new(
+            // Create the trusted peer with their relay URL for future connections
+            let peer = TrustedPeer::new_with_relay(
                 their_peer_info.endpoint_id.clone(),
                 their_peer_info.name.clone(),
                 Permissions::all(), // We grant all permissions
                 their_permissions,  // Their permissions to us
+                their_peer_info.relay_url.clone(), // Store their relay URL
             );
 
             // Add to peer store (or update if peer already exists)
