@@ -108,6 +108,17 @@ pub async fn push_files(
         .parse()
         .map_err(|e| Error::Iroh(format!("invalid node id: {}", e)))?;
 
+    // Add peer's address information so we can connect
+    // This includes the relay URL for NAT traversal
+    let mut node_addr = iroh::NodeAddr::new(node_id);
+    if let Some(ref relay_url) = peer.relay_url {
+        if let Ok(url) = relay_url.parse() {
+            node_addr = node_addr.with_relay_url(url);
+            info!("Using relay URL for push: {}", relay_url);
+        }
+    }
+    endpoint.add_node_addr(node_addr)?;
+
     // Connect to peer
     info!("Connecting to peer {} for push", peer.name);
     let mut conn = endpoint.connect_to_node(node_id).await?;
@@ -329,6 +340,17 @@ pub async fn pull_files(
         .endpoint_id
         .parse()
         .map_err(|e| Error::Iroh(format!("invalid node id: {}", e)))?;
+
+    // Add peer's address information so we can connect
+    // This includes the relay URL for NAT traversal
+    let mut node_addr = iroh::NodeAddr::new(node_id);
+    if let Some(ref relay_url) = peer.relay_url {
+        if let Ok(url) = relay_url.parse() {
+            node_addr = node_addr.with_relay_url(url);
+            info!("Using relay URL for pull: {}", relay_url);
+        }
+    }
+    endpoint.add_node_addr(node_addr)?;
 
     // Connect to peer
     info!("Connecting to peer {} for pull", peer.name);

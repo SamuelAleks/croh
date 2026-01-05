@@ -90,13 +90,16 @@ pub async fn complete_trust_as_receiver(
             );
 
             // Create the trusted peer from the bundle's sender info
-            let peer = TrustedPeer::new(
+            // Store the relay URL so we can connect later for push/pull
+            let peer = TrustedPeer::new_with_relay(
                 bundle.sender.endpoint_id.clone(),
                 bundle.sender.name.clone(),
                 // We grant permissions based on what they offered
                 Permissions::from_capabilities(&bundle.capabilities_offered),
                 // They get all permissions since we sent all in TrustConfirm
                 Permissions::all(),
+                // Store their relay URL for future connections
+                bundle.sender.relay_url.clone(),
             );
 
             // Close the connection gracefully
@@ -144,14 +147,16 @@ pub async fn handle_trust_confirm(
     // QUIC may not deliver data if the endpoint closes too quickly
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    // Create the trusted peer
-    let peer = TrustedPeer::new(
+    // Create the trusted peer, storing their relay URL for future connections
+    let peer = TrustedPeer::new_with_relay(
         their_peer_info.endpoint_id.clone(),
         their_peer_info.name.clone(),
         // We grant all permissions (they get what we offered in the bundle)
         Permissions::all(),
         // Their permissions to us (what they offered in TrustConfirm)
         their_permissions.clone(),
+        // Store their relay URL for future connections
+        their_peer_info.relay_url.clone(),
     );
 
     Ok(HandshakeResult {

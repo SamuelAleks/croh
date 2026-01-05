@@ -103,6 +103,10 @@ pub struct TrustedPeer {
     /// User notes about this peer (optional)
     #[serde(default)]
     pub notes: Option<String>,
+
+    /// Relay URL for connectivity (for NAT traversal)
+    #[serde(default)]
+    pub relay_url: Option<String>,
 }
 
 impl TrustedPeer {
@@ -112,6 +116,17 @@ impl TrustedPeer {
         name: String,
         permissions_granted: Permissions,
         their_permissions: Permissions,
+    ) -> Self {
+        Self::new_with_relay(endpoint_id, name, permissions_granted, their_permissions, None)
+    }
+
+    /// Create a new trusted peer from handshake data with relay URL.
+    pub fn new_with_relay(
+        endpoint_id: String,
+        name: String,
+        permissions_granted: Permissions,
+        their_permissions: Permissions,
+        relay_url: Option<String>,
     ) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -124,6 +139,7 @@ impl TrustedPeer {
             os: None,
             version: None,
             notes: None,
+            relay_url,
         }
     }
 
