@@ -237,11 +237,18 @@ pub async fn accept_trust_connections(
                     Ok(result) => {
                         info!("Trust established with {}", result.peer.name);
 
-                        // Add to peer store
-                        if let Err(e) = peer_store.add(result.peer.clone()) {
-                            error!("Failed to save peer: {}", e);
-                        } else {
-                            info!("Peer {} added to store", result.peer.name);
+                        // Add to peer store (or update if exists)
+                        match peer_store.add_or_update(result.peer.clone()) {
+                            Ok(updated) => {
+                                if updated {
+                                    info!("Peer {} updated in store", result.peer.name);
+                                } else {
+                                    info!("Peer {} added to store", result.peer.name);
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to save peer: {}", e);
+                            }
                         }
 
                         // Close connection

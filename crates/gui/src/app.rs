@@ -893,6 +893,7 @@ impl App {
             let config = config.clone();
             let identity = identity.clone();
             let peer_store = peer_store.clone();
+            let shared_endpoint = self.shared_endpoint.clone();
 
             move |code| {
                 // Sanitize code: remove nul bytes and other control characters
@@ -914,6 +915,7 @@ impl App {
                 let config = config.clone();
                 let identity = identity.clone();
                 let peer_store = peer_store.clone();
+                let shared_endpoint = shared_endpoint.clone();
 
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
@@ -1035,7 +1037,7 @@ impl App {
                                                 .await;
 
                                             // Check for trust bundles in received files
-                                            check_and_handle_trust_bundle(&download_dir, &window_weak, &identity, &peer_store).await;
+                                            check_and_handle_trust_bundle(&download_dir, &window_weak, &identity, &shared_endpoint, &peer_store).await;
                                             break;
                                         }
                                         Some(CrocEvent::Failed(err)) => {
@@ -1085,7 +1087,7 @@ impl App {
                                             update_transfers_ui(&window_weak, &transfer_manager).await;
 
                                             // Check for trust bundles in received files
-                                            check_and_handle_trust_bundle(&download_dir, &window_weak, &identity, &peer_store).await;
+                                            check_and_handle_trust_bundle(&download_dir, &window_weak, &identity, &shared_endpoint, &peer_store).await;
                                         }
                                         Ok(status) => {
                                             warn!("Receive process exited with status: {:?}", status);
@@ -2078,6 +2080,7 @@ async fn check_and_handle_trust_bundle(
     download_dir: &PathBuf,
     window_weak: &Weak<MainWindow>,
     identity: &Arc<RwLock<Option<Identity>>>,
+    shared_endpoint: &Arc<RwLock<Option<IrohEndpoint>>>,
     peer_store: &Arc<RwLock<PeerStore>>,
 ) {
     use croc_gui_core::complete_trust_as_receiver;
@@ -2162,14 +2165,17 @@ async fn check_and_handle_trust_bundle(
         }
     };
 
-    // Create Iroh endpoint and connect back
-    let endpoint = match IrohEndpoint::new(our_identity.clone()).await {
-        Ok(ep) => ep,
-        Err(e) => {
-            error!("Failed to create Iroh endpoint: {}", e);
-            update_status(window_weak, &format!("Network error: {}", e));
-            let _ = std::fs::remove_file(&path);
-            return;
+    // Get the shared endpoint (should already be running from background listener)
+    let endpoint = {
+        let ep_guard = shared_endpoint.read().await;
+        match ep_guard.as_ref() {
+            Some(ep) => ep.clone(),
+            None => {
+                error!("No shared endpoint available for trust handshake");
+                update_status(window_weak, "Error: Network not ready");
+                let _ = std::fs::remove_file(&path);
+                return;
+            }
         }
     };
 
@@ -2181,49 +2187,57 @@ async fn check_and_handle_trust_bundle(
             info!("Trust established with {}", result.peer.name);
             update_status(window_weak, &format!("Trusted peer added: {}", result.peer.name));
 
-            // Add to peer store
+            // Add to peer store (or update if peer already exists)
             let mut store = peer_store.write().await;
-            if let Err(e) = store.add(result.peer.clone()) {
-                error!("Failed to save peer: {}", e);
-            } else {
-                // Update peers UI
-                let peer_items: Vec<_> = store.list().iter().map(|p| {
-                    let last_seen = p.last_seen
-                        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                        .unwrap_or_else(|| "Never".to_string());
-                    (
-                        p.id.clone(),
-                        p.name.clone(),
-                        if p.endpoint_id.len() > 16 {
-                            format!("{}...{}", &p.endpoint_id[..8], &p.endpoint_id[p.endpoint_id.len()-8..])
-                        } else {
-                            p.endpoint_id.clone()
-                        },
-                        "offline".to_string(),
-                        last_seen,
-                        p.their_permissions.push,
-                        p.their_permissions.pull,
-                    )
-                }).collect();
-                drop(store);
-
-                let window_weak_peers = window_weak.clone();
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(window) = window_weak_peers.upgrade() {
-                        let items: Vec<PeerItem> = peer_items.into_iter()
-                            .map(|(id, name, endpoint_id, status, last_seen, can_push, can_pull)| PeerItem {
-                                id: SharedString::from(id),
-                                name: SharedString::from(name),
-                                endpoint_id: SharedString::from(endpoint_id),
-                                status: SharedString::from(status),
-                                last_seen: SharedString::from(last_seen),
-                                can_push,
-                                can_pull,
-                            })
-                            .collect();
-                        window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));
+            match store.add_or_update(result.peer.clone()) {
+                Ok(updated) => {
+                    if updated {
+                        info!("Updated existing peer: {}", result.peer.name);
+                    } else {
+                        info!("Added new peer: {}", result.peer.name);
                     }
-                });
+                    // Update peers UI
+                    let peer_items: Vec<_> = store.list().iter().map(|p| {
+                        let last_seen = p.last_seen
+                            .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                            .unwrap_or_else(|| "Never".to_string());
+                        (
+                            p.id.clone(),
+                            p.name.clone(),
+                            if p.endpoint_id.len() > 16 {
+                                format!("{}...{}", &p.endpoint_id[..8], &p.endpoint_id[p.endpoint_id.len()-8..])
+                            } else {
+                                p.endpoint_id.clone()
+                            },
+                            "offline".to_string(),
+                            last_seen,
+                            p.their_permissions.push,
+                            p.their_permissions.pull,
+                        )
+                    }).collect();
+                    drop(store);
+
+                    let window_weak_peers = window_weak.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(window) = window_weak_peers.upgrade() {
+                            let items: Vec<PeerItem> = peer_items.into_iter()
+                                .map(|(id, name, endpoint_id, status, last_seen, can_push, can_pull)| PeerItem {
+                                    id: SharedString::from(id),
+                                    name: SharedString::from(name),
+                                    endpoint_id: SharedString::from(endpoint_id),
+                                    status: SharedString::from(status),
+                                    last_seen: SharedString::from(last_seen),
+                                    can_push,
+                                    can_pull,
+                                })
+                                .collect();
+                            window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));
+                        }
+                    });
+                }
+                Err(e) => {
+                    error!("Failed to save peer: {}", e);
+                }
             }
         }
         Err(e) => {
@@ -2232,7 +2246,7 @@ async fn check_and_handle_trust_bundle(
         }
     }
 
-    endpoint.close().await;
+    // Don't close the shared endpoint - it's used for other operations
 
     // Clean up the bundle file
     if let Err(e) = std::fs::remove_file(&path) {
@@ -2297,9 +2311,21 @@ async fn wait_for_trust_handshake(
                 their_permissions,  // Their permissions to us
             );
 
-            // Add to peer store
+            // Add to peer store (or update if peer already exists)
             let mut store = peer_store.write().await;
-            store.add(peer.clone())?;
+            match store.add_or_update(peer.clone()) {
+                Ok(updated) => {
+                    if updated {
+                        info!("Updated existing peer: {}", peer.name);
+                    } else {
+                        info!("Added new peer: {}", peer.name);
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to save peer: {}", e);
+                    return Err(e);
+                }
+            }
             drop(store);
 
             // Close connection gracefully

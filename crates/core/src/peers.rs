@@ -208,6 +208,31 @@ impl PeerStore {
         self.save()
     }
 
+    /// Add a new trusted peer, or update if it already exists.
+    /// Returns true if the peer was updated, false if newly added.
+    pub fn add_or_update(&mut self, peer: TrustedPeer) -> Result<bool> {
+        if let Some(existing) = self.find_by_endpoint_id_mut(&peer.endpoint_id) {
+            // Update existing peer's fields
+            existing.name = peer.name;
+            existing.last_seen = peer.last_seen;
+            existing.permissions_granted = peer.permissions_granted;
+            existing.their_permissions = peer.their_permissions;
+            existing.relay_url = peer.relay_url;
+            if peer.os.is_some() {
+                existing.os = peer.os;
+            }
+            if peer.version.is_some() {
+                existing.version = peer.version;
+            }
+            self.save()?;
+            Ok(true)
+        } else {
+            self.peers.push(peer);
+            self.save()?;
+            Ok(false)
+        }
+    }
+
     /// Remove a peer by local ID.
     pub fn remove(&mut self, id: &str) -> Result<()> {
         let original_len = self.peers.len();
