@@ -69,9 +69,16 @@ pub async fn complete_trust_as_receiver(
 
     info!("Connected to sender, sending TrustConfirm");
 
-    // Send TrustConfirm with the nonce and our info
+    // Get our relay URL to include in the confirm message
+    // This allows the initiator to connect back to us later
+    let our_relay_url = endpoint.relay_url().map(|u| u.to_string());
+    if our_relay_url.is_some() {
+        info!("Including our relay URL in TrustConfirm: {:?}", our_relay_url);
+    }
+
+    // Send TrustConfirm with the nonce and our info (including relay URL)
     let confirm_msg = ControlMessage::TrustConfirm {
-        peer: our_identity.to_peer_info(),
+        peer: our_identity.to_peer_info_with_relay(our_relay_url),
         nonce: bundle.nonce.clone(),
         permissions: Permissions::all(), // Offer all permissions
     };
