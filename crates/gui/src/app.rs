@@ -5,7 +5,7 @@ use croc_gui_core::{
     croc::{find_croc_executable, refresh_croc_cache, Curve, CrocEvent, CrocOptions, CrocProcess, HashAlgorithm},
     files, platform, Config, ControlMessage, Identity, IrohEndpoint, PeerStore, Permissions,
     Transfer, TransferId, TransferEvent, TransferManager, TransferStatus, TransferType,
-    TrustedPeer, TrustBundle, push_files,
+    TrustedPeer, TrustBundle, push_files, handle_incoming_push,
 };
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
 use std::collections::HashMap;
@@ -30,6 +30,8 @@ pub struct App {
     peer_store: Arc<RwLock<PeerStore>>,
     /// Flag to track if trust initiation is in progress.
     trust_in_progress: Arc<RwLock<bool>>,
+    /// Flag to signal background listener shutdown.
+    listener_shutdown: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Internal representation of a selected file.
@@ -55,6 +57,7 @@ impl App {
             identity: Arc::new(RwLock::new(None)),
             peer_store: Arc::new(RwLock::new(peer_store)),
             trust_in_progress: Arc::new(RwLock::new(false)),
+            listener_shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -69,6 +72,253 @@ impl App {
         self.setup_transfer_callbacks(window);
         self.setup_settings_callbacks(window);
         self.setup_peer_callbacks(window);
+
+        // Start background listener for incoming transfers
+        self.start_background_listener();
+    }
+
+    /// Start a background listener for incoming peer connections.
+    fn start_background_listener(&self) {
+        let identity = self.identity.clone();
+        let peer_store = self.peer_store.clone();
+        let config = self.config.clone();
+        let transfer_manager = self.transfer_manager.clone();
+        let window_weak = self.window.clone();
+        let shutdown = self.listener_shutdown.clone();
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            rt.block_on(async {
+                // Wait for identity to be loaded
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    let id_guard = identity.read().await;
+                    if id_guard.is_some() {
+                        break;
+                    }
+                    drop(id_guard);
+
+                    if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+                }
+
+                // Get identity
+                let our_identity = {
+                    let id_guard = identity.read().await;
+                    match id_guard.as_ref() {
+                        Some(id) => id.clone(),
+                        None => {
+                            error!("Identity not available for background listener");
+                            return;
+                        }
+                    }
+                };
+
+                // Create endpoint
+                let endpoint = match IrohEndpoint::new(our_identity).await {
+                    Ok(ep) => ep,
+                    Err(e) => {
+                        error!("Failed to create background listener endpoint: {}", e);
+                        return;
+                    }
+                };
+
+                info!("Background listener started, waiting for incoming connections...");
+
+                // Accept connections in a loop
+                loop {
+                    if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                        info!("Background listener shutting down");
+                        break;
+                    }
+
+                    // Accept with timeout so we can check shutdown flag
+                    let accept_result = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        endpoint.accept()
+                    ).await;
+
+                    let mut conn = match accept_result {
+                        Ok(Ok(conn)) => conn,
+                        Ok(Err(e)) => {
+                            warn!("Accept error in background listener: {}", e);
+                            continue;
+                        }
+                        Err(_) => {
+                            // Timeout, check shutdown flag and continue
+                            continue;
+                        }
+                    };
+
+                    let remote_id = conn.remote_id_string();
+                    info!("Background listener: accepted connection from {}", remote_id);
+
+                    // Check if this is a trusted peer
+                    let store = peer_store.read().await;
+                    let peer = store.find_by_endpoint_id(&remote_id).cloned();
+                    drop(store);
+
+                    if peer.is_none() {
+                        warn!("Connection from unknown peer {}, ignoring", remote_id);
+                        let _ = conn.close().await;
+                        continue;
+                    }
+                    let peer = peer.unwrap();
+
+                    // Receive the first message to determine what type of request this is
+                    let msg = match tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        conn.recv()
+                    ).await {
+                        Ok(Ok(msg)) => msg,
+                        Ok(Err(e)) => {
+                            warn!("Failed to receive message from {}: {}", remote_id, e);
+                            continue;
+                        }
+                        Err(_) => {
+                            warn!("Timeout waiting for message from {}", remote_id);
+                            continue;
+                        }
+                    };
+
+                    // Handle different message types
+                    match &msg {
+                        ControlMessage::PushOffer { files, total_size, .. } => {
+                            info!(
+                                "Received push offer from {} with {} files ({} bytes)",
+                                peer.name, files.len(), total_size
+                            );
+
+                            // Check if we allow push from this peer
+                            if !peer.permissions_granted.push {
+                                warn!("Push not allowed from {}", peer.name);
+                                let _ = conn.send(&ControlMessage::PushResponse {
+                                    transfer_id: String::new(),
+                                    accepted: false,
+                                    reason: Some("push not allowed".to_string()),
+                                }).await;
+                                continue;
+                            }
+
+                            // Get download directory
+                            let download_dir = {
+                                let cfg = config.read().await;
+                                cfg.download_dir.clone()
+                            };
+
+                            // Create transfer for tracking
+                            let file_names: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
+                            let transfer = Transfer::new_iroh_pull(
+                                file_names,
+                                peer.endpoint_id.clone(),
+                                peer.name.clone(),
+                            );
+                            let transfer_id = transfer.id.clone();
+                            let _ = transfer_manager.add(transfer).await;
+
+                            // Update UI
+                            update_transfers_ui(&window_weak, &transfer_manager).await;
+                            update_status(&window_weak, &format!("Receiving files from {}...", peer.name));
+
+                            // Create progress channel
+                            let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<TransferEvent>(100);
+
+                            // Spawn progress handler
+                            let transfer_manager_progress = transfer_manager.clone();
+                            let window_weak_progress = window_weak.clone();
+                            let transfer_id_progress = transfer_id.clone();
+                            let peer_name = peer.name.clone();
+                            tokio::spawn(async move {
+                                while let Some(event) = progress_rx.recv().await {
+                                    match event {
+                                        TransferEvent::Started { .. } => {
+                                            let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
+                                                t.status = TransferStatus::Running;
+                                            }).await;
+                                            update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                        }
+                                        TransferEvent::Progress { transferred, total, speed, .. } => {
+                                            let progress = if total > 0 { transferred as f64 / total as f64 * 100.0 } else { 0.0 };
+                                            let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
+                                                t.progress = progress;
+                                                t.speed = speed.clone();
+                                                t.transferred = transferred;
+                                                t.total_size = total;
+                                            }).await;
+                                            update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                        }
+                                        TransferEvent::FileComplete { file, .. } => {
+                                            info!("File received: {}", file);
+                                        }
+                                        TransferEvent::Complete { .. } => {
+                                            let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
+                                                t.status = TransferStatus::Completed;
+                                                t.progress = 100.0;
+                                                t.completed_at = Some(chrono::Utc::now());
+                                            }).await;
+                                            update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                            update_status(&window_weak_progress, &format!("Received files from {}", peer_name));
+                                        }
+                                        TransferEvent::Failed { error, .. } => {
+                                            error!("Transfer failed: {}", error);
+                                            let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
+                                                t.status = TransferStatus::Failed;
+                                                t.error = Some(error.clone());
+                                            }).await;
+                                            update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                            update_status(&window_weak_progress, &format!("Receive failed: {}", error));
+                                        }
+                                        TransferEvent::Cancelled { .. } => {
+                                            let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
+                                                t.status = TransferStatus::Cancelled;
+                                            }).await;
+                                            update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                        }
+                                    }
+                                }
+                            });
+
+                            // Handle the incoming push
+                            match handle_incoming_push(
+                                &mut conn,
+                                &remote_id,
+                                msg,
+                                &download_dir,
+                                progress_tx,
+                            ).await {
+                                Ok(_) => {
+                                    info!("Successfully received files from {}", peer.name);
+                                }
+                                Err(e) => {
+                                    error!("Failed to receive files from {}: {}", peer.name, e);
+                                    let _ = transfer_manager.update(&transfer_id, |t| {
+                                        t.status = TransferStatus::Failed;
+                                        t.error = Some(e.to_string());
+                                    }).await;
+                                    update_transfers_ui(&window_weak, &transfer_manager).await;
+                                }
+                            }
+                        }
+                        ControlMessage::TrustConfirm { .. } => {
+                            // This is a trust handshake, not a transfer
+                            // The dedicated trust handler should deal with this
+                            info!("Received TrustConfirm in background listener, ignoring (handled elsewhere)");
+                        }
+                        other => {
+                            warn!("Unexpected message type from {}: {:?}", remote_id, other);
+                        }
+                    }
+                }
+
+                let _ = endpoint.close().await;
+                info!("Background listener closed");
+            });
+        });
     }
 
     /// Initialize settings in the UI.
