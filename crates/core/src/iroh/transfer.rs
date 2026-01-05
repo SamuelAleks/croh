@@ -102,28 +102,9 @@ pub async fn push_files(
         })
         .await;
 
-    // Parse peer node ID
-    let node_id: NodeId = peer
-        .endpoint_id
-        .parse()
-        .map_err(|e| Error::Iroh(format!("invalid node id: {}", e)))?;
-
-    // Add peer's address information so we can connect
-    // This includes the relay URL for NAT traversal
-    let mut node_addr = iroh::NodeAddr::new(node_id);
-    if let Some(ref relay_url) = peer.relay_url {
-        if let Ok(url) = relay_url.parse() {
-            node_addr = node_addr.with_relay_url(url);
-            info!("Using relay URL for push: {}", relay_url);
-        }
-    }
-    endpoint.add_node_addr(node_addr)?;
-
-    // Connect to peer
-    info!("Connecting to peer {} for push", peer.name);
-    let mut conn = endpoint.connect_to_node(node_id).await?;
-
-    // Prepare file info - hash all files first
+    // Prepare file info - hash all files BEFORE connecting
+    // This prevents connection timeout during hashing of large files
+    info!("Hashing {} files before connecting...", files.len());
     let mut file_infos = Vec::new();
     let mut total_size = 0u64;
 
@@ -147,6 +128,28 @@ pub async fn push_files(
         });
         total_size += metadata.len();
     }
+    info!("Files hashed: {} files, {} bytes total", files.len(), total_size);
+
+    // Parse peer node ID
+    let node_id: NodeId = peer
+        .endpoint_id
+        .parse()
+        .map_err(|e| Error::Iroh(format!("invalid node id: {}", e)))?;
+
+    // Add peer's address information so we can connect
+    // This includes the relay URL for NAT traversal
+    let mut node_addr = iroh::NodeAddr::new(node_id);
+    if let Some(ref relay_url) = peer.relay_url {
+        if let Ok(url) = relay_url.parse() {
+            node_addr = node_addr.with_relay_url(url);
+            info!("Using relay URL for push: {}", relay_url);
+        }
+    }
+    endpoint.add_node_addr(node_addr)?;
+
+    // Connect to peer
+    info!("Connecting to peer {} for push", peer.name);
+    let mut conn = endpoint.connect_to_node(node_id).await?;
 
     // Send push offer
     let offer = ControlMessage::PushOffer {
