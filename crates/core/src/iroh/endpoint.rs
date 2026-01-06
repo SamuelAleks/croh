@@ -261,10 +261,15 @@ impl ControlConnection {
     }
 
     /// Close the connection gracefully.
+    ///
+    /// This finishes the send stream and waits for the peer to acknowledge
+    /// receipt of all data before returning.
     pub async fn close(mut self) -> Result<()> {
         self.send
             .finish()
             .map_err(|e| Error::Iroh(format!("finish failed: {}", e)))?;
+        // Wait for peer to acknowledge receipt of all data
+        let _ = self.send.stopped().await;
         Ok(())
     }
 }

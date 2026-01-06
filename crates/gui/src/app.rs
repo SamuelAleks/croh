@@ -368,6 +368,8 @@ impl App {
                                     error!("Browse request failed for {}: {}", peer.name, e);
                                 }
                             }
+                            // Close connection gracefully to ensure response is sent
+                            let _ = conn.close().await;
                         }
                         ControlMessage::PullRequest { files, .. } => {
                             info!("Received pull request from {} for {} files", peer.name, files.len());
