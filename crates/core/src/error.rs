@@ -60,6 +60,10 @@ pub enum Error {
     /// Transfer error
     #[error("transfer error: {0}")]
     Transfer(String),
+
+    /// Browse error
+    #[error("browse error: {0}")]
+    Browse(String),
 }
 
 /// Result type alias using our Error type.

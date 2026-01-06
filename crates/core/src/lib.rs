@@ -25,8 +25,9 @@ pub use croc::{CrocOptions, CrocProcess, CrocProcessHandle, find_croc_executable
 pub use error::{Error, Result};
 pub use iroh::{
     complete_trust_as_receiver, accept_trust_connections, HandshakeResult,
-    ControlConnection, ControlMessage, Identity, IrohEndpoint, ALPN_CONTROL,
-    push_files, pull_files, handle_incoming_push, TransferEvent,
+    ControlConnection, ControlMessage, DirectoryEntry, FileRequest, Identity, IrohEndpoint, ALPN_CONTROL,
+    push_files, pull_files, handle_incoming_push, handle_incoming_pull, handle_browse_request, browse_remote, TransferEvent,
+    browse_directory, default_browsable_paths, get_browsable_roots,
 };
 pub use peers::{PeerStore, Permissions, TrustedPeer};
 pub use transfer::{Transfer, TransferId, TransferManager, TransferStatus, TransferType};

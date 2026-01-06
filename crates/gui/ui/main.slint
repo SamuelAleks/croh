@@ -89,6 +89,15 @@ export struct PeerItem {
     can-pull: bool,          // permission to pull files from this peer
 }
 
+export struct BrowseEntry {
+    name: string,
+    is-dir: bool,
+    size: string,
+    modified: string,
+    path: string,            // full path for selection
+    selected: bool,
+}
+
 // ============================================================================
 // Application Logic Interface
 // ============================================================================
@@ -117,6 +126,13 @@ export global AppLogic {
     callback push-to-peer(string); // peer id - push selected files to peer
     callback pull-from-peer(string); // peer id - open browse dialog for peer
 
+    // File browser callbacks (for remote peer browsing)
+    callback browse-peer(string);              // peer id - start browsing
+    callback browse-navigate(string);          // path - navigate to directory
+    callback browse-toggle-select(int);        // index - toggle file selection
+    callback browse-pull-selected();           // pull all selected files
+    callback browse-close();                   // close browser dialog
+
     in property <[SelectedFile]> selected-files: [];
     in property <[TransferItem]> transfers: [];
     in property <string> app-status: "Ready";
@@ -138,6 +154,15 @@ export global AppLogic {
     in property <bool> trust-in-progress: false;
     in property <string> trust-code: "";
     in property <string> endpoint-id: "";
+
+    // File browser state
+    in property <bool> browse-open: false;
+    in property <string> browse-peer-id: "";
+    in property <string> browse-peer-name: "";
+    in property <string> browse-current-path: "/";
+    in property <[BrowseEntry]> browse-entries: [];
+    in property <bool> browse-loading: false;
+    in property <string> browse-error: "";
 }
 
 // ============================================================================
@@ -796,6 +821,7 @@ component PeerCard inherits Rectangle {
     in property <PeerItem> peer;
     callback remove-clicked();
     callback push-clicked();
+    callback browse-clicked();
 
     height: 56px;
     background: Theme.bg-card;
@@ -844,6 +870,12 @@ component PeerCard inherits Rectangle {
             font-size: 11px;
             color: Theme.text-muted;
             vertical-alignment: center;
+        }
+
+        // Browse button (for pulling files from peer)
+        if peer.can-pull : CompactButton {
+            label: "Browse";
+            clicked => { root.browse-clicked(); }
         }
 
         // Push button (only show if files selected and peer has permission)
@@ -990,6 +1022,7 @@ component PeersPanel inherits Rectangle {
                         peer: peer;
                         remove-clicked => { AppLogic.remove-peer(peer.id); }
                         push-clicked => { AppLogic.push-to-peer(peer.id); }
+                        browse-clicked => { AppLogic.browse-peer(peer.id); }
                     }
                 }
             }
@@ -1287,6 +1320,277 @@ component TransfersBar inherits Rectangle {
 }
 
 // ============================================================================
+// File Browser Entry
+// ============================================================================
+
+component BrowseEntryRow inherits Rectangle {
+    in property <BrowseEntry> entry;
+    in property <int> index;
+    callback clicked();
+    callback double-clicked();
+
+    height: 28px;
+    background: entry.selected ? Theme.accent-glow : (touch.has-hover ? Theme.bg-hover : transparent);
+    border-radius: Theme.radius-sm;
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+        double-clicked => { root.double-clicked(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 8px;
+
+        // Icon
+        Text {
+            text: entry.is-dir ? "📁" : "📄";
+            font-size: 14px;
+            vertical-alignment: center;
+            width: 20px;
+        }
+
+        // Name
+        Text {
+            text: entry.name;
+            font-size: 12px;
+            color: Theme.text;
+            overflow: elide;
+            horizontal-stretch: 1;
+            vertical-alignment: center;
+        }
+
+        // Size (files only)
+        if !entry.is-dir: Text {
+            text: entry.size;
+            font-size: 11px;
+            color: Theme.text-muted;
+            vertical-alignment: center;
+            width: 70px;
+            horizontal-alignment: right;
+        }
+
+        // Selection indicator (files only)
+        if !entry.is-dir: Rectangle {
+            width: 18px;
+            height: 18px;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: entry.selected ? Theme.accent : Theme.border;
+            background: entry.selected ? Theme.accent : transparent;
+
+            Text {
+                text: entry.selected ? "✓" : "";
+                font-size: 12px;
+                color: Theme.accent-text;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+// ============================================================================
+// File Browser Dialog
+// ============================================================================
+
+component FileBrowserDialog inherits Rectangle {
+    background: #00000080;
+
+    // Click outside to close
+    touch := TouchArea {
+        clicked => { AppLogic.browse-close(); }
+    }
+
+    // Dialog panel
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: min(parent.width - 40px, 600px);
+        height: min(parent.height - 60px, 500px);
+        background: Theme.bg-card;
+        border-radius: Theme.radius-md;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        // Prevent clicks from closing
+        TouchArea {}
+
+        VerticalLayout {
+            padding: 0;
+            spacing: 0;
+
+            // Header
+            Rectangle {
+                height: 44px;
+                background: Theme.bg-dark;
+                border-radius: Theme.radius-md;
+
+                HorizontalLayout {
+                    padding: Theme.spacing-sm;
+                    spacing: Theme.spacing-sm;
+
+                    Text {
+                        text: "Browse: " + AppLogic.browse-peer-name;
+                        font-size: 14px;
+                        font-weight: 600;
+                        color: Theme.text;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+
+                    IconBtn {
+                        icon: "✕";
+                        icon-color: Theme.text-muted;
+                        clicked => { AppLogic.browse-close(); }
+                    }
+                }
+            }
+
+            // Breadcrumb / Path
+            Rectangle {
+                height: 36px;
+                background: Theme.bg-hover;
+
+                HorizontalLayout {
+                    padding-left: Theme.spacing-sm;
+                    padding-right: Theme.spacing-sm;
+                    spacing: Theme.spacing-xs;
+
+                    // Up button
+                    CompactButton {
+                        label: "↑ Up";
+                        enabled: AppLogic.browse-current-path != "/";
+                        clicked => {
+                            // Navigate to parent
+                            AppLogic.browse-navigate("..");
+                        }
+                    }
+
+                    // Current path
+                    Text {
+                        text: AppLogic.browse-current-path;
+                        font-size: 12px;
+                        font-family: "monospace";
+                        color: Theme.text-dim;
+                        overflow: elide;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                }
+            }
+
+            // Content area
+            Rectangle {
+                vertical-stretch: 1;
+                background: Theme.bg-card;
+
+                // Loading indicator
+                if AppLogic.browse-loading: VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: "Loading...";
+                        font-size: 13px;
+                        color: Theme.text-muted;
+                        horizontal-alignment: center;
+                    }
+                }
+
+                // Error message
+                if AppLogic.browse-error != "" && !AppLogic.browse-loading: VerticalLayout {
+                    alignment: center;
+                    padding: Theme.spacing-md;
+
+                    Text {
+                        text: "Error";
+                        font-size: 14px;
+                        font-weight: 600;
+                        color: Theme.error;
+                        horizontal-alignment: center;
+                    }
+
+                    Text {
+                        text: AppLogic.browse-error;
+                        font-size: 12px;
+                        color: Theme.text-dim;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                    }
+                }
+
+                // File list
+                if !AppLogic.browse-loading && AppLogic.browse-error == "": ScrollView {
+                    VerticalLayout {
+                        padding: Theme.spacing-xs;
+                        spacing: 2px;
+
+                        if AppLogic.browse-entries.length == 0: Text {
+                            text: "No files found";
+                            font-size: 12px;
+                            color: Theme.text-muted;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        for entry[i] in AppLogic.browse-entries: BrowseEntryRow {
+                            entry: entry;
+                            index: i;
+                            clicked => {
+                                if entry.is-dir {
+                                    // Navigate into directory
+                                    AppLogic.browse-navigate(entry.path);
+                                } else {
+                                    // Toggle selection
+                                    AppLogic.browse-toggle-select(i);
+                                }
+                            }
+                            double-clicked => {
+                                if entry.is-dir {
+                                    AppLogic.browse-navigate(entry.path);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Footer with actions
+            Rectangle {
+                height: 50px;
+                background: Theme.bg-dark;
+
+                HorizontalLayout {
+                    padding: Theme.spacing-sm;
+                    spacing: Theme.spacing-sm;
+
+                    // Selection hint
+                    Text {
+                        text: "Click files to select, then pull";
+                        font-size: 12px;
+                        color: Theme.text-dim;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+
+                    CompactButton {
+                        label: "Cancel";
+                        clicked => { AppLogic.browse-close(); }
+                    }
+
+                    CompactButton {
+                        label: "Pull Selected";
+                        primary: true;
+                        clicked => { AppLogic.browse-pull-selected(); }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
 // Main Window
 // ============================================================================
 
@@ -1373,4 +1677,7 @@ export component MainWindow inherits Window {
             height: transfers-height;
         }
     }
+
+    // File browser overlay
+    if AppLogic.browse-open: FileBrowserDialog {}
 }

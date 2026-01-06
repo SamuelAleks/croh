@@ -3,9 +3,9 @@
 use croc_gui_core::{
     config::Theme,
     croc::{find_croc_executable, refresh_croc_cache, Curve, CrocEvent, CrocOptions, CrocProcess, HashAlgorithm},
-    files, platform, Config, ControlMessage, Identity, IrohEndpoint, PeerStore, Permissions,
+    files, platform, Config, ControlMessage, FileRequest, Identity, IrohEndpoint, PeerStore, Permissions,
     Transfer, TransferId, TransferEvent, TransferManager, TransferStatus, TransferType,
-    TrustedPeer, TrustBundle, push_files, handle_incoming_push,
+    TrustedPeer, TrustBundle, push_files, pull_files, handle_incoming_push, handle_incoming_pull, handle_browse_request, browse_remote, default_browsable_paths,
 };
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
 use std::collections::HashMap;
@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
-use crate::{AppLogic, AppSettings, MainWindow, PeerItem, SelectedFile, TransferItem};
+use crate::{AppLogic, AppSettings, BrowseEntry, MainWindow, PeerItem, SelectedFile, TransferItem};
 
 /// Application state.
 pub struct App {
@@ -34,6 +34,28 @@ pub struct App {
     trust_in_progress: Arc<RwLock<bool>>,
     /// Flag to signal background listener shutdown.
     listener_shutdown: Arc<std::sync::atomic::AtomicBool>,
+    /// Current browse state (peer_id, current_path, entries with selection state).
+    browse_state: Arc<RwLock<BrowseState>>,
+}
+
+/// State for file browser dialog.
+#[derive(Clone, Debug, Default)]
+struct BrowseState {
+    peer_id: String,
+    peer_name: String,
+    current_path: String,
+    entries: Vec<BrowseEntryData>,
+}
+
+/// Internal representation of a browse entry.
+#[derive(Clone, Debug)]
+struct BrowseEntryData {
+    name: String,
+    is_dir: bool,
+    size: u64,
+    modified: Option<i64>,
+    path: String,
+    selected: bool,
 }
 
 /// Internal representation of a selected file.
@@ -61,6 +83,7 @@ impl App {
             peer_store: Arc::new(RwLock::new(peer_store)),
             trust_in_progress: Arc::new(RwLock::new(false)),
             listener_shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            browse_state: Arc::new(RwLock::new(BrowseState::default())),
         }
     }
 
@@ -75,6 +98,7 @@ impl App {
         self.setup_transfer_callbacks(window);
         self.setup_settings_callbacks(window);
         self.setup_peer_callbacks(window);
+        self.setup_browse_callbacks(window);
 
         // Start background listener for incoming transfers
         self.start_background_listener();
@@ -318,6 +342,146 @@ impl App {
                             // This is a trust handshake, not a transfer
                             // The dedicated trust handler should deal with this
                             info!("Received TrustConfirm in background listener, ignoring (handled elsewhere)");
+                        }
+                        ControlMessage::BrowseRequest { path } => {
+                            info!("Received browse request from {} for path: {:?}", peer.name, path);
+
+                            // Check if we allow browse from this peer
+                            if !peer.permissions_granted.browse {
+                                warn!("Browse not allowed from {}", peer.name);
+                                let _ = conn.send(&ControlMessage::BrowseResponse {
+                                    path: path.clone().unwrap_or_else(|| "/".to_string()),
+                                    entries: vec![],
+                                    error: Some("browse not allowed".to_string()),
+                                }).await;
+                                continue;
+                            }
+
+                            // Use default browsable paths for now
+                            // TODO: Add configurable paths per peer
+                            let allowed_paths = default_browsable_paths();
+                            match handle_browse_request(&mut conn, path.clone(), Some(&allowed_paths)).await {
+                                Ok(_) => {
+                                    info!("Browse request handled successfully for {}", peer.name);
+                                }
+                                Err(e) => {
+                                    error!("Browse request failed for {}: {}", peer.name, e);
+                                }
+                            }
+                        }
+                        ControlMessage::PullRequest { files, .. } => {
+                            info!("Received pull request from {} for {} files", peer.name, files.len());
+
+                            // Check if we allow pull from this peer
+                            if !peer.permissions_granted.pull {
+                                warn!("Pull not allowed from {}", peer.name);
+                                let _ = conn.send(&ControlMessage::PullResponse {
+                                    transfer_id: String::new(),
+                                    files: vec![],
+                                    granted: false,
+                                    reason: Some("pull not allowed".to_string()),
+                                }).await;
+                                continue;
+                            }
+
+                            // Create transfer for tracking (outgoing for us)
+                            let file_names: Vec<String> = files.iter().map(|f| {
+                                std::path::Path::new(&f.path)
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or(&f.path)
+                                    .to_string()
+                            }).collect();
+                            let transfer = Transfer::new_iroh_push(
+                                file_names,
+                                peer.endpoint_id.clone(),
+                                peer.name.clone(),
+                            );
+                            let transfer_id = transfer.id.clone();
+                            let _ = transfer_manager.add(transfer).await;
+
+                            // Update UI
+                            update_transfers_ui(&window_weak, &transfer_manager).await;
+                            update_status(&window_weak, &format!("Sending files to {} (pull)...", peer.name));
+
+                            // Create progress channel
+                            let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<TransferEvent>(100);
+
+                            // Spawn progress handler
+                            let transfer_manager_progress = transfer_manager.clone();
+                            let window_weak_progress = window_weak.clone();
+                            let transfer_id_progress = transfer_id.clone();
+                            let peer_name = peer.name.clone();
+                            tokio::spawn(async move {
+                                while let Some(event) = progress_rx.recv().await {
+                                    match event {
+                                        TransferEvent::Started { .. } => {
+                                            let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
+                                                t.status = TransferStatus::Running;
+                                            }).await;
+                                            update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                        }
+                                        TransferEvent::Progress { transferred, total, speed, .. } => {
+                                            let progress = if total > 0 { transferred as f64 / total as f64 * 100.0 } else { 0.0 };
+                                            let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
+                                                t.progress = progress;
+                                                t.speed = speed.clone();
+                                                t.transferred = transferred;
+                                                t.total_size = total;
+                                            }).await;
+                                            update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                        }
+                                        TransferEvent::FileComplete { file, .. } => {
+                                            info!("File sent: {}", file);
+                                        }
+                                        TransferEvent::Complete { .. } => {
+                                            let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
+                                                t.status = TransferStatus::Completed;
+                                                t.progress = 100.0;
+                                                t.completed_at = Some(chrono::Utc::now());
+                                            }).await;
+                                            update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                            update_status(&window_weak_progress, &format!("Pull completed for {}", peer_name));
+                                        }
+                                        TransferEvent::Failed { error, .. } => {
+                                            error!("Pull transfer failed: {}", error);
+                                            let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
+                                                t.status = TransferStatus::Failed;
+                                                t.error = Some(error.clone());
+                                            }).await;
+                                            update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                            update_status(&window_weak_progress, &format!("Pull failed: {}", error));
+                                        }
+                                        TransferEvent::Cancelled { .. } => {
+                                            let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
+                                                t.status = TransferStatus::Cancelled;
+                                            }).await;
+                                            update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                        }
+                                    }
+                                }
+                            });
+
+                            // Use default browsable paths for validation
+                            let allowed_paths = default_browsable_paths();
+                            match handle_incoming_pull(
+                                &mut conn,
+                                msg,
+                                Some(&allowed_paths),
+                                progress_tx,
+                            ).await {
+                                Ok(_) => {
+                                    info!("Successfully sent files to {} (pull)", peer.name);
+                                }
+                                Err(e) => {
+                                    error!("Failed to handle pull from {}: {}", peer.name, e);
+                                    let _ = transfer_manager.update(&transfer_id, |t| {
+                                        t.status = TransferStatus::Failed;
+                                        t.error = Some(e.to_string());
+                                    }).await;
+                                    update_transfers_ui(&window_weak, &transfer_manager).await;
+                                }
+                            }
                         }
                         other => {
                             warn!("Unexpected message type from {}: {:?}", remote_id, other);
@@ -2017,6 +2181,600 @@ impl App {
                 });
             }
         });
+    }
+
+    /// Set up file browser callbacks.
+    fn setup_browse_callbacks(&self, window: &MainWindow) {
+        let window_weak = self.window.clone();
+        let peer_store = self.peer_store.clone();
+        let shared_endpoint = self.shared_endpoint.clone();
+        let browse_state = self.browse_state.clone();
+        let config = self.config.clone();
+        let transfer_manager = self.transfer_manager.clone();
+
+        // Browse peer - open file browser for a peer
+        window.global::<AppLogic>().on_browse_peer({
+            let window_weak = window_weak.clone();
+            let peer_store = peer_store.clone();
+            let shared_endpoint = shared_endpoint.clone();
+            let browse_state = browse_state.clone();
+
+            move |peer_id| {
+                let peer_id_str = peer_id.to_string();
+                info!("Browse peer requested: {}", peer_id_str);
+                let window_weak = window_weak.clone();
+                let peer_store = peer_store.clone();
+                let shared_endpoint = shared_endpoint.clone();
+                let browse_state = browse_state.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Get the peer
+                        let store = peer_store.read().await;
+                        let peer = match store.find_by_id(&peer_id_str) {
+                            Some(p) => p.clone(),
+                            None => {
+                                error!("Peer not found: {}", peer_id_str);
+                                update_status(&window_weak, &format!("Peer not found: {}", peer_id_str));
+                                return;
+                            }
+                        };
+                        drop(store);
+
+                        // Check if peer allows browse
+                        if !peer.their_permissions.browse {
+                            update_status(&window_weak, &format!("Peer {} does not allow browse", peer.name));
+                            return;
+                        }
+
+                        // Set loading state
+                        {
+                            let mut state = browse_state.write().await;
+                            state.peer_id = peer_id_str.clone();
+                            state.peer_name = peer.name.clone();
+                            state.current_path = "/".to_string();
+                            state.entries.clear();
+                        }
+
+                        // Update UI to show loading
+                        let window_weak_ui = window_weak.clone();
+                        let peer_name = peer.name.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(window) = window_weak_ui.upgrade() {
+                                window.global::<AppLogic>().set_browse_open(true);
+                                window.global::<AppLogic>().set_browse_peer_id(SharedString::from(&peer_id_str));
+                                window.global::<AppLogic>().set_browse_peer_name(SharedString::from(&peer_name));
+                                window.global::<AppLogic>().set_browse_current_path(SharedString::from("/"));
+                                window.global::<AppLogic>().set_browse_loading(true);
+                                window.global::<AppLogic>().set_browse_error(SharedString::from(""));
+                                window.global::<AppLogic>().set_browse_entries(ModelRc::new(VecModel::from(Vec::<BrowseEntry>::new())));
+                            }
+                        });
+
+                        // Get the shared endpoint
+                        let endpoint = {
+                            let ep_guard = shared_endpoint.read().await;
+                            match ep_guard.as_ref() {
+                                Some(ep) => ep.clone(),
+                                None => {
+                                    error!("Shared endpoint not ready");
+                                    let window_weak_err = window_weak.clone();
+                                    let _ = slint::invoke_from_event_loop(move || {
+                                        if let Some(window) = window_weak_err.upgrade() {
+                                            window.global::<AppLogic>().set_browse_loading(false);
+                                            window.global::<AppLogic>().set_browse_error(SharedString::from("Network not ready"));
+                                        }
+                                    });
+                                    return;
+                                }
+                            }
+                        };
+
+                        // Browse the root
+                        match browse_remote(&endpoint, &peer, None).await {
+                            Ok((path, entries)) => {
+                                info!("Browse succeeded: {} entries at {}", entries.len(), path);
+
+                                // Convert to internal state
+                                let browse_entries: Vec<BrowseEntryData> = entries.iter().map(|e| {
+                                    BrowseEntryData {
+                                        name: e.name.clone(),
+                                        is_dir: e.is_dir,
+                                        size: e.size,
+                                        modified: e.modified,
+                                        path: if path == "/" {
+                                            e.name.clone()
+                                        } else {
+                                            format!("{}/{}", path, e.name)
+                                        },
+                                        selected: false,
+                                    }
+                                }).collect();
+
+                                // Update state
+                                {
+                                    let mut state = browse_state.write().await;
+                                    state.current_path = path.clone();
+                                    state.entries = browse_entries.clone();
+                                }
+
+                                // Update UI
+                                let window_weak_ok = window_weak.clone();
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if let Some(window) = window_weak_ok.upgrade() {
+                                        window.global::<AppLogic>().set_browse_loading(false);
+                                        window.global::<AppLogic>().set_browse_current_path(SharedString::from(&path));
+
+                                        let ui_entries: Vec<BrowseEntry> = browse_entries.iter().map(|e| {
+                                            BrowseEntry {
+                                                name: SharedString::from(&e.name),
+                                                is_dir: e.is_dir,
+                                                size: SharedString::from(format_size(e.size)),
+                                                modified: SharedString::from(format_timestamp(e.modified)),
+                                                path: SharedString::from(&e.path),
+                                                selected: e.selected,
+                                            }
+                                        }).collect();
+                                        window.global::<AppLogic>().set_browse_entries(ModelRc::new(VecModel::from(ui_entries)));
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                error!("Browse failed: {}", e);
+                                let err_str = e.to_string();
+                                let window_weak_err = window_weak.clone();
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if let Some(window) = window_weak_err.upgrade() {
+                                        window.global::<AppLogic>().set_browse_loading(false);
+                                        window.global::<AppLogic>().set_browse_error(SharedString::from(&err_str));
+                                    }
+                                });
+                            }
+                        }
+                    });
+                });
+            }
+        });
+
+        // Browse navigate - navigate to a directory
+        window.global::<AppLogic>().on_browse_navigate({
+            let window_weak = window_weak.clone();
+            let peer_store = peer_store.clone();
+            let shared_endpoint = shared_endpoint.clone();
+            let browse_state = browse_state.clone();
+
+            move |path| {
+                let path_str = path.to_string();
+                info!("Browse navigate: {}", path_str);
+                let window_weak = window_weak.clone();
+                let peer_store = peer_store.clone();
+                let shared_endpoint = shared_endpoint.clone();
+                let browse_state = browse_state.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Get current peer from browse state
+                        let (peer_id, current_path) = {
+                            let state = browse_state.read().await;
+                            (state.peer_id.clone(), state.current_path.clone())
+                        };
+
+                        // Resolve the path
+                        let target_path = if path_str == ".." {
+                            // Go to parent
+                            if current_path == "/" {
+                                "/".to_string()
+                            } else {
+                                let path = std::path::Path::new(&current_path);
+                                path.parent()
+                                    .and_then(|p| p.to_str())
+                                    .map(|s| if s.is_empty() { "/" } else { s })
+                                    .unwrap_or("/")
+                                    .to_string()
+                            }
+                        } else {
+                            path_str.clone()
+                        };
+
+                        // Get the peer
+                        let store = peer_store.read().await;
+                        let peer = match store.find_by_id(&peer_id) {
+                            Some(p) => p.clone(),
+                            None => {
+                                error!("Peer not found: {}", peer_id);
+                                return;
+                            }
+                        };
+                        drop(store);
+
+                        // Set loading
+                        let window_weak_loading = window_weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(window) = window_weak_loading.upgrade() {
+                                window.global::<AppLogic>().set_browse_loading(true);
+                                window.global::<AppLogic>().set_browse_error(SharedString::from(""));
+                            }
+                        });
+
+                        // Get the shared endpoint
+                        let endpoint = {
+                            let ep_guard = shared_endpoint.read().await;
+                            match ep_guard.as_ref() {
+                                Some(ep) => ep.clone(),
+                                None => {
+                                    error!("Shared endpoint not ready");
+                                    return;
+                                }
+                            }
+                        };
+
+                        // Browse the target path
+                        let browse_path = if target_path == "/" { None } else { Some(target_path.as_str()) };
+                        match browse_remote(&endpoint, &peer, browse_path).await {
+                            Ok((path, entries)) => {
+                                info!("Navigate succeeded: {} entries at {}", entries.len(), path);
+
+                                let browse_entries: Vec<BrowseEntryData> = entries.iter().map(|e| {
+                                    BrowseEntryData {
+                                        name: e.name.clone(),
+                                        is_dir: e.is_dir,
+                                        size: e.size,
+                                        modified: e.modified,
+                                        path: if path == "/" {
+                                            e.name.clone()
+                                        } else {
+                                            format!("{}/{}", path, e.name)
+                                        },
+                                        selected: false,
+                                    }
+                                }).collect();
+
+                                {
+                                    let mut state = browse_state.write().await;
+                                    state.current_path = path.clone();
+                                    state.entries = browse_entries.clone();
+                                }
+
+                                let window_weak_ok = window_weak.clone();
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if let Some(window) = window_weak_ok.upgrade() {
+                                        window.global::<AppLogic>().set_browse_loading(false);
+                                        window.global::<AppLogic>().set_browse_current_path(SharedString::from(&path));
+
+                                        let ui_entries: Vec<BrowseEntry> = browse_entries.iter().map(|e| {
+                                            BrowseEntry {
+                                                name: SharedString::from(&e.name),
+                                                is_dir: e.is_dir,
+                                                size: SharedString::from(format_size(e.size)),
+                                                modified: SharedString::from(format_timestamp(e.modified)),
+                                                path: SharedString::from(&e.path),
+                                                selected: e.selected,
+                                            }
+                                        }).collect();
+                                        window.global::<AppLogic>().set_browse_entries(ModelRc::new(VecModel::from(ui_entries)));
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                error!("Navigate failed: {}", e);
+                                let err_str = e.to_string();
+                                let window_weak_err = window_weak.clone();
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if let Some(window) = window_weak_err.upgrade() {
+                                        window.global::<AppLogic>().set_browse_loading(false);
+                                        window.global::<AppLogic>().set_browse_error(SharedString::from(&err_str));
+                                    }
+                                });
+                            }
+                        }
+                    });
+                });
+            }
+        });
+
+        // Toggle selection of a browse entry
+        window.global::<AppLogic>().on_browse_toggle_select({
+            let window_weak = window_weak.clone();
+            let browse_state = browse_state.clone();
+
+            move |index| {
+                let idx = index as usize;
+                info!("Toggle select: {}", idx);
+                let window_weak = window_weak.clone();
+                let browse_state = browse_state.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Toggle selection in state
+                        let entries = {
+                            let mut state = browse_state.write().await;
+                            if idx < state.entries.len() {
+                                state.entries[idx].selected = !state.entries[idx].selected;
+                            }
+                            state.entries.clone()
+                        };
+
+                        // Update UI
+                        let window_weak_ui = window_weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(window) = window_weak_ui.upgrade() {
+                                let ui_entries: Vec<BrowseEntry> = entries.iter().map(|e| {
+                                    BrowseEntry {
+                                        name: SharedString::from(&e.name),
+                                        is_dir: e.is_dir,
+                                        size: SharedString::from(format_size(e.size)),
+                                        modified: SharedString::from(format_timestamp(e.modified)),
+                                        path: SharedString::from(&e.path),
+                                        selected: e.selected,
+                                    }
+                                }).collect();
+                                window.global::<AppLogic>().set_browse_entries(ModelRc::new(VecModel::from(ui_entries)));
+                            }
+                        });
+                    });
+                });
+            }
+        });
+
+        // Pull selected files
+        window.global::<AppLogic>().on_browse_pull_selected({
+            let window_weak = window_weak.clone();
+            let peer_store = peer_store.clone();
+            let shared_endpoint = shared_endpoint.clone();
+            let browse_state = browse_state.clone();
+            let config = config.clone();
+            let transfer_manager = transfer_manager.clone();
+
+            move || {
+                info!("Pull selected files");
+                let window_weak = window_weak.clone();
+                let peer_store = peer_store.clone();
+                let shared_endpoint = shared_endpoint.clone();
+                let browse_state = browse_state.clone();
+                let config = config.clone();
+                let transfer_manager = transfer_manager.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Get selected files from browse state
+                        let (peer_id, selected_files) = {
+                            let state = browse_state.read().await;
+                            let selected: Vec<_> = state.entries.iter()
+                                .filter(|e| e.selected && !e.is_dir)
+                                .map(|e| FileRequest {
+                                    path: e.path.clone(),
+                                    hash: None,
+                                })
+                                .collect();
+                            (state.peer_id.clone(), selected)
+                        };
+
+                        if selected_files.is_empty() {
+                            update_status(&window_weak, "No files selected");
+                            return;
+                        }
+
+                        // Get the peer
+                        let store = peer_store.read().await;
+                        let peer = match store.find_by_id(&peer_id) {
+                            Some(p) => p.clone(),
+                            None => {
+                                error!("Peer not found: {}", peer_id);
+                                return;
+                            }
+                        };
+                        drop(store);
+
+                        // Close browser dialog
+                        let window_weak_close = window_weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(window) = window_weak_close.upgrade() {
+                                window.global::<AppLogic>().set_browse_open(false);
+                            }
+                        });
+
+                        // Get download directory
+                        let download_dir = {
+                            let cfg = config.read().await;
+                            cfg.download_dir.clone()
+                        };
+
+                        // Create transfer for tracking
+                        let file_names: Vec<String> = selected_files.iter()
+                            .map(|f| std::path::Path::new(&f.path)
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or(&f.path)
+                                .to_string())
+                            .collect();
+                        let transfer = Transfer::new_iroh_pull(
+                            file_names.clone(),
+                            peer.endpoint_id.clone(),
+                            peer.name.clone(),
+                        );
+                        let transfer_id = transfer.id.clone();
+                        let _ = transfer_manager.add(transfer).await;
+
+                        // Update UI
+                        update_transfers_ui(&window_weak, &transfer_manager).await;
+                        update_status(&window_weak, &format!("Pulling {} files from {}...", selected_files.len(), peer.name));
+
+                        // Get the shared endpoint
+                        let endpoint = {
+                            let ep_guard = shared_endpoint.read().await;
+                            match ep_guard.as_ref() {
+                                Some(ep) => ep.clone(),
+                                None => {
+                                    error!("Shared endpoint not ready");
+                                    let _ = transfer_manager.update(&transfer_id, |t| {
+                                        t.status = TransferStatus::Failed;
+                                        t.error = Some("Network not ready".to_string());
+                                    }).await;
+                                    update_transfers_ui(&window_weak, &transfer_manager).await;
+                                    return;
+                                }
+                            }
+                        };
+
+                        // Create progress channel
+                        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<TransferEvent>(100);
+
+                        // Spawn progress handler
+                        let transfer_manager_progress = transfer_manager.clone();
+                        let window_weak_progress = window_weak.clone();
+                        let transfer_id_progress = transfer_id.clone();
+                        let peer_name = peer.name.clone();
+                        tokio::spawn(async move {
+                            while let Some(event) = progress_rx.recv().await {
+                                match event {
+                                    TransferEvent::Started { .. } => {
+                                        let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
+                                            t.status = TransferStatus::Running;
+                                        }).await;
+                                        update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                    }
+                                    TransferEvent::Progress { transferred, total, speed, .. } => {
+                                        let progress = if total > 0 { transferred as f64 / total as f64 * 100.0 } else { 0.0 };
+                                        let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
+                                            t.progress = progress;
+                                            t.speed = speed.clone();
+                                            t.transferred = transferred;
+                                            t.total_size = total;
+                                        }).await;
+                                        update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                    }
+                                    TransferEvent::FileComplete { file, .. } => {
+                                        info!("File pulled: {}", file);
+                                    }
+                                    TransferEvent::Complete { .. } => {
+                                        let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
+                                            t.status = TransferStatus::Completed;
+                                            t.progress = 100.0;
+                                            t.completed_at = Some(chrono::Utc::now());
+                                        }).await;
+                                        update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                        update_status(&window_weak_progress, &format!("Pull from {} completed", peer_name));
+                                    }
+                                    TransferEvent::Failed { error, .. } => {
+                                        error!("Pull failed: {}", error);
+                                        let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
+                                            t.status = TransferStatus::Failed;
+                                            t.error = Some(error.clone());
+                                        }).await;
+                                        update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                        update_status(&window_weak_progress, &format!("Pull failed: {}", error));
+                                    }
+                                    TransferEvent::Cancelled { .. } => {
+                                        let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
+                                            t.status = TransferStatus::Cancelled;
+                                        }).await;
+                                        update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                    }
+                                }
+                            }
+                        });
+
+                        // Start the pull
+                        match pull_files(&endpoint, &peer, &selected_files, &download_dir, progress_tx).await {
+                            Ok(_) => {
+                                info!("Pull from {} completed", peer.name);
+                            }
+                            Err(e) => {
+                                error!("Pull from {} failed: {}", peer.name, e);
+                                let _ = transfer_manager.update(&transfer_id, |t| {
+                                    t.status = TransferStatus::Failed;
+                                    t.error = Some(e.to_string());
+                                }).await;
+                                update_transfers_ui(&window_weak, &transfer_manager).await;
+                                update_status(&window_weak, &format!("Pull failed: {}", e));
+                            }
+                        }
+                    });
+                });
+            }
+        });
+
+        // Close browser dialog
+        window.global::<AppLogic>().on_browse_close({
+            let window_weak = window_weak.clone();
+            let browse_state = browse_state.clone();
+
+            move || {
+                info!("Close browser");
+                let window_weak = window_weak.clone();
+                let browse_state = browse_state.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Clear state
+                        {
+                            let mut state = browse_state.write().await;
+                            *state = BrowseState::default();
+                        }
+
+                        // Close dialog
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(window) = window_weak.upgrade() {
+                                window.global::<AppLogic>().set_browse_open(false);
+                            }
+                        });
+                    });
+                });
+            }
+        });
+    }
+}
+
+/// Format file size as human-readable string.
+fn format_size(bytes: u64) -> String {
+    if bytes == 0 {
+        return "-".to_string();
+    }
+    if bytes >= 1_000_000_000 {
+        format!("{:.1} GB", bytes as f64 / 1_000_000_000.0)
+    } else if bytes >= 1_000_000 {
+        format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+    } else if bytes >= 1_000 {
+        format!("{:.1} KB", bytes as f64 / 1_000.0)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+/// Format timestamp as human-readable string.
+fn format_timestamp(ts: Option<i64>) -> String {
+    match ts {
+        Some(secs) => {
+            let dt = chrono::DateTime::from_timestamp(secs, 0)
+                .unwrap_or_else(|| chrono::Utc::now());
+            dt.format("%Y-%m-%d %H:%M").to_string()
+        }
+        None => "-".to_string(),
     }
 }
 

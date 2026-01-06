@@ -5,8 +5,9 @@
 
 use crate::error::{Error, Result};
 use crate::iroh::blobs::{hash_file, verify_file_hash};
+use crate::iroh::browse::{browse_directory, get_browsable_roots, resolve_browse_path, validate_path};
 use crate::iroh::endpoint::IrohEndpoint;
-use crate::iroh::protocol::{ControlMessage, FileInfo, FileRequest};
+use crate::iroh::protocol::{ControlMessage, DirectoryEntry, FileInfo, FileRequest};
 use crate::peers::TrustedPeer;
 use crate::transfer::TransferId;
 use iroh::NodeId;
@@ -719,6 +720,316 @@ pub async fn handle_incoming_push(
 
     info!("Push reception completed successfully");
     Ok(transfer_id)
+}
+
+/// Handle a browse request from a trusted peer.
+///
+/// This function:
+/// 1. Validates the requester is a trusted peer with browse permission
+/// 2. Resolves the requested path against allowed paths
+/// 3. Lists directory contents
+/// 4. Returns the directory listing
+pub async fn handle_browse_request(
+    conn: &mut crate::iroh::endpoint::ControlConnection,
+    request_path: Option<String>,
+    allowed_paths: Option<&[PathBuf]>,
+) -> Result<()> {
+    let roots = get_browsable_roots(allowed_paths);
+
+    // Resolve the browse path
+    let resolved_path = match &request_path {
+        Some(p) => resolve_browse_path(p, &roots),
+        None => None,
+    };
+
+    // Browse the directory
+    let (path, entries) = match browse_directory(resolved_path.as_deref(), &roots, false) {
+        Ok(result) => result,
+        Err(e) => {
+            // Send error response
+            let response = ControlMessage::BrowseResponse {
+                path: request_path.unwrap_or_else(|| "/".to_string()),
+                entries: vec![],
+                error: Some(e.to_string()),
+            };
+            conn.send(&response).await?;
+            return Err(e);
+        }
+    };
+
+    // Send successful response
+    let response = ControlMessage::BrowseResponse {
+        path,
+        entries,
+        error: None,
+    };
+    conn.send(&response).await?;
+
+    Ok(())
+}
+
+/// Handle an incoming pull request from a trusted peer.
+///
+/// This function:
+/// 1. Verifies the requester is a trusted peer with pull permission
+/// 2. Validates requested file paths against allowed paths
+/// 3. Hashes files and sends PullResponse
+/// 4. Streams files to the requester
+pub async fn handle_incoming_pull(
+    conn: &mut crate::iroh::endpoint::ControlConnection,
+    request: ControlMessage,
+    allowed_paths: Option<&[PathBuf]>,
+    progress_tx: mpsc::Sender<TransferEvent>,
+) -> Result<TransferId> {
+    // Extract pull request details
+    let (transfer_id_str, file_requests) = match request {
+        ControlMessage::PullRequest {
+            transfer_id,
+            files,
+        } => (transfer_id, files),
+        _ => return Err(Error::Iroh("expected PullRequest message".to_string())),
+    };
+
+    let transfer_id = TransferId(transfer_id_str.clone());
+    info!(
+        "Received pull request for {} files",
+        file_requests.len()
+    );
+
+    // Validate paths and prepare file info
+    let roots = get_browsable_roots(allowed_paths);
+    let mut file_infos = Vec::new();
+    let mut valid_paths = Vec::new();
+    let mut total_size = 0u64;
+    let mut errors = Vec::new();
+
+    for req in &file_requests {
+        let path = PathBuf::from(&req.path);
+
+        // Validate path is within allowed directories
+        match validate_path(&path, &roots) {
+            Ok(canonical) => {
+                if canonical.is_file() {
+                    // Hash the file
+                    match hash_file(&canonical).await {
+                        Ok(hash) => {
+                            let metadata = tokio::fs::metadata(&canonical).await
+                                .map_err(|e| Error::Io(format!("failed to read file metadata: {}", e)))?;
+
+                            let name = canonical
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("unknown")
+                                .to_string();
+
+                            file_infos.push(FileInfo {
+                                path: req.path.clone(),
+                                name,
+                                size: metadata.len(),
+                                hash,
+                            });
+                            valid_paths.push(canonical);
+                            total_size += metadata.len();
+                        }
+                        Err(e) => {
+                            errors.push(format!("{}: failed to hash: {}", req.path, e));
+                        }
+                    }
+                } else {
+                    errors.push(format!("{}: not a file", req.path));
+                }
+            }
+            Err(e) => {
+                errors.push(format!("{}: {}", req.path, e));
+            }
+        }
+    }
+
+    // If no valid files, reject
+    if file_infos.is_empty() {
+        let response = ControlMessage::PullResponse {
+            transfer_id: transfer_id_str.clone(),
+            files: vec![],
+            granted: false,
+            reason: Some(errors.join("; ")),
+        };
+        conn.send(&response).await?;
+        return Err(Error::Trust("no valid files for pull".to_string()));
+    }
+
+    // Send acceptance with file info
+    let response = ControlMessage::PullResponse {
+        transfer_id: transfer_id_str.clone(),
+        files: file_infos.clone(),
+        granted: true,
+        reason: if errors.is_empty() { None } else { Some(format!("some files skipped: {}", errors.join("; "))) },
+    };
+    conn.send(&response).await?;
+    info!("Pull granted for {} files, {} bytes", file_infos.len(), total_size);
+
+    // Notify start
+    let _ = progress_tx
+        .send(TransferEvent::Started {
+            transfer_id: transfer_id.clone(),
+        })
+        .await;
+
+    // Transfer files
+    let start_time = Instant::now();
+    let mut total_transferred = 0u64;
+
+    for (path, info) in valid_paths.iter().zip(file_infos.iter()) {
+        debug!("Sending file: {} ({} bytes)", info.name, info.size);
+
+        // Open file
+        let mut file = tokio::fs::File::open(path)
+            .await
+            .map_err(|e| Error::Io(format!("failed to open file: {}", e)))?;
+
+        // Send file data in chunks
+        let mut buffer = vec![0u8; CHUNK_SIZE];
+
+        loop {
+            let bytes_read = file
+                .read(&mut buffer)
+                .await
+                .map_err(|e| Error::Io(format!("failed to read file: {}", e)))?;
+
+            if bytes_read == 0 {
+                break;
+            }
+
+            // Send chunk over the connection
+            // Format: 4-byte length prefix + data
+            let len = bytes_read as u32;
+            conn.send_raw(&len.to_be_bytes()).await?;
+            conn.send_raw(&buffer[..bytes_read]).await?;
+
+            total_transferred += bytes_read as u64;
+
+            // Calculate speed and send progress
+            let elapsed = start_time.elapsed().as_secs_f64();
+            let speed = if elapsed > 0.0 {
+                format_speed(total_transferred as f64 / elapsed)
+            } else {
+                "calculating...".to_string()
+            };
+
+            let _ = progress_tx
+                .send(TransferEvent::Progress {
+                    transfer_id: transfer_id.clone(),
+                    transferred: total_transferred,
+                    total: total_size,
+                    speed,
+                })
+                .await;
+        }
+
+        // Signal end of file (zero-length chunk)
+        conn.send_raw(&0u32.to_be_bytes()).await?;
+
+        let _ = progress_tx
+            .send(TransferEvent::FileComplete {
+                transfer_id: transfer_id.clone(),
+                file: info.name.clone(),
+            })
+            .await;
+
+        info!("File {} sent successfully", info.name);
+    }
+
+    // Send completion message
+    conn.send(&ControlMessage::TransferComplete {
+        transfer_id: transfer_id.to_string(),
+    })
+    .await?;
+
+    // Wait for acknowledgment
+    match conn.recv().await {
+        Ok(ControlMessage::TransferComplete { .. }) => {
+            info!("Pull completed and acknowledged");
+        }
+        Ok(ControlMessage::TransferFailed { error, .. }) => {
+            let _ = progress_tx
+                .send(TransferEvent::Failed {
+                    transfer_id: transfer_id.clone(),
+                    error: error.clone(),
+                })
+                .await;
+            return Err(Error::Transfer(error));
+        }
+        Ok(_) => {
+            warn!("Unexpected response after transfer, assuming success");
+        }
+        Err(e) => {
+            warn!("Failed to receive acknowledgment: {}, assuming success", e);
+        }
+    }
+
+    let _ = progress_tx
+        .send(TransferEvent::Complete {
+            transfer_id: transfer_id.clone(),
+        })
+        .await;
+
+    info!("Pull request completed successfully");
+    Ok(transfer_id)
+}
+
+/// Request a directory listing from a remote peer.
+pub async fn browse_remote(
+    endpoint: &IrohEndpoint,
+    peer: &TrustedPeer,
+    path: Option<&str>,
+) -> Result<(String, Vec<DirectoryEntry>)> {
+    // Check permissions
+    if !peer.their_permissions.browse {
+        return Err(Error::Trust("peer does not allow browse".to_string()));
+    }
+
+    // Parse peer node ID
+    let node_id: NodeId = peer
+        .endpoint_id
+        .parse()
+        .map_err(|e| Error::Iroh(format!("invalid node id: {}", e)))?;
+
+    // Add peer's address information
+    let mut node_addr = iroh::NodeAddr::new(node_id);
+    if let Some(ref relay_url) = peer.relay_url {
+        if let Ok(url) = relay_url.parse() {
+            node_addr = node_addr.with_relay_url(url);
+        }
+    }
+    endpoint.add_node_addr(node_addr)?;
+
+    // Connect to peer
+    info!("Connecting to peer {} for browse", peer.name);
+    let mut conn = endpoint.connect_to_node(node_id).await?;
+
+    // Send browse request
+    let request = ControlMessage::BrowseRequest {
+        path: path.map(|s| s.to_string()),
+    };
+    conn.send(&request).await?;
+    info!("Sent browse request for path: {:?}", path);
+
+    // Wait for response
+    let response = conn.recv().await?;
+    match response {
+        ControlMessage::BrowseResponse { path, entries, error: None } => {
+            info!("Browse succeeded: {} entries", entries.len());
+            let _ = conn.close().await;
+            Ok((path, entries))
+        }
+        ControlMessage::BrowseResponse { error: Some(err), .. } => {
+            let _ = conn.close().await;
+            Err(Error::Browse(err))
+        }
+        _ => {
+            let _ = conn.close().await;
+            Err(Error::Iroh("unexpected response to browse request".to_string()))
+        }
+    }
 }
 
 #[cfg(test)]
