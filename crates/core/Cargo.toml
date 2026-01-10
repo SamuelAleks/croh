@@ -56,6 +56,10 @@ base64 = "0.22"
 # Hostname detection
 hostname = "0.4"
 
+# Platform-specific disk space queries
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3.14"
 tokio-test = "0.4"

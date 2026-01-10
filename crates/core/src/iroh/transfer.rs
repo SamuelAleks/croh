@@ -712,6 +712,10 @@ pub async fn handle_incoming_push(
         })
         .await;
 
+    // Give the sender time to receive the ack before the connection is dropped
+    // This is necessary because send() only queues the data for transmission
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
     let _ = progress_tx
         .send(TransferEvent::Complete {
             transfer_id: transfer_id.clone(),

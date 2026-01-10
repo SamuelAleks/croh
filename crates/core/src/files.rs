@@ -98,6 +98,138 @@ pub fn format_size(bytes: u64) -> String {
     }
 }
 
+/// Format a duration in seconds as a compact time string.
+/// Examples: "0:45", "2:34", "1:23:45"
+pub fn format_duration(secs: u64) -> String {
+    let hours = secs / 3600;
+    let mins = (secs % 3600) / 60;
+    let secs = secs % 60;
+
+    if hours > 0 {
+        format!("{}:{:02}:{:02}", hours, mins, secs)
+    } else {
+        format!("{}:{:02}", mins, secs)
+    }
+}
+
+/// Format uptime in seconds as a human-readable string.
+/// Examples: "45s", "5m", "2h 30m", "3d 5h"
+pub fn format_uptime(secs: u64) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = MINUTE * 60;
+    const DAY: u64 = HOUR * 24;
+
+    if secs >= DAY {
+        let days = secs / DAY;
+        let hours = (secs % DAY) / HOUR;
+        if hours > 0 {
+            format!("{}d {}h", days, hours)
+        } else {
+            format!("{}d", days)
+        }
+    } else if secs >= HOUR {
+        let hours = secs / HOUR;
+        let mins = (secs % HOUR) / MINUTE;
+        if mins > 0 {
+            format!("{}h {}m", hours, mins)
+        } else {
+            format!("{}h", hours)
+        }
+    } else if secs >= MINUTE {
+        format!("{}m", secs / MINUTE)
+    } else {
+        format!("{}s", secs)
+    }
+}
+
+/// Format an ETA in seconds as a human-readable string.
+/// Examples: "~0:45", "~2:34", "~1h 23m"
+pub fn format_eta(secs: u64) -> String {
+    const HOUR: u64 = 3600;
+
+    if secs >= HOUR {
+        let hours = secs / HOUR;
+        let mins = (secs % HOUR) / 60;
+        format!("~{}h {:02}m", hours, mins)
+    } else {
+        let mins = secs / 60;
+        let secs = secs % 60;
+        format!("~{}:{:02}", mins, secs)
+    }
+}
+
+/// Get the available disk space for a given path.
+/// Returns (available_bytes, total_bytes) or (0, 0) on error.
+pub fn get_disk_space(path: &Path) -> (u64, u64) {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::mem::MaybeUninit;
+
+        // Get the path, using parent if it doesn't exist yet
+        let check_path = if path.exists() {
+            path.to_path_buf()
+        } else {
+            path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| path.to_path_buf())
+        };
+
+        let c_path = match CString::new(check_path.to_string_lossy().as_bytes()) {
+            Ok(p) => p,
+            Err(_) => return (0, 0),
+        };
+
+        let mut stat: MaybeUninit<libc::statvfs> = MaybeUninit::uninit();
+        let result = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
+
+        if result == 0 {
+            let stat = unsafe { stat.assume_init() };
+            let available = stat.f_bavail as u64 * stat.f_frsize as u64;
+            let total = stat.f_blocks as u64 * stat.f_frsize as u64;
+            (available, total)
+        } else {
+            (0, 0)
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+
+        let check_path = if path.exists() {
+            path.to_path_buf()
+        } else {
+            path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| path.to_path_buf())
+        };
+
+        let wide: Vec<u16> = check_path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+
+        let mut free_bytes_available: u64 = 0;
+        let mut total_bytes: u64 = 0;
+        let mut _total_free_bytes: u64 = 0;
+
+        let result = unsafe {
+            winapi::um::fileapi::GetDiskFreeSpaceExW(
+                wide.as_ptr(),
+                &mut free_bytes_available as *mut u64 as *mut _,
+                &mut total_bytes as *mut u64 as *mut _,
+                &mut _total_free_bytes as *mut u64 as *mut _,
+            )
+        };
+
+        if result != 0 {
+            (free_bytes_available, total_bytes)
+        } else {
+            (0, 0)
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        (0, 0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,6 +252,33 @@ mod tests {
         assert_eq!(format_size(1536), "1.50 KB");
         assert_eq!(format_size(1048576), "1.00 MB");
         assert_eq!(format_size(1073741824), "1.00 GB");
+    }
+
+    #[test]
+    fn test_format_duration() {
+        assert_eq!(format_duration(0), "0:00");
+        assert_eq!(format_duration(45), "0:45");
+        assert_eq!(format_duration(90), "1:30");
+        assert_eq!(format_duration(3661), "1:01:01");
+        assert_eq!(format_duration(7200), "2:00:00");
+    }
+
+    #[test]
+    fn test_format_uptime() {
+        assert_eq!(format_uptime(30), "30s");
+        assert_eq!(format_uptime(90), "1m");
+        assert_eq!(format_uptime(3600), "1h");
+        assert_eq!(format_uptime(5400), "1h 30m");
+        assert_eq!(format_uptime(86400), "1d");
+        assert_eq!(format_uptime(90000), "1d 1h");
+    }
+
+    #[test]
+    fn test_format_eta() {
+        assert_eq!(format_eta(45), "~0:45");
+        assert_eq!(format_eta(154), "~2:34");
+        assert_eq!(format_eta(3600), "~1h 00m");
+        assert_eq!(format_eta(4980), "~1h 23m");
     }
 }
 

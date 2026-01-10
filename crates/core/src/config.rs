@@ -193,6 +193,10 @@ pub struct Config {
     /// Custom DND message to show to peers.
     #[serde(default)]
     pub dnd_message: Option<String>,
+
+    /// Show session statistics in header (privacy toggle).
+    #[serde(default)]
+    pub show_session_stats: bool,
 }
 
 impl Default for Config {
@@ -210,6 +214,7 @@ impl Default for Config {
             browse_settings: BrowseSettings::default(),
             dnd_mode: DndMode::default(),
             dnd_message: None,
+            show_session_stats: false,
         }
     }
 }

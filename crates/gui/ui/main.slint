@@ -234,6 +234,15 @@ global Icons {
     out property <image> chevron-up: @image-url("../assets/icons/chevron-up.svg");
     out property <image> x: @image-url("../assets/icons/x.svg");
     out property <image> check: @image-url("../assets/icons/check.svg");
+    // Status icons
+    out property <image> signal: @image-url("../assets/icons/signal.svg");
+    out property <image> arrow-up: @image-url("../assets/icons/arrow-up.svg");
+    out property <image> arrow-down: @image-url("../assets/icons/arrow-down.svg");
+    out property <image> clock: @image-url("../assets/icons/clock.svg");
+    out property <image> users: @image-url("../assets/icons/users.svg");
+    out property <image> hard-drive: @image-url("../assets/icons/hard-drive.svg");
+    out property <image> activity: @image-url("../assets/icons/activity.svg");
+    out property <image> zap: @image-url("../assets/icons/zap.svg");
 }
 
 // ============================================================================
@@ -249,6 +258,11 @@ export struct TransferItem {
     progress: float,
     speed: string,
     error: string,
+    // Enhanced stats
+    total-size: string,       // "5.2 GB"
+    transferred-size: string, // "2.1 GB"
+    elapsed: string,          // "2:34"
+    eta: string,              // "~3:45" or ""
 }
 
 export struct SelectedFile {
@@ -275,6 +289,8 @@ export struct AppSettings {
     // Do Not Disturb settings
     dnd-mode: string,        // "off", "silent", "busy"
     dnd-message: string,     // custom status message
+    // Privacy settings
+    show-session-stats: bool,     // show upload/download totals in header
 }
 
 export struct PeerItem {
@@ -307,6 +323,10 @@ export struct PeerItem {
     peer-os: string,
     peer-version: string,
     peer-free-space: string,      // formatted "50.2 GB"
+    peer-total-space: string,     // formatted "500 GB"
+    peer-storage-percent: int,    // 0-100 (percent free)
+    peer-uptime: string,          // formatted "2d 5h"
+    peer-active-transfers: int,   // how many transfers peer is doing
     // Peer's DND status
     peer-dnd-mode: string,        // "off", "silent", "busy"
     peer-dnd-message: string,     // their custom status message
@@ -324,6 +344,14 @@ export struct BrowseEntry {
     modified: string,
     path: string,            // full path for selection
     selected: bool,
+}
+
+export struct SessionStats {
+    total-uploaded: string,      // "1.2 GB"
+    total-downloaded: string,    // "3.4 GB"
+    transfer-count: int,         // completed this session
+    avg-speed: string,           // "12.5 MB/s"
+    session-duration: string,    // "2h 34m"
 }
 
 // ============================================================================
@@ -416,6 +444,21 @@ export global AppLogic {
     in property <bool> browse-loading: false;
     in property <string> browse-error: "";
     in property <int> browse-selected-count: 0;  // Count of selected files
+
+    // Status bar stats
+    in property <int> online-peer-count: 0;
+    in property <int> total-peer-count: 0;
+    in property <int> active-transfer-count: 0;
+    in property <SessionStats> session-stats: {
+        total-uploaded: "0 B",
+        total-downloaded: "0 B",
+        transfer-count: 0,
+        avg-speed: "",
+        session-duration: "",
+    };
+
+    // Session stats toggle
+    callback toggle-session-stats();
 }
 
 // ============================================================================
@@ -426,10 +469,11 @@ component CompactButton inherits Rectangle {
     in property <string> label;
     in property <bool> primary: false;
     in property <bool> enabled: true;
+    in property <bool> small: false;
     callback clicked();
 
-    height: 28px;
-    min-width: 60px;
+    height: small ? 20px : 28px;
+    min-width: small ? 50px : 60px;
     horizontal-stretch: 0;
     border-radius: Theme.radius-sm;
     background: !enabled ? Theme.bg-hover :
@@ -444,12 +488,17 @@ component CompactButton inherits Rectangle {
         clicked => { if (enabled) { root.clicked(); } }
     }
 
-    Text {
-        text: label;
-        font-size: 12px;
-        color: primary ? #ffffff : Theme.text;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+    HorizontalLayout {
+        padding-left: small ? 6px : 10px;
+        padding-right: small ? 6px : 10px;
+
+        Text {
+            text: label;
+            font-size: small ? 10px : 12px;
+            color: primary ? #ffffff : Theme.text;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
     }
 }
 
@@ -461,10 +510,11 @@ component ImageIconBtn inherits Rectangle {
     in property <image> icon;
     in property <color> icon-color: Theme.text-dim;
     in property <length> icon-size: 14px;
+    in property <bool> small: false;
     callback clicked();
 
-    width: 28px;
-    height: 28px;
+    width: small ? 20px : 28px;
+    height: small ? 20px : 28px;
     border-radius: Theme.radius-sm;
     background: touch.has-hover ? Theme.bg-hover : transparent;
 
@@ -480,6 +530,135 @@ component ImageIconBtn inherits Rectangle {
         colorize: touch.has-hover ? Theme.text : icon-color;
         horizontal-alignment: center;
         vertical-alignment: center;
+    }
+}
+
+// ============================================================================
+// Stat Badge - Compact stat display with icon
+// ============================================================================
+
+component StatBadge inherits Rectangle {
+    in property <image> icon;
+    in property <string> value;
+    in property <color> value-color: Theme.text;
+    in property <bool> show-icon: true;
+    in property <string> tooltip-text: "";
+
+    height: 20px;
+    border-radius: 10px;
+    background: touch.has-hover && tooltip-text != "" ? Theme.bg-card : Theme.bg-hover;
+
+    touch := TouchArea {
+        mouse-cursor: tooltip-text != "" ? help : default;
+        // Show tooltip on hover after a brief delay would be ideal,
+        // but for simplicity show immediately on hover
+        clicked => {
+            if (tooltip-text != "") {
+                tooltip-popup.show();
+            }
+        }
+    }
+
+    // Tooltip popup (always exists, shown on click if text provided)
+    tooltip-popup := PopupWindow {
+        x: (parent.width - 140px) / 2;
+        y: parent.height + 4px;
+        width: 140px;
+
+        Rectangle {
+            background: Theme.bg-card;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: Theme.border;
+            drop-shadow-blur: 4px;
+            drop-shadow-color: #00000040;
+
+            HorizontalLayout {
+                padding: 6px;
+
+                Text {
+                    text: tooltip-text;
+                    font-size: 11px;
+                    color: Theme.text;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: show-icon ? 5px : 8px;
+        padding-right: 8px;
+        spacing: 4px;
+        alignment: center;
+
+        if show-icon: VerticalLayout {
+            alignment: center;
+            Image {
+                source: icon;
+                width: 12px;
+                height: 12px;
+                colorize: value-color;
+            }
+        }
+
+        Text {
+            text: value;
+            font-size: 11px;
+            color: value-color;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// ============================================================================
+// Storage Bar - Visual storage usage indicator
+// ============================================================================
+
+component StorageBar inherits Rectangle {
+    in property <int> percent;        // 0-100 (percent FREE)
+    in property <string> free-text;   // "412 GB"
+    in property <string> total-text;  // "500 GB"
+
+    height: 20px;
+    border-radius: 4px;
+    background: Theme.bg-hover;
+    border-width: 1px;
+    border-color: Theme.border;
+
+    // Progress bar (shows used space, colored by how full)
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width * ((100 - percent) / 100.0);
+        height: parent.height;
+        border-radius: 4px;
+        background: percent > 20 ? Theme.success :
+                   percent > 10 ? Theme.warning : Theme.error;
+        opacity: 0.3;
+    }
+
+    // Text overlay
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+
+        Text {
+            text: free-text + " free";
+            font-size: 10px;
+            color: Theme.text;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+
+        Text {
+            text: total-text;
+            font-size: 10px;
+            color: Theme.text-muted;
+            vertical-alignment: center;
+        }
     }
 }
 
@@ -502,8 +681,9 @@ component ThemedDropdown inherits Rectangle {
 
     // Main button
     HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 6px;
+        padding-left: 10px;
+        padding-right: 8px;
+        spacing: 6px;
 
         Text {
             text: model[current-index];
@@ -554,12 +734,16 @@ component ThemedDropdown inherits Rectangle {
                         }
                     }
 
-                    Text {
-                        text: item;
-                        font-size: 12px;
-                        color: i == current-index ? Theme.accent : Theme.text;
-                        vertical-alignment: center;
-                        x: 8px;
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+
+                        Text {
+                            text: item;
+                            font-size: 12px;
+                            color: i == current-index ? Theme.accent : Theme.text;
+                            vertical-alignment: center;
+                        }
                     }
                 }
             }
@@ -661,17 +845,19 @@ component TransferCard inherits Rectangle {
     in property <TransferItem> transfer;
 
     background: Theme.bg-card;
-    border-radius: 2px;
+    border-radius: 3px;
     border-width: 1px;
     border-color: Theme.border;
 
     VerticalLayout {
-        padding: 4px;
-        spacing: 2px;
+        padding: 6px;
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 4px;
 
         // Single row with all info
         HorizontalLayout {
-            spacing: 6px;
+            spacing: 8px;
 
             // Direction
             Text {
@@ -695,7 +881,7 @@ component TransferCard inherits Rectangle {
             if transfer.code != "": Rectangle {
                 background: Theme.bg-input;
                 border-radius: 2px;
-                height: 18px;
+                height: 20px;
 
                 code-touch := TouchArea {
                     mouse-cursor: pointer;
@@ -703,8 +889,8 @@ component TransferCard inherits Rectangle {
                 }
 
                 HorizontalLayout {
-                    padding-left: 6px;
-                    padding-right: 6px;
+                    padding-left: 8px;
+                    padding-right: 8px;
 
                     Text {
                         text: transfer.code;
@@ -715,12 +901,32 @@ component TransferCard inherits Rectangle {
                 }
             }
 
-            // Speed (if running and available)
-            if transfer.status == "running" && transfer.speed != "": Text {
-                text: transfer.speed;
+            // Size progress (if running and has size info)
+            if transfer.status == "running" && transfer.total-size != "": Text {
+                text: transfer.transferred-size + " / " + transfer.total-size;
                 font-size: 10px;
-                color: Theme.text-muted;
+                color: Theme.text-dim;
                 vertical-alignment: center;
+            }
+
+            // Speed (if running and available)
+            if transfer.status == "running" && transfer.speed != "": HorizontalLayout {
+                spacing: 3px;
+                VerticalLayout {
+                    alignment: center;
+                    Image {
+                        source: Icons.zap;
+                        width: 10px;
+                        height: 10px;
+                        colorize: Theme.text-muted;
+                    }
+                }
+                Text {
+                    text: transfer.speed;
+                    font-size: 10px;
+                    color: Theme.text-muted;
+                    vertical-alignment: center;
+                }
             }
 
             // Progress % (if running)
@@ -772,6 +978,39 @@ component TransferCard inherits Rectangle {
                 icon: Icons.x;
                 icon-color: Theme.text-muted;
                 clicked => { AppLogic.remove-transfer(transfer.id); }
+            }
+        }
+
+        // Time info row (if running and has elapsed/eta)
+        if transfer.status == "running" && (transfer.elapsed != "" || transfer.eta != ""): HorizontalLayout {
+            spacing: 12px;
+
+            // Elapsed time
+            if transfer.elapsed != "": HorizontalLayout {
+                spacing: 3px;
+                Image {
+                    source: Icons.clock;
+                    width: 10px;
+                    height: 10px;
+                    colorize: Theme.text-muted;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: transfer.elapsed;
+                    font-size: 10px;
+                    color: Theme.text-muted;
+                    vertical-alignment: center;
+                }
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+
+            // ETA
+            if transfer.eta != "": Text {
+                text: transfer.eta;
+                font-size: 10px;
+                color: Theme.text-dim;
+                vertical-alignment: center;
             }
         }
 
@@ -1009,44 +1248,53 @@ component SendPanel inherits Rectangle {
                     color: Theme.text-muted;
                 }
 
-                // File list - compact
-                for file[i] in AppLogic.selected-files: Rectangle {
-                    height: 22px;
-                    background: Math.mod(i, 2) == 0 ? Theme.bg-dark : Theme.bg-card;
+                // File list - scrollable when more than 4 items
+                Flickable {
+                    // Limit height to 4 rows (24px each) + some padding
+                    max-height: AppLogic.selected-files.length > 4 ? 100px : AppLogic.selected-files.length * 24px;
+                    viewport-height: AppLogic.selected-files.length * 24px;
 
-                    HorizontalLayout {
-                        padding-left: 6px;
-                        padding-right: 4px;
-                        spacing: 6px;
+                    VerticalLayout {
+                        for file[i] in AppLogic.selected-files: Rectangle {
+                            height: 24px;
+                            background: Math.mod(i, 2) == 0 ? Theme.bg-dark : Theme.bg-card;
 
-                        Text {
-                            text: file.name;
-                            font-size: 11px;
-                            color: Theme.text;
-                            overflow: elide;
-                            horizontal-stretch: 1;
-                            vertical-alignment: center;
-                        }
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 6px;
+                                spacing: 8px;
 
-                        Text {
-                            text: file.size;
-                            font-size: 10px;
-                            color: Theme.text-muted;
-                            vertical-alignment: center;
-                        }
+                                Text {
+                                    text: file.name;
+                                    font-size: 11px;
+                                    color: Theme.text;
+                                    overflow: elide;
+                                    horizontal-stretch: 1;
+                                    vertical-alignment: center;
+                                }
 
-                        ImageIconBtn {
-                            icon: Icons.x;
-                            icon-color: Theme.text-muted;
-                            clicked => { AppLogic.remove-file(i); }
+                                Text {
+                                    text: file.size;
+                                    font-size: 10px;
+                                    color: Theme.text-muted;
+                                    vertical-alignment: center;
+                                }
+
+                                ImageIconBtn {
+                                    icon: Icons.x;
+                                    icon-color: Theme.text-muted;
+                                    clicked => { AppLogic.remove-file(i); }
+                                }
+                            }
                         }
                     }
                 }
 
                 // Custom code input (optional)
                 HorizontalLayout {
-                    spacing: 6px;
-                    padding-top: 4px;
+                    spacing: 8px;
+                    padding-top: 6px;
+                    padding-left: 2px;
 
                     Text {
                         text: "Code:";
@@ -1240,21 +1488,15 @@ component PeerCard inherits Rectangle {
     callback permissions-changed(bool, bool, bool); // allow-push, allow-pull, allow-browse
     callback expanded-changed(bool); // notify when expanded state changes
 
-    private property <length> header-height: 56px;
-    private property <length> details-height: 230px;  // Includes speed test section
-
-    height: peer.expanded ? header-height + details-height : header-height;
     background: Theme.bg-card;
     border-radius: Theme.radius-sm;
     border-width: 1px;
     border-color: peer.expanded ? Theme.accent : Theme.border;
 
-    animate height { duration: 150ms; easing: ease-out; }
-
     VerticalLayout {
         // Header row (always visible)
         HorizontalLayout {
-            height: root.header-height;
+            height: 56px;
             padding: Theme.spacing-sm;
             spacing: Theme.spacing-sm;
 
@@ -1364,12 +1606,14 @@ component PeerCard inherits Rectangle {
             // Browse button (for pulling files from peer)
             if peer.can-browse && peer.status == "online": CompactButton {
                 label: "Browse";
+                small: true;
                 clicked => { root.browse-clicked(); }
             }
 
             // Push button (only show if files selected and peer has permission)
             if peer.can-push && peer.status == "online" && AppLogic.selected-files.length > 0: CompactButton {
                 label: "Push";
+                small: true;
                 clicked => { root.push-clicked(); }
             }
 
@@ -1377,6 +1621,7 @@ component PeerCard inherits Rectangle {
             ImageIconBtn {
                 icon: peer.expanded ? Icons.chevron-up : Icons.chevron-down;
                 icon-color: Theme.text-muted;
+                small: true;
                 clicked => { root.expanded-changed(!peer.expanded); }
             }
 
@@ -1384,6 +1629,7 @@ component PeerCard inherits Rectangle {
             ImageIconBtn {
                 icon: Icons.x;
                 icon-color: Theme.text-muted;
+                small: true;
                 clicked => { root.remove-clicked(); }
             }
         }
@@ -1475,9 +1721,33 @@ component PeerCard inherits Rectangle {
                         value: peer.peer-version == "" ? "—" : peer.peer-version;
                     }
 
-                    StatBox {
-                        label: "FREE SPACE";
-                        value: peer.peer-free-space == "" ? "—" : peer.peer-free-space;
+                    if peer.peer-uptime != "": StatBox {
+                        label: "UPTIME";
+                        value: peer.peer-uptime;
+                        value-color: Theme.text-dim;
+                    }
+
+                    if peer.peer-active-transfers > 0: StatBox {
+                        label: "BUSY";
+                        value: peer.peer-active-transfers + " transfers";
+                        value-color: Theme.warning;
+                    }
+                }
+
+                // Storage bar (if we have space info)
+                if peer.peer-free-space != "" && peer.peer-total-space != "": VerticalLayout {
+                    spacing: 2px;
+
+                    Text {
+                        text: "STORAGE";
+                        font-size: 9px;
+                        color: Theme.text-muted;
+                    }
+
+                    StorageBar {
+                        percent: peer.peer-storage-percent;
+                        free-text: peer.peer-free-space;
+                        total-text: peer.peer-total-space;
                     }
                 }
 
@@ -2107,6 +2377,43 @@ component SettingsPanel inherits Rectangle {
                 }
             }
 
+            // Privacy
+            Section {
+                title: "Privacy";
+
+                SettingRow {
+                    label: "Show Session Stats";
+                    sublabel: "Display upload/download totals in header";
+
+                    Rectangle {
+                        width: 40px;
+                        height: 22px;
+                        border-radius: 11px;
+                        background: AppLogic.settings.show-session-stats ? Theme.accent : Theme.bg-hover;
+                        border-width: 1px;
+                        border-color: Theme.border;
+
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppLogic.toggle-session-stats();
+                            }
+                        }
+
+                        Rectangle {
+                            x: AppLogic.settings.show-session-stats ? parent.width - self.width - 2px : 2px;
+                            y: 2px;
+                            width: 18px;
+                            height: 18px;
+                            border-radius: 9px;
+                            background: #ffffff;
+
+                            animate x { duration: 150ms; easing: ease-out; }
+                        }
+                    }
+                }
+            }
+
             // Appearance
             Section {
                 title: "Appearance";
@@ -2239,8 +2546,10 @@ component TransfersBar inherits Rectangle {
     border-color: Theme.border;
 
     VerticalLayout {
-        padding: 4px;
-        spacing: 2px;
+        padding: 6px;
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 4px;
 
         // Header
         Text {
@@ -2264,7 +2573,7 @@ component TransfersBar inherits Rectangle {
             vertical-stretch: 1;
 
             VerticalLayout {
-                spacing: 2px;
+                spacing: 4px;
 
                 for transfer in AppLogic.transfers: TransferCard {
                     transfer: transfer;
@@ -2537,8 +2846,8 @@ component FileBrowserDialog inherits Rectangle {
                 background: Theme.bg-dark;
 
                 HorizontalLayout {
-                    padding: Theme.spacing-sm;
-                    spacing: Theme.spacing-sm;
+                    padding: Theme.spacing-md;
+                    spacing: Theme.spacing-md;
 
                     // Selection hint
                     Text {
@@ -2584,7 +2893,7 @@ export component MainWindow inherits Window {
     VerticalLayout {
         spacing: 0;
 
-        // Header
+        // Header with rich status bar
         Rectangle {
             height: 40px;
             background: Theme.bg-card;
@@ -2595,16 +2904,59 @@ export component MainWindow inherits Window {
                 padding: 8px;
                 padding-left: 12px;
                 padding-right: 12px;
-                alignment: space-between;
+                spacing: 12px;
 
+                // App name
                 Text {
                     text: "Croh";
                     font-size: 14px;
+                    font-weight: 600;
                     color: Theme.text;
                     vertical-alignment: center;
                 }
 
-                Text {
+                // Peer status badge
+                StatBadge {
+                    icon: Icons.users;
+                    value: AppLogic.online-peer-count + "/" + AppLogic.total-peer-count;
+                    value-color: AppLogic.online-peer-count > 0 ? Theme.success : Theme.text-muted;
+                    tooltip-text: "Online / Total peers";
+                }
+
+                // Active transfers badge
+                if AppLogic.active-transfer-count > 0: StatBadge {
+                    icon: Icons.activity;
+                    value: AppLogic.active-transfer-count + " active";
+                    value-color: Theme.accent;
+                    tooltip-text: "Active transfers";
+                }
+
+                // Spacer
+                Rectangle { horizontal-stretch: 1; }
+
+                // Session stats (when enabled)
+                if AppLogic.settings.show-session-stats: HorizontalLayout {
+                    spacing: 8px;
+
+                    // Upload total
+                    StatBadge {
+                        icon: Icons.arrow-up;
+                        value: AppLogic.session-stats.total-uploaded;
+                        value-color: Theme.send-color;
+                        tooltip-text: "Total uploaded this session";
+                    }
+
+                    // Download total
+                    StatBadge {
+                        icon: Icons.arrow-down;
+                        value: AppLogic.session-stats.total-downloaded;
+                        value-color: Theme.receive-color;
+                        tooltip-text: "Total downloaded this session";
+                    }
+                }
+
+                // Status text (errors, etc)
+                if AppLogic.app-status != "Ready" && AppLogic.app-status != "": Text {
                     text: AppLogic.app-status;
                     font-size: 11px;
                     color: Theme.text-dim;

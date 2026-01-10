@@ -100,6 +100,8 @@ pub enum ControlMessage {
         os: String,
         /// Free disk space in bytes
         free_space: u64,
+        /// Total disk space in bytes
+        total_space: u64,
         /// Download directory path
         download_dir: String,
         /// Uptime in seconds

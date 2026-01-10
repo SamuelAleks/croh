@@ -284,11 +284,12 @@ pub async fn accept_trust_connections(
                         .map(|h| h.to_string_lossy().to_string())
                         .unwrap_or_else(|_| "unknown".to_string()),
                     os: std::env::consts::OS.to_string(),
-                    free_space: 0, // TODO: get actual free space
-                    download_dir: "".to_string(), // TODO: get from config
-                    uptime: 0,     // TODO: track uptime
+                    free_space: 0,
+                    total_space: 0,
+                    download_dir: "".to_string(),
+                    uptime: 0,
                     version: env!("CARGO_PKG_VERSION").to_string(),
-                    active_transfers: 0, // TODO: get from transfer manager
+                    active_transfers: 0,
                 };
                 let _ = conn.send(&response).await;
             }

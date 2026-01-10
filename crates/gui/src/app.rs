@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tokio::sync::{oneshot, RwLock};
 use tracing::{debug, error, info, warn};
 
-use crate::{AppLogic, AppSettings, BrowseEntry, MainWindow, PeerItem, SelectedFile, TransferItem};
+use crate::{AppLogic, AppSettings, BrowseEntry, MainWindow, PeerItem, SelectedFile, SessionStats, TransferItem};
 
 /// Connection status for a peer.
 #[derive(Clone, Debug, Default)]
@@ -45,6 +45,9 @@ pub struct PeerConnectionStatus {
     pub peer_os: Option<String>,
     pub peer_version: Option<String>,
     pub peer_free_space: Option<u64>,
+    pub peer_total_space: Option<u64>,
+    pub peer_uptime: Option<u64>,
+    pub peer_active_transfers: Option<u32>,
 }
 
 /// Application state.
@@ -75,6 +78,18 @@ pub struct App {
     peer_status: Arc<RwLock<HashMap<String, PeerConnectionStatus>>>,
     /// Transfer history for completed transfers.
     transfer_history: Arc<RwLock<TransferHistory>>,
+    /// Time when the app was started (for uptime calculation).
+    app_start_time: std::time::Instant,
+    /// Session statistics (bytes uploaded/downloaded this session).
+    session_stats: Arc<RwLock<SessionStatsTracker>>,
+}
+
+/// Tracks session statistics for uploads and downloads.
+#[derive(Debug, Default)]
+struct SessionStatsTracker {
+    bytes_uploaded: u64,
+    bytes_downloaded: u64,
+    transfers_completed: u32,
 }
 
 /// State for file browser dialog.
@@ -146,6 +161,8 @@ impl App {
             peers_model,
             peer_status: Arc::new(RwLock::new(HashMap::new())),
             transfer_history: Arc::new(RwLock::new(transfer_history)),
+            app_start_time: std::time::Instant::now(),
+            session_stats: Arc::new(RwLock::new(SessionStatsTracker::default())),
         }
     }
 
@@ -352,6 +369,8 @@ impl App {
         let shutdown = self.listener_shutdown.clone();
         let pending_trust = self.pending_trust.clone();
         let peer_status = self.peer_status.clone();
+        let app_start_time = self.app_start_time;
+        let session_stats = self.session_stats.clone();
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -544,12 +563,21 @@ impl App {
                     let peer = peer.unwrap();
 
                     // Handle different message types
-                    match &msg {
-                        ControlMessage::PushOffer { files, total_size, .. } => {
+                    match msg {
+                        ControlMessage::PushOffer { transfer_id: offer_transfer_id, files, total_size } => {
                             info!(
                                 "Received push offer from {} with {} files ({} bytes)",
                                 peer.name, files.len(), total_size
                             );
+                            // Extract values before moving files into msg
+                            let total_size_for_stats = total_size;
+                            let file_names: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
+                            // Reconstruct message for handler
+                            let msg = ControlMessage::PushOffer {
+                                transfer_id: offer_transfer_id,
+                                files,
+                                total_size,
+                            };
 
                             // Check if we allow push from this peer
                             if !peer.permissions_granted.push {
@@ -568,8 +596,7 @@ impl App {
                                 cfg.download_dir.clone()
                             };
 
-                            // Create transfer for tracking
-                            let file_names: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
+                            // Create transfer for tracking (file_names already extracted above)
                             let transfer = Transfer::new_iroh_pull(
                                 file_names,
                                 peer.endpoint_id.clone(),
@@ -588,6 +615,7 @@ impl App {
                             // Spawn progress handler
                             let transfer_manager_progress = transfer_manager.clone();
                             let transfer_history_progress = transfer_history.clone();
+                            let session_stats_progress = session_stats.clone();
                             let window_weak_progress = window_weak.clone();
                             let transfer_id_progress = transfer_id.clone();
                             let peer_name = peer.name.clone();
@@ -619,9 +647,18 @@ impl App {
                                                 t.progress = 100.0;
                                                 t.completed_at = Some(chrono::Utc::now());
                                             }).await;
+                                            // Update session stats (this is a download/receive)
+                                            {
+                                                let mut stats = session_stats_progress.write().await;
+                                                stats.bytes_downloaded += total_size_for_stats;
+                                                stats.transfers_completed += 1;
+                                            }
+                                            update_session_stats_ui(&window_weak_progress, &session_stats_progress);
                                             update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                             update_status(&window_weak_progress, &format!("Received files from {}", peer_name));
                                             save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
+                                            // Refresh UI to clear the completed transfer
+                                            update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                         }
                                         TransferEvent::Failed { error, .. } => {
                                             error!("Transfer failed: {}", error);
@@ -632,6 +669,8 @@ impl App {
                                             update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                             update_status(&window_weak_progress, &format!("Receive failed: {}", error));
                                             save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
+                                            // Refresh UI to clear the failed transfer
+                                            update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                         }
                                         TransferEvent::Cancelled { .. } => {
                                             let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
@@ -704,8 +743,22 @@ impl App {
                             // Close connection gracefully to ensure response is sent
                             let _ = conn.close().await;
                         }
-                        ControlMessage::PullRequest { files, .. } => {
+                        ControlMessage::PullRequest { transfer_id: req_transfer_id, files } => {
                             info!("Received pull request from {} for {} files", peer.name, files.len());
+
+                            // Extract file_names before moving files
+                            let file_names: Vec<String> = files.iter().map(|f| {
+                                std::path::Path::new(&f.path)
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or(&f.path)
+                                    .to_string()
+                            }).collect();
+                            // Reconstruct message for handler
+                            let msg = ControlMessage::PullRequest {
+                                transfer_id: req_transfer_id,
+                                files,
+                            };
 
                             // Check if we allow pull from this peer
                             if !peer.permissions_granted.pull {
@@ -719,16 +772,9 @@ impl App {
                                 continue;
                             }
 
-                            // Create transfer for tracking (outgoing for us)
-                            let file_names: Vec<String> = files.iter().map(|f| {
-                                std::path::Path::new(&f.path)
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or(&f.path)
-                                    .to_string()
-                            }).collect();
+                            // Create transfer for tracking (outgoing for us, file_names already extracted above)
                             let transfer = Transfer::new_iroh_push(
-                                file_names,
+                                file_names.clone(),
                                 peer.endpoint_id.clone(),
                                 peer.name.clone(),
                             );
@@ -745,6 +791,7 @@ impl App {
                             // Spawn progress handler
                             let transfer_manager_progress = transfer_manager.clone();
                             let transfer_history_progress = transfer_history.clone();
+                            let session_stats_progress = session_stats.clone();
                             let window_weak_progress = window_weak.clone();
                             let transfer_id_progress = transfer_id.clone();
                             let peer_name = peer.name.clone();
@@ -771,14 +818,26 @@ impl App {
                                             info!("File sent: {}", file);
                                         }
                                         TransferEvent::Complete { .. } => {
+                                            // Get total size before updating status
+                                            let total_bytes = transfer_manager_progress.get(&transfer_id_progress).await
+                                                .map(|t| t.total_size).unwrap_or(0);
                                             let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
                                                 t.status = TransferStatus::Completed;
                                                 t.progress = 100.0;
                                                 t.completed_at = Some(chrono::Utc::now());
                                             }).await;
+                                            // Update session stats (this is an upload/send for incoming pull)
+                                            {
+                                                let mut stats = session_stats_progress.write().await;
+                                                stats.bytes_uploaded += total_bytes;
+                                                stats.transfers_completed += 1;
+                                            }
+                                            update_session_stats_ui(&window_weak_progress, &session_stats_progress);
                                             update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                             update_status(&window_weak_progress, &format!("Pull completed for {}", peer_name));
                                             save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
+                                            // Refresh UI to clear the completed transfer
+                                            update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                         }
                                         TransferEvent::Failed { error, .. } => {
                                             error!("Pull transfer failed: {}", error);
@@ -789,6 +848,8 @@ impl App {
                                             update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                             update_status(&window_weak_progress, &format!("Pull failed: {}", error));
                                             save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
+                                            // Refresh UI to clear the failed transfer
+                                            update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                         }
                                         TransferEvent::Cancelled { .. } => {
                                             let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
@@ -856,7 +917,7 @@ impl App {
                         }
                         ControlMessage::Ping { timestamp } => {
                             debug!("Received ping from {}, responding with pong", peer.name);
-                            let _ = conn.send(&ControlMessage::Pong { timestamp: *timestamp }).await;
+                            let _ = conn.send(&ControlMessage::Pong { timestamp }).await;
                             let _ = conn.close().await;
                         }
                         ControlMessage::Pong { .. } => {
@@ -868,18 +929,26 @@ impl App {
                             debug!("Received status request from {}", peer.name);
                             let cfg = config.read().await;
                             let download_dir = cfg.download_dir.to_string_lossy().to_string();
+                            let download_path = cfg.download_dir.clone();
                             drop(cfg);
 
                             let hostname = std::env::var("HOSTNAME")
                                 .or_else(|_| std::env::var("COMPUTERNAME"))
                                 .unwrap_or_else(|_| "unknown".to_string());
 
+                            // Calculate uptime since app start
+                            let uptime_secs = app_start_time.elapsed().as_secs();
+
+                            // Get disk space for download directory
+                            let (free_space, total_space) = croh_core::get_disk_space(&download_path);
+
                             let _ = conn.send(&ControlMessage::StatusResponse {
                                 hostname,
                                 os: std::env::consts::OS.to_string(),
-                                free_space: 0, // TODO: Get actual free space
+                                free_space,
+                                total_space,
                                 download_dir,
-                                uptime: 0, // TODO: Track uptime
+                                uptime: uptime_secs,
                                 version: env!("CARGO_PKG_VERSION").to_string(),
                                 active_transfers: 0, // Simplified for now
                             }).await;
@@ -917,7 +986,7 @@ impl App {
                             info!("Received speed test request from {}: test_id={}, size={}", peer.name, test_id, size);
 
                             // Handle the speed test request
-                            match croh_core::handle_speed_test_request(&mut conn, test_id.clone(), *size).await {
+                            match croh_core::handle_speed_test_request(&mut conn, test_id.clone(), size).await {
                                 Ok(result) => {
                                     info!(
                                         "Speed test handled for {}: upload={}, download={}, latency={}ms",
@@ -989,6 +1058,9 @@ impl App {
                 let dnd_mode = config_guard.dnd_mode.to_ui_string().to_string();
                 let dnd_message = config_guard.dnd_message.clone().unwrap_or_default();
 
+                // Privacy settings
+                let show_session_stats = config_guard.show_session_stats;
+
                 drop(config_guard);
 
                 // Update UI on main thread
@@ -1009,6 +1081,7 @@ impl App {
                             browse_exclude_patterns: SharedString::from(browse_exclude_patterns),
                             dnd_mode: SharedString::from(dnd_mode),
                             dnd_message: SharedString::from(dnd_message),
+                            show_session_stats: show_session_stats,
                         };
                         window.global::<AppLogic>().set_settings(settings);
                     }
@@ -2109,6 +2182,7 @@ impl App {
                         let browse_exclude_patterns = config_guard.browse_settings.exclude_patterns.join(", ");
                         let dnd_mode = config_guard.dnd_mode.to_ui_string().to_string();
                         let dnd_message = config_guard.dnd_message.clone().unwrap_or_default();
+                        let show_session_stats = config_guard.show_session_stats;
                         let (croc_path, croc_found) = match find_croc_executable() {
                             Ok(path) => (path.to_string_lossy().to_string(), true),
                             Err(_) => ("Not found".to_string(), false),
@@ -2132,6 +2206,7 @@ impl App {
                                     browse_exclude_patterns: SharedString::from(browse_exclude_patterns),
                                     dnd_mode: SharedString::from(dnd_mode),
                                     dnd_message: SharedString::from(dnd_message),
+                                    show_session_stats,
                                 };
                                 window.global::<AppLogic>().set_settings(settings);
                             }
@@ -2319,6 +2394,45 @@ impl App {
                                 }
                             }
                         }
+                    });
+                });
+            }
+        });
+
+        // Toggle session stats callback
+        window.global::<AppLogic>().on_toggle_session_stats({
+            let config = config.clone();
+            let window_weak = window_weak.clone();
+
+            move || {
+                let config = config.clone();
+                let window_weak = window_weak.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Toggle the setting
+                        let new_value = {
+                            let mut config_guard = config.write().await;
+                            config_guard.show_session_stats = !config_guard.show_session_stats;
+                            if let Err(e) = config_guard.save() {
+                                error!("Failed to save session stats setting: {}", e);
+                            }
+                            config_guard.show_session_stats
+                        };
+
+                        // Update UI
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(window) = window_weak.upgrade() {
+                                let mut settings = window.global::<AppLogic>().get_settings();
+                                settings.show_session_stats = new_value;
+                                window.global::<AppLogic>().set_settings(settings);
+                            }
+                        });
                     });
                 });
             }
@@ -2859,7 +2973,7 @@ impl App {
                                 Ok(mut conn) => {
                                     if conn.send(&ControlMessage::StatusRequest).await.is_ok() {
                                         if let Ok(ControlMessage::StatusResponse {
-                                            hostname, os, free_space, version, ..
+                                            hostname, os, free_space, total_space, version, uptime, active_transfers, ..
                                         }) = conn.recv().await {
                                             let mut status_map = peer_status.write().await;
                                             if let Some(status) = status_map.get_mut(&id_str) {
@@ -2867,6 +2981,9 @@ impl App {
                                                 status.peer_os = Some(os);
                                                 status.peer_version = Some(version);
                                                 status.peer_free_space = Some(free_space);
+                                                status.peer_total_space = Some(total_space);
+                                                status.peer_uptime = Some(uptime);
+                                                status.peer_active_transfers = Some(active_transfers);
                                             }
                                         }
                                     }
@@ -3162,6 +3279,7 @@ impl App {
             let transfer_manager = self.transfer_manager.clone();
             let transfer_history = self.transfer_history.clone();
             let shared_endpoint = self.shared_endpoint.clone();
+            let session_stats = self.session_stats.clone();
 
             move |peer_id| {
                 let peer_id_str = peer_id.to_string();
@@ -3172,6 +3290,7 @@ impl App {
                 let transfer_manager = transfer_manager.clone();
                 let transfer_history = transfer_history.clone();
                 let shared_endpoint = shared_endpoint.clone();
+                let session_stats = session_stats.clone();
 
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
@@ -3245,6 +3364,7 @@ impl App {
                         // Spawn progress handler
                         let transfer_manager_progress = transfer_manager.clone();
                         let transfer_history_progress = transfer_history.clone();
+                        let session_stats_progress = session_stats.clone();
                         let window_weak_progress = window_weak.clone();
                         let transfer_id_progress = transfer_id.clone();
                         tokio::spawn(async move {
@@ -3270,14 +3390,26 @@ impl App {
                                         info!("File transferred: {}", file);
                                     }
                                     TransferEvent::Complete { .. } => {
+                                        // Get total size before updating status
+                                        let total_bytes = transfer_manager_progress.get(&transfer_id_progress).await
+                                            .map(|t| t.total_size).unwrap_or(0);
                                         let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
                                             t.status = TransferStatus::Completed;
                                             t.progress = 100.0;
                                             t.completed_at = Some(chrono::Utc::now());
                                         }).await;
+                                        // Update session stats (push is an upload)
+                                        {
+                                            let mut stats = session_stats_progress.write().await;
+                                            stats.bytes_uploaded += total_bytes;
+                                            stats.transfers_completed += 1;
+                                        }
+                                        update_session_stats_ui(&window_weak_progress, &session_stats_progress);
                                         update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                         update_status(&window_weak_progress, "Push completed successfully");
                                         save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
+                                        // Refresh UI to clear the completed transfer
+                                        update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                     }
                                     TransferEvent::Failed { error, .. } => {
                                         error!("Transfer failed: {}", error);
@@ -3331,6 +3463,7 @@ impl App {
         let config = self.config.clone();
         let transfer_manager = self.transfer_manager.clone();
         let transfer_history = self.transfer_history.clone();
+        let session_stats = self.session_stats.clone();
 
         // Browse peer - open file browser for a peer
         window.global::<AppLogic>().on_browse_peer({
@@ -3757,6 +3890,7 @@ impl App {
             let config = config.clone();
             let transfer_manager = transfer_manager.clone();
             let transfer_history = transfer_history.clone();
+            let session_stats = session_stats.clone();
 
             move || {
                 info!("Pull selected files");
@@ -3767,6 +3901,7 @@ impl App {
                 let config = config.clone();
                 let transfer_manager = transfer_manager.clone();
                 let transfer_history = transfer_history.clone();
+                let session_stats = session_stats.clone();
 
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
@@ -3861,6 +3996,7 @@ impl App {
                         // Spawn progress handler
                         let transfer_manager_progress = transfer_manager.clone();
                         let transfer_history_progress = transfer_history.clone();
+                        let session_stats_progress = session_stats.clone();
                         let window_weak_progress = window_weak.clone();
                         let transfer_id_progress = transfer_id.clone();
                         let peer_name = peer.name.clone();
@@ -3887,14 +4023,26 @@ impl App {
                                         info!("File pulled: {}", file);
                                     }
                                     TransferEvent::Complete { .. } => {
+                                        // Get total size before updating status
+                                        let total_bytes = transfer_manager_progress.get(&transfer_id_progress).await
+                                            .map(|t| t.total_size).unwrap_or(0);
                                         let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
                                             t.status = TransferStatus::Completed;
                                             t.progress = 100.0;
                                             t.completed_at = Some(chrono::Utc::now());
                                         }).await;
+                                        // Update session stats (pull is a download)
+                                        {
+                                            let mut stats = session_stats_progress.write().await;
+                                            stats.bytes_downloaded += total_bytes;
+                                            stats.transfers_completed += 1;
+                                        }
+                                        update_session_stats_ui(&window_weak_progress, &session_stats_progress);
                                         update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                         update_status(&window_weak_progress, &format!("Pull from {} completed", peer_name));
                                         save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
+                                        // Refresh UI to clear the completed transfer
+                                        update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                     }
                                     TransferEvent::Failed { error, .. } => {
                                         error!("Pull failed: {}", error);
@@ -4010,35 +4158,78 @@ async fn update_transfers_ui(window_weak: &Weak<MainWindow>, manager: &TransferM
 
     let items: Vec<TransferItem> = transfers
         .iter()
-        .map(|t| TransferItem {
-            id: SharedString::from(t.id.to_string()),
-            transfer_type: SharedString::from(match t.transfer_type {
-                TransferType::Send => "send",
-                TransferType::Receive => "receive",
-                TransferType::IrohPush => "push",
-                TransferType::IrohPull => "pull",
-            }),
-            status: SharedString::from(match t.status {
-                TransferStatus::Pending => "pending",
-                TransferStatus::Running => "running",
-                TransferStatus::Completed => "completed",
-                TransferStatus::Failed => "failed",
-                TransferStatus::Cancelled => "cancelled",
-            }),
-            code: SharedString::from(t.code.as_deref().unwrap_or("")),
-            files: SharedString::from(t.files.join(", ")),
-            progress: t.progress as f32,
-            speed: SharedString::from(&t.speed),
-            error: SharedString::from(t.error.as_deref().unwrap_or("")),
+        .map(|t| {
+            // Calculate elapsed time and ETA
+            let elapsed_secs = (chrono::Utc::now() - t.started_at).num_seconds().max(0) as u64;
+            let elapsed = if t.status == TransferStatus::Running && elapsed_secs > 0 {
+                croh_core::format_duration(elapsed_secs)
+            } else {
+                String::new()
+            };
+
+            // Calculate ETA based on progress and elapsed time
+            let eta = if t.status == TransferStatus::Running && t.progress > 0.0 && t.progress < 100.0 {
+                let remaining_percent = 100.0 - t.progress;
+                let time_per_percent = elapsed_secs as f64 / t.progress;
+                let eta_secs = (remaining_percent * time_per_percent) as u64;
+                if eta_secs > 0 {
+                    croh_core::format_eta(eta_secs)
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+
+            TransferItem {
+                id: SharedString::from(t.id.to_string()),
+                transfer_type: SharedString::from(match t.transfer_type {
+                    TransferType::Send => "send",
+                    TransferType::Receive => "receive",
+                    TransferType::IrohPush => "push",
+                    TransferType::IrohPull => "pull",
+                }),
+                status: SharedString::from(match t.status {
+                    TransferStatus::Pending => "pending",
+                    TransferStatus::Running => "running",
+                    TransferStatus::Completed => "completed",
+                    TransferStatus::Failed => "failed",
+                    TransferStatus::Cancelled => "cancelled",
+                }),
+                code: SharedString::from(t.code.as_deref().unwrap_or("")),
+                files: SharedString::from(t.files.join(", ")),
+                progress: t.progress as f32,
+                speed: SharedString::from(&t.speed),
+                error: SharedString::from(t.error.as_deref().unwrap_or("")),
+                // Enhanced stats
+                total_size: SharedString::from(if t.total_size > 0 {
+                    croh_core::format_size(t.total_size)
+                } else {
+                    String::new()
+                }),
+                transferred_size: SharedString::from(if t.transferred > 0 {
+                    croh_core::format_size(t.transferred)
+                } else {
+                    String::new()
+                }),
+                elapsed: SharedString::from(elapsed),
+                eta: SharedString::from(eta),
+            }
         })
         .collect();
+
+    // Count active transfers
+    let active_count = items.iter().filter(|t| {
+        let status = t.status.as_str();
+        status == "running" || status == "pending"
+    }).count() as i32;
 
     let window_weak = window_weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(window) = window_weak.upgrade() {
-            window
-                .global::<AppLogic>()
-                .set_transfers(ModelRc::new(VecModel::from(items)));
+            let logic = window.global::<AppLogic>();
+            logic.set_transfers(ModelRc::new(VecModel::from(items)));
+            logic.set_active_transfer_count(active_count);
         }
     });
 }
@@ -4333,6 +4524,10 @@ fn trusted_peer_to_item(p: &TrustedPeer) -> PeerItem {
         peer_os: SharedString::from(""),
         peer_version: SharedString::from(""),
         peer_free_space: SharedString::from(""),
+        peer_total_space: SharedString::from(""),
+        peer_storage_percent: 0,
+        peer_uptime: SharedString::from(""),
+        peer_active_transfers: 0,
         // DND status (filled in by status updates)
         peer_dnd_mode: SharedString::from("off"),
         peer_dnd_message: SharedString::from(""),
@@ -4382,6 +4577,22 @@ fn apply_status_to_peer_item(item: &mut PeerItem, status: &PeerConnectionStatus)
             .map(|bytes| format_size(bytes))
             .unwrap_or_default()
     );
+    item.peer_total_space = SharedString::from(
+        status.peer_total_space
+            .map(|bytes| format_size(bytes))
+            .unwrap_or_default()
+    );
+    // Calculate storage percent (percent FREE)
+    item.peer_storage_percent = match (status.peer_free_space, status.peer_total_space) {
+        (Some(free), Some(total)) if total > 0 => ((free as f64 / total as f64) * 100.0) as i32,
+        _ => 0,
+    };
+    item.peer_uptime = SharedString::from(
+        status.peer_uptime
+            .map(|secs| croh_core::format_uptime(secs))
+            .unwrap_or_default()
+    );
+    item.peer_active_transfers = status.peer_active_transfers.unwrap_or(0) as i32;
 }
 
 /// Format a timestamp as relative time ("Just now", "5 min ago", "2 hours ago", etc.)
@@ -4428,15 +4639,20 @@ async fn update_peers_ui_with_status(
     let mut new_items: Vec<PeerItem> = peers.list().iter().map(trusted_peer_to_item).collect();
     drop(peers);
 
-    // Apply full status from the peer_status map
+    // Apply full status from the peer_status map and count online peers
     let status_map = peer_status.read().await;
+    let mut online_count = 0;
     for item in &mut new_items {
         if let Some(status) = status_map.get(&item.id.to_string()) {
             apply_status_to_peer_item(item, status);
+            if status.online {
+                online_count += 1;
+            }
         }
     }
     drop(status_map);
 
+    let total_count = new_items.len() as i32;
     let window_weak = window_weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(window) = window_weak.upgrade() {
@@ -4461,6 +4677,10 @@ async fn update_peers_ui_with_status(
 
             // Use the helper to set peers and push data
             set_peers_with_push_data(&window, items_with_state);
+
+            // Update peer counts in header
+            logic.set_online_peer_count(online_count);
+            logic.set_total_peer_count(total_count);
         }
     });
 }
@@ -4572,6 +4792,40 @@ async fn save_to_history(
             if let Err(e) = history.add_and_save(transfer) {
                 warn!("Failed to save transfer to history: {}", e);
             }
+            // Remove from active transfers after saving to history
+            let _ = transfer_manager.remove(transfer_id).await;
         }
     }
+}
+
+/// Update session stats in the UI.
+fn update_session_stats_ui(
+    window_weak: &Weak<MainWindow>,
+    session_stats: &Arc<RwLock<SessionStatsTracker>>,
+) {
+    let window_weak = window_weak.clone();
+    let session_stats = session_stats.clone();
+
+    let _ = slint::invoke_from_event_loop(move || {
+        // Read stats synchronously since we're in the UI thread
+        // We need to use try_read to avoid blocking
+        let (uploaded, downloaded, count) = {
+            if let Ok(stats) = session_stats.try_read() {
+                (stats.bytes_uploaded, stats.bytes_downloaded, stats.transfers_completed)
+            } else {
+                return;
+            }
+        };
+
+        if let Some(window) = window_weak.upgrade() {
+            let logic = window.global::<AppLogic>();
+            logic.set_session_stats(SessionStats {
+                total_uploaded: SharedString::from(croh_core::format_size(uploaded)),
+                total_downloaded: SharedString::from(croh_core::format_size(downloaded)),
+                transfer_count: count as i32,
+                avg_speed: SharedString::from(""),
+                session_duration: SharedString::from(""),
+            });
+        }
+    });
 }

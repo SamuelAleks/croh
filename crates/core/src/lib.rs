@@ -24,6 +24,7 @@ pub mod trust;
 pub use config::{BrowseSettings, Config, DndMode, WindowSize};
 pub use croc::{CrocOptions, CrocProcess, CrocProcessHandle, find_croc_executable, refresh_croc_cache};
 pub use error::{Error, Result};
+pub use files::{format_size, format_duration, format_uptime, format_eta, get_disk_space};
 pub use iroh::{
     complete_trust_as_receiver, accept_trust_connections, HandshakeResult,
     ControlConnection, ControlMessage, DirectoryEntry, FileRequest, Identity, IrohEndpoint, ALPN_CONTROL,
