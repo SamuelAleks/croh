@@ -82,6 +82,8 @@ pub struct App {
     app_start_time: std::time::Instant,
     /// Session statistics (bytes uploaded/downloaded this session).
     session_stats: Arc<RwLock<SessionStatsTracker>>,
+    /// Set of peer IDs that are currently disconnected (user paused connections).
+    disconnected_peers: Arc<RwLock<std::collections::HashSet<String>>>,
 }
 
 /// Tracks session statistics for uploads and downloads.
@@ -163,6 +165,7 @@ impl App {
             transfer_history: Arc::new(RwLock::new(transfer_history)),
             app_start_time: std::time::Instant::now(),
             session_stats: Arc::new(RwLock::new(SessionStatsTracker::default())),
+            disconnected_peers: Arc::new(RwLock::new(std::collections::HashSet::new())),
         }
     }
 
@@ -225,6 +228,7 @@ impl App {
         let peer_status = self.peer_status.clone();
         let window_weak = self.window.clone();
         let shutdown = self.listener_shutdown.clone();
+        let disconnected_peers = self.disconnected_peers.clone();
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -253,10 +257,15 @@ impl App {
                         return;
                     }
 
-                    // Get list of peers to ping
+                    // Get list of peers to ping (excluding disconnected ones)
                     let peers: Vec<TrustedPeer> = {
                         let store = peer_store.read().await;
-                        store.list().to_vec()
+                        let disconnected = disconnected_peers.read().await;
+                        store.list()
+                            .iter()
+                            .filter(|p| !disconnected.contains(&p.id))
+                            .cloned()
+                            .collect()
                     };
 
                     // Get the endpoint
@@ -371,6 +380,7 @@ impl App {
         let peer_status = self.peer_status.clone();
         let app_start_time = self.app_start_time;
         let session_stats = self.session_stats.clone();
+        let disconnected_peers = self.disconnected_peers.clone();
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -454,6 +464,16 @@ impl App {
                     let store = peer_store.read().await;
                     let peer = store.find_by_endpoint_id(&remote_id).cloned();
                     drop(store);
+
+                    // Check if this peer is disconnected (user paused connections)
+                    if let Some(ref p) = peer {
+                        let disconnected = disconnected_peers.read().await;
+                        if disconnected.contains(&p.id) {
+                            info!("Rejecting connection from disconnected peer: {}", p.name);
+                            let _ = conn.close().await;
+                            continue;
+                        }
+                    }
 
                     // Receive the first message to determine what type of request this is
                     let msg = match tokio::time::timeout(
@@ -2798,89 +2818,83 @@ impl App {
             }
         });
 
-        // Disconnect peer callback - sends TrustRevoke and removes peer
+        // Disconnect peer callback - pauses connections to/from peer (does not remove)
         window.global::<AppLogic>().on_disconnect_peer({
             let window_weak = window_weak.clone();
-            let peer_store = peer_store.clone();
-            let shared_endpoint = self.shared_endpoint.clone();
             let peers_model = self.peers_model.clone();
-            let peer_status = self.peer_status.clone();
+            let disconnected_peers = self.disconnected_peers.clone();
 
             move |id| {
                 let id_str = id.to_string();
-                info!("Disconnecting from peer: {}", id_str);
-                let window_weak = window_weak.clone();
-                let peer_store = peer_store.clone();
-                let shared_endpoint = shared_endpoint.clone();
-                let peers_model = peers_model.clone();
-                let peer_status = peer_status.clone();
+                info!("Pausing connections with peer: {}", id_str);
 
-                // Remove from UI model immediately
-                let count = peers_model.row_count();
-                for i in 0..count {
-                    if let Some(peer) = peers_model.row_data(i) {
-                        if peer.id.to_string() == id_str {
-                            peers_model.remove(i);
-                            break;
-                        }
-                    }
-                }
-
-                // Send TrustRevoke and remove from persistent store in background
+                // Add to disconnected set
+                let disconnected_peers_clone = disconnected_peers.clone();
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
                         .unwrap();
-
                     rt.block_on(async {
-                        // Get the peer before removing
-                        let peer = {
-                            let store = peer_store.read().await;
-                            store.find_by_id(&id_str).cloned()
-                        };
-
-                        // Try to send TrustRevoke to the peer (best effort)
-                        if let Some(peer) = peer {
-                            let endpoint_guard = shared_endpoint.read().await;
-                            if let Some(endpoint) = endpoint_guard.as_ref() {
-                                match endpoint.connect(&peer.endpoint_id).await {
-                                    Ok(mut conn) => {
-                                        let revoke = ControlMessage::TrustRevoke {
-                                            reason: "User disconnected".to_string(),
-                                        };
-                                        if let Err(e) = conn.send(&revoke).await {
-                                            warn!("Failed to send TrustRevoke: {}", e);
-                                        }
-                                        let _ = conn.close().await;
-                                        info!("Sent TrustRevoke to {}", peer.name);
-                                    }
-                                    Err(e) => {
-                                        debug!("Could not connect to peer for TrustRevoke: {}", e);
-                                    }
-                                }
-                            }
-                        }
-
-                        // Remove from persistent store
-                        {
-                            let mut store = peer_store.write().await;
-                            if let Err(e) = store.remove(&id_str) {
-                                error!("Failed to remove peer from store: {}", e);
-                                update_status(&window_weak, &format!("Error: {}", e));
-                                return;
-                            }
-                        }
-
-                        // Remove from status map
-                        {
-                            let mut status_map = peer_status.write().await;
-                            status_map.remove(&id_str);
-                        }
-
-                        update_status(&window_weak, "Disconnected from peer");
+                        let mut disconnected = disconnected_peers_clone.write().await;
+                        disconnected.insert(id_str);
                     });
                 });
+
+                // Update UI model to show disconnected state
+                let count = peers_model.row_count();
+                for i in 0..count {
+                    if let Some(mut peer) = peers_model.row_data(i) {
+                        if peer.id.to_string() == id.to_string() {
+                            peer.connected = false;
+                            peer.status = "offline".into();
+                            peers_model.set_row_data(i, peer);
+                            break;
+                        }
+                    }
+                }
+
+                update_status(&window_weak, "Paused connections with peer");
+            }
+        });
+
+        // Connect peer callback - resumes connections to/from peer
+        window.global::<AppLogic>().on_connect_peer({
+            let window_weak = window_weak.clone();
+            let peers_model = self.peers_model.clone();
+            let disconnected_peers = self.disconnected_peers.clone();
+
+            move |id| {
+                let id_str = id.to_string();
+                info!("Resuming connections with peer: {}", id_str);
+
+                // Remove from disconnected set
+                let disconnected_peers_clone = disconnected_peers.clone();
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    rt.block_on(async {
+                        let mut disconnected = disconnected_peers_clone.write().await;
+                        disconnected.remove(&id_str);
+                    });
+                });
+
+                // Update UI model to show connecting state
+                let count = peers_model.row_count();
+                for i in 0..count {
+                    if let Some(mut peer) = peers_model.row_data(i) {
+                        if peer.id.to_string() == id.to_string() {
+                            peer.connected = true;
+                            peer.status = "connecting".into();
+                            peers_model.set_row_data(i, peer);
+                            break;
+                        }
+                    }
+                }
+
+                update_status(&window_weak, "Resumed connections with peer");
             }
         });
 
@@ -4536,6 +4550,8 @@ fn trusted_peer_to_item(p: &TrustedPeer) -> PeerItem {
         speed_test_upload: SharedString::from(""),
         speed_test_download: SharedString::from(""),
         speed_test_latency: SharedString::from(""),
+        // Connection control (starts connected, user can toggle)
+        connected: true,
     }
 }
 

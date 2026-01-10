@@ -335,6 +335,8 @@ export struct PeerItem {
     speed-test-upload: string,    // formatted upload speed e.g. "12.5 MB/s"
     speed-test-download: string,  // formatted download speed e.g. "10.2 MB/s"
     speed-test-latency: string,   // formatted latency e.g. "45 ms"
+    // Connection control
+    connected: bool,              // false = user disconnected, skip pings and block connections
 }
 
 export struct BrowseEntry {
@@ -386,7 +388,8 @@ export global AppLogic {
     callback initiate-trust();
     callback cancel-trust();
     callback remove-peer(string);  // peer id
-    callback disconnect-peer(string);  // peer id - send TrustRevoke and remove
+    callback disconnect-peer(string);  // peer id - pause connections to/from peer
+    callback connect-peer(string);     // peer id - resume connections to/from peer
     callback push-to-peer(string); // peer id - push selected files to peer
     callback pull-from-peer(string); // peer id - open browse dialog for peer
     // peer id, allow-push, allow-pull, allow-browse
@@ -1481,6 +1484,7 @@ component PeerCard inherits Rectangle {
     in property <PeerItem> peer;
     callback remove-clicked();
     callback disconnect-clicked();
+    callback connect-clicked();
     callback push-clicked();
     callback browse-clicked();
     callback refresh-clicked();
@@ -1735,16 +1739,19 @@ component PeerCard inherits Rectangle {
                 }
 
                 // Storage bar (if we have space info)
-                if peer.peer-free-space != "" && peer.peer-total-space != "": VerticalLayout {
-                    spacing: 2px;
+                if peer.peer-free-space != "" && peer.peer-total-space != "": Rectangle {
+                    height: 32px;
 
                     Text {
+                        x: 0;
+                        y: 0;
                         text: "STORAGE";
                         font-size: 9px;
                         color: Theme.text-muted;
                     }
 
                     StorageBar {
+                        y: 14px;
                         percent: peer.peer-storage-percent;
                         free-text: peer.peer-free-space;
                         total-text: peer.peer-total-space;
@@ -1905,9 +1912,17 @@ component PeerCard inherits Rectangle {
 
                     Rectangle { horizontal-stretch: 1; }
 
-                    // Disconnect button - sends TrustRevoke and removes peer
+                    // Connect button (enabled when disconnected)
+                    CompactButton {
+                        label: "Connect";
+                        enabled: !peer.connected;
+                        clicked => { root.connect-clicked(); }
+                    }
+
+                    // Disconnect button (enabled when connected)
                     CompactButton {
                         label: "Disconnect";
+                        enabled: peer.connected;
                         clicked => { root.disconnect-clicked(); }
                     }
                 }
@@ -2045,6 +2060,7 @@ component PeersPanel inherits Rectangle {
                         peer: peer;
                         remove-clicked => { AppLogic.remove-peer(peer.id); }
                         disconnect-clicked => { AppLogic.disconnect-peer(peer.id); }
+                        connect-clicked => { AppLogic.connect-peer(peer.id); }
                         push-clicked => { AppLogic.push-to-peer(peer.id); }
                         browse-clicked => { AppLogic.browse-peer(peer.id); }
                         refresh-clicked => { AppLogic.refresh-peer-status(peer.id); }
