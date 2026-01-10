@@ -114,6 +114,39 @@ impl Default for BrowseSettings {
     }
 }
 
+/// Do Not Disturb mode setting.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DndMode {
+    /// DND is off, available for transfers
+    #[default]
+    Off,
+    /// Silent mode - accept but queue notifications
+    Silent,
+    /// Busy mode - reject incoming requests
+    Busy,
+}
+
+impl DndMode {
+    /// Convert to UI string.
+    pub fn to_ui_string(&self) -> &'static str {
+        match self {
+            DndMode::Off => "off",
+            DndMode::Silent => "silent",
+            DndMode::Busy => "busy",
+        }
+    }
+
+    /// Parse from UI string.
+    pub fn from_ui_string(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "silent" => DndMode::Silent,
+            "busy" => DndMode::Busy,
+            _ => DndMode::Off,
+        }
+    }
+}
+
 /// Main configuration struct.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -152,6 +185,14 @@ pub struct Config {
     /// Browse settings for file sharing.
     #[serde(default)]
     pub browse_settings: BrowseSettings,
+
+    /// Do Not Disturb mode.
+    #[serde(default)]
+    pub dnd_mode: DndMode,
+
+    /// Custom DND message to show to peers.
+    #[serde(default)]
+    pub dnd_message: Option<String>,
 }
 
 impl Default for Config {
@@ -167,6 +208,8 @@ impl Default for Config {
             no_local: false,
             window_size: WindowSize::default(),
             browse_settings: BrowseSettings::default(),
+            dnd_mode: DndMode::default(),
+            dnd_message: None,
         }
     }
 }

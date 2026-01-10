@@ -50,6 +50,9 @@ rand = "0.8"
 # Hex encoding for keys
 hex = "0.4"
 
+# Base64 encoding for speed test data
+base64 = "0.22"
+
 # Hostname detection
 hostname = "0.4"
 

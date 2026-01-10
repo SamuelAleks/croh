@@ -209,6 +209,73 @@ pub enum ControlMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+
+    // ==================== Status Messages ====================
+
+    /// Do Not Disturb status update.
+    /// Sent when a peer's DND status changes.
+    DndStatus {
+        /// Whether DND is enabled
+        enabled: bool,
+        /// DND mode: "available", "silent", "busy"
+        mode: String,
+        /// When DND expires (Unix timestamp), None = indefinite
+        #[serde(skip_serializing_if = "Option::is_none")]
+        until: Option<i64>,
+        /// Optional custom status message
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+
+    // ==================== Speed Test Messages ====================
+
+    /// Request to start a speed test.
+    SpeedTestRequest {
+        /// Unique test ID
+        test_id: String,
+        /// Size of data to transfer in bytes (default 10MB)
+        size: u64,
+    },
+
+    /// Accept a speed test request.
+    SpeedTestAccept {
+        /// Test ID from the request
+        test_id: String,
+    },
+
+    /// Reject a speed test request.
+    SpeedTestReject {
+        /// Test ID from the request
+        test_id: String,
+        /// Reason for rejection
+        reason: String,
+    },
+
+    /// Speed test data chunk (sent during test).
+    SpeedTestData {
+        /// Test ID
+        test_id: String,
+        /// Sequence number
+        sequence: u32,
+        /// Data payload (base64 encoded random bytes)
+        data: String,
+    },
+
+    /// Speed test completed with results.
+    SpeedTestComplete {
+        /// Test ID
+        test_id: String,
+        /// Upload speed in bytes per second (initiator -> responder)
+        upload_speed: u64,
+        /// Download speed in bytes per second (responder -> initiator)
+        download_speed: u64,
+        /// Round-trip latency in milliseconds
+        latency_ms: u64,
+        /// Total bytes transferred
+        bytes_transferred: u64,
+        /// Duration in milliseconds
+        duration_ms: u64,
+    },
 }
 
 impl ControlMessage {

@@ -4,7 +4,7 @@ use croh_core::{
     config::Theme,
     croc::{find_croc_executable, refresh_croc_cache, Curve, CrocEvent, CrocOptions, CrocProcess, HashAlgorithm},
     files, platform, Config, ControlMessage, FileRequest, Identity, IrohEndpoint, PeerStore, Permissions,
-    Transfer, TransferId, TransferEvent, TransferManager, TransferStatus, TransferType,
+    Transfer, TransferId, TransferEvent, TransferHistory, TransferManager, TransferStatus, TransferType,
     TrustedPeer, TrustBundle, push_files, pull_files, handle_incoming_push, handle_incoming_pull, handle_browse_request, browse_remote, default_browsable_paths,
     NodeAddr, NodeId,
 };
@@ -26,6 +26,25 @@ pub struct PeerConnectionStatus {
     pub last_ping: Option<std::time::Instant>,
     /// Round-trip latency in milliseconds (from last ping).
     pub latency_ms: Option<u32>,
+    /// Rolling average latency (last 10 pings).
+    pub avg_latency_ms: Option<u32>,
+    /// Recent latency samples for average calculation.
+    pub latency_history: Vec<u32>,
+    /// Connection type: "direct", "relay", or "unknown".
+    pub connection_type: String,
+    /// Total number of successful pings.
+    pub ping_count: u32,
+    /// Last contact time (for display as relative time).
+    pub last_contact: Option<chrono::DateTime<chrono::Utc>>,
+    /// Last upload speed (from transfers).
+    pub last_upload_speed: Option<String>,
+    /// Last download speed (from transfers).
+    pub last_download_speed: Option<String>,
+    /// Remote peer info from StatusResponse.
+    pub peer_hostname: Option<String>,
+    pub peer_os: Option<String>,
+    pub peer_version: Option<String>,
+    pub peer_free_space: Option<u64>,
 }
 
 /// Application state.
@@ -54,6 +73,8 @@ pub struct App {
     peers_model: std::rc::Rc<VecModel<PeerItem>>,
     /// Connection status for each peer (keyed by peer ID).
     peer_status: Arc<RwLock<HashMap<String, PeerConnectionStatus>>>,
+    /// Transfer history for completed transfers.
+    transfer_history: Arc<RwLock<TransferHistory>>,
 }
 
 /// State for file browser dialog.
@@ -101,6 +122,7 @@ impl App {
     pub fn new(window: Weak<MainWindow>) -> Self {
         let config = Config::load_with_env().unwrap_or_default();
         let peer_store = PeerStore::load().unwrap_or_default();
+        let transfer_history = TransferHistory::load().unwrap_or_default();
 
         // Create shared peers model and set it on the UI
         let peers_model = std::rc::Rc::new(VecModel::<PeerItem>::default());
@@ -123,6 +145,7 @@ impl App {
             pending_trust: Arc::new(RwLock::new(None)),
             peers_model,
             peer_status: Arc::new(RwLock::new(HashMap::new())),
+            transfer_history: Arc::new(RwLock::new(transfer_history)),
         }
     }
 
@@ -237,6 +260,7 @@ impl App {
                         let endpoint = endpoint.clone();
                         let peer_status = peer_status.clone();
                         let peer_id = peer.id.clone();
+                        let has_relay = peer.relay_url.is_some();
 
                         ping_tasks.push(tokio::spawn(async move {
                             let start = std::time::Instant::now();
@@ -247,13 +271,35 @@ impl App {
                                 None
                             };
 
-                            // Update status
+                            // Update status with full details
                             let mut status_map = peer_status.write().await;
                             let status = status_map.entry(peer_id).or_default();
                             status.online = online;
+
                             if online {
                                 status.last_ping = Some(std::time::Instant::now());
+                                status.last_contact = Some(chrono::Utc::now());
                                 status.latency_ms = latency_ms;
+                                status.ping_count += 1;
+
+                                // Update latency history (keep last 10)
+                                if let Some(lat) = latency_ms {
+                                    status.latency_history.push(lat);
+                                    if status.latency_history.len() > 10 {
+                                        status.latency_history.remove(0);
+                                    }
+                                    // Calculate average
+                                    let sum: u32 = status.latency_history.iter().sum();
+                                    status.avg_latency_ms = Some(sum / status.latency_history.len() as u32);
+                                }
+
+                                // Determine connection type based on relay presence
+                                // (In practice, we'd need to query the connection info)
+                                status.connection_type = if has_relay {
+                                    "relay".to_string()
+                                } else {
+                                    "direct".to_string()
+                                };
                             }
                         }));
                     }
@@ -263,12 +309,9 @@ impl App {
                         let _ = task.await;
                     }
 
-                    // Update UI with new statuses
+                    // Get full status snapshot for UI update
                     let status_map = peer_status.read().await;
-                    let status_snapshot: HashMap<String, bool> = status_map
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.online))
-                        .collect();
+                    let status_snapshot: HashMap<String, PeerConnectionStatus> = status_map.clone();
                     drop(status_map);
 
                     let window_weak_ui = window_weak.clone();
@@ -281,12 +324,9 @@ impl App {
                             for i in 0..model.row_count() {
                                 if let Some(mut peer) = model.row_data(i) {
                                     let id = peer.id.to_string();
-                                    if let Some(&online) = status_snapshot.get(&id) {
-                                        let new_status = if online { "online" } else { "offline" };
-                                        if peer.status.as_str() != new_status {
-                                            peer.status = SharedString::from(new_status);
-                                            model.set_row_data(i, peer);
-                                        }
+                                    if let Some(status) = status_snapshot.get(&id) {
+                                        apply_status_to_peer_item(&mut peer, status);
+                                        model.set_row_data(i, peer);
                                     }
                                 }
                             }
@@ -307,6 +347,7 @@ impl App {
         let peer_store = self.peer_store.clone();
         let config = self.config.clone();
         let transfer_manager = self.transfer_manager.clone();
+        let transfer_history = self.transfer_history.clone();
         let window_weak = self.window.clone();
         let shutdown = self.listener_shutdown.clone();
         let pending_trust = self.pending_trust.clone();
@@ -546,6 +587,7 @@ impl App {
 
                             // Spawn progress handler
                             let transfer_manager_progress = transfer_manager.clone();
+                            let transfer_history_progress = transfer_history.clone();
                             let window_weak_progress = window_weak.clone();
                             let transfer_id_progress = transfer_id.clone();
                             let peer_name = peer.name.clone();
@@ -579,6 +621,7 @@ impl App {
                                             }).await;
                                             update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                             update_status(&window_weak_progress, &format!("Received files from {}", peer_name));
+                                            save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
                                         }
                                         TransferEvent::Failed { error, .. } => {
                                             error!("Transfer failed: {}", error);
@@ -588,12 +631,14 @@ impl App {
                                             }).await;
                                             update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                             update_status(&window_weak_progress, &format!("Receive failed: {}", error));
+                                            save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
                                         }
                                         TransferEvent::Cancelled { .. } => {
                                             let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
                                                 t.status = TransferStatus::Cancelled;
                                             }).await;
                                             update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                            save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
                                         }
                                     }
                                 }
@@ -699,6 +744,7 @@ impl App {
 
                             // Spawn progress handler
                             let transfer_manager_progress = transfer_manager.clone();
+                            let transfer_history_progress = transfer_history.clone();
                             let window_weak_progress = window_weak.clone();
                             let transfer_id_progress = transfer_id.clone();
                             let peer_name = peer.name.clone();
@@ -732,6 +778,7 @@ impl App {
                                             }).await;
                                             update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                             update_status(&window_weak_progress, &format!("Pull completed for {}", peer_name));
+                                            save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
                                         }
                                         TransferEvent::Failed { error, .. } => {
                                             error!("Pull transfer failed: {}", error);
@@ -741,12 +788,14 @@ impl App {
                                             }).await;
                                             update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                             update_status(&window_weak_progress, &format!("Pull failed: {}", error));
+                                            save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
                                         }
                                         TransferEvent::Cancelled { .. } => {
                                             let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
                                                 t.status = TransferStatus::Cancelled;
                                             }).await;
                                             update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                            save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
                                         }
                                     }
                                 }
@@ -836,6 +885,54 @@ impl App {
                             }).await;
                             let _ = conn.close().await;
                         }
+                        ControlMessage::DndStatus { enabled, mode, until: _, message } => {
+                            info!("Received DND status from {}: enabled={}, mode={}", peer.name, enabled, mode);
+
+                            // Update peer's DND status in UI
+                            let peer_id = peer.id.clone();
+                            let dnd_mode = mode.clone();
+                            let dnd_message = message.clone().unwrap_or_default();
+                            let _ = slint::invoke_from_event_loop({
+                                let window_weak = window_weak.clone();
+                                move || {
+                                    if let Some(window) = window_weak.upgrade() {
+                                        // Find and update the peer in the model
+                                        let model = window.global::<AppLogic>().get_peers();
+                                        for i in 0..model.row_count() {
+                                            if let Some(mut item) = model.row_data(i) {
+                                                if item.id.as_str() == peer_id {
+                                                    item.peer_dnd_mode = SharedString::from(&dnd_mode);
+                                                    item.peer_dnd_message = SharedString::from(&dnd_message);
+                                                    model.set_row_data(i, item);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                            let _ = conn.close().await;
+                        }
+                        ControlMessage::SpeedTestRequest { test_id, size } => {
+                            info!("Received speed test request from {}: test_id={}, size={}", peer.name, test_id, size);
+
+                            // Handle the speed test request
+                            match croh_core::handle_speed_test_request(&mut conn, test_id.clone(), *size).await {
+                                Ok(result) => {
+                                    info!(
+                                        "Speed test handled for {}: upload={}, download={}, latency={}ms",
+                                        peer.name,
+                                        result.upload_speed_formatted(),
+                                        result.download_speed_formatted(),
+                                        result.latency_ms
+                                    );
+                                }
+                                Err(e) => {
+                                    error!("Speed test handling failed for {}: {}", peer.name, e);
+                                }
+                            }
+                            let _ = conn.close().await;
+                        }
                         other => {
                             warn!("Unexpected message type from {}: {:?}", remote_id, other);
                         }
@@ -888,6 +985,10 @@ impl App {
                 let browse_show_protected = config_guard.browse_settings.show_protected;
                 let browse_exclude_patterns = config_guard.browse_settings.exclude_patterns.join(", ");
 
+                // DND settings
+                let dnd_mode = config_guard.dnd_mode.to_ui_string().to_string();
+                let dnd_message = config_guard.dnd_message.clone().unwrap_or_default();
+
                 drop(config_guard);
 
                 // Update UI on main thread
@@ -906,6 +1007,8 @@ impl App {
                             browse_show_hidden,
                             browse_show_protected,
                             browse_exclude_patterns: SharedString::from(browse_exclude_patterns),
+                            dnd_mode: SharedString::from(dnd_mode),
+                            dnd_message: SharedString::from(dnd_message),
                         };
                         window.global::<AppLogic>().set_settings(settings);
                     }
@@ -1126,6 +1229,7 @@ impl App {
         let window_weak = self.window.clone();
         let selected_files = self.selected_files.clone();
         let transfer_manager = self.transfer_manager.clone();
+        let transfer_history = self.transfer_history.clone();
         let active_processes = self.active_processes.clone();
         let config = self.config.clone();
         let identity = self.identity.clone();
@@ -1136,6 +1240,7 @@ impl App {
             let window_weak = window_weak.clone();
             let selected_files = selected_files.clone();
             let transfer_manager = transfer_manager.clone();
+            let transfer_history = transfer_history.clone();
             let active_processes = active_processes.clone();
             let config = config.clone();
 
@@ -1145,6 +1250,7 @@ impl App {
                 let window_weak = window_weak.clone();
                 let selected_files = selected_files.clone();
                 let transfer_manager = transfer_manager.clone();
+                let transfer_history = transfer_history.clone();
                 let active_processes = active_processes.clone();
                 let config = config.clone();
 
@@ -1264,6 +1370,7 @@ impl App {
                                             update_status(&window_weak, "Transfer completed!");
                                             update_transfers_ui(&window_weak, &transfer_manager)
                                                 .await;
+                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id).await;
 
                                             // Clear selected files
                                             let mut files_guard = selected_files.write().await;
@@ -1292,6 +1399,7 @@ impl App {
                                             );
                                             update_transfers_ui(&window_weak, &transfer_manager)
                                                 .await;
+                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id).await;
                                             break;
                                         }
                                         Some(CrocEvent::Output(line)) => {
@@ -1326,6 +1434,7 @@ impl App {
                                                 .await;
                                             update_status(&window_weak, "Transfer completed!");
                                             update_transfers_ui(&window_weak, &transfer_manager).await;
+                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id).await;
 
                                             // Clear selected files
                                             let mut files_guard = selected_files.write().await;
@@ -1352,6 +1461,7 @@ impl App {
                                                 .await;
                                             update_status(&window_weak, "Transfer failed");
                                             update_transfers_ui(&window_weak, &transfer_manager).await;
+                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id).await;
                                         }
                                         Err(e) => {
                                             error!("Failed to get process status: {}", e);
@@ -1383,6 +1493,7 @@ impl App {
         window.global::<AppLogic>().on_start_receive({
             let window_weak = window_weak.clone();
             let transfer_manager = transfer_manager.clone();
+            let transfer_history = transfer_history.clone();
             let active_processes = active_processes.clone();
             let config = config.clone();
             let identity = identity.clone();
@@ -1406,6 +1517,7 @@ impl App {
 
                 let window_weak = window_weak.clone();
                 let transfer_manager = transfer_manager.clone();
+                let transfer_history = transfer_history.clone();
                 let active_processes = active_processes.clone();
                 let config = config.clone();
                 let identity = identity.clone();
@@ -1531,6 +1643,7 @@ impl App {
                                             update_status(&window_weak, "Receive completed!");
                                             update_transfers_ui(&window_weak, &transfer_manager)
                                                 .await;
+                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id).await;
 
                                             // Check for trust bundles in received files
                                             check_and_handle_trust_bundle(&download_dir, &window_weak, &identity, &shared_endpoint, &peer_store, &peer_status).await;
@@ -1551,6 +1664,7 @@ impl App {
                                             );
                                             update_transfers_ui(&window_weak, &transfer_manager)
                                                 .await;
+                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id).await;
                                             break;
                                         }
                                         Some(CrocEvent::Output(line)) => {
@@ -1581,6 +1695,7 @@ impl App {
                                                 .await;
                                             update_status(&window_weak, "Receive completed!");
                                             update_transfers_ui(&window_weak, &transfer_manager).await;
+                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id).await;
 
                                             // Check for trust bundles in received files
                                             check_and_handle_trust_bundle(&download_dir, &window_weak, &identity, &shared_endpoint, &peer_store, &peer_status).await;
@@ -1596,6 +1711,7 @@ impl App {
                                                 .await;
                                             update_status(&window_weak, "Receive failed");
                                             update_transfers_ui(&window_weak, &transfer_manager).await;
+                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id).await;
                                         }
                                         Err(e) => {
                                             error!("Failed to get process status: {}", e);
@@ -1991,6 +2107,8 @@ impl App {
                         let browse_show_hidden = config_guard.browse_settings.show_hidden;
                         let browse_show_protected = config_guard.browse_settings.show_protected;
                         let browse_exclude_patterns = config_guard.browse_settings.exclude_patterns.join(", ");
+                        let dnd_mode = config_guard.dnd_mode.to_ui_string().to_string();
+                        let dnd_message = config_guard.dnd_message.clone().unwrap_or_default();
                         let (croc_path, croc_found) = match find_croc_executable() {
                             Ok(path) => (path.to_string_lossy().to_string(), true),
                             Err(_) => ("Not found".to_string(), false),
@@ -2012,6 +2130,8 @@ impl App {
                                     browse_show_hidden,
                                     browse_show_protected,
                                     browse_exclude_patterns: SharedString::from(browse_exclude_patterns),
+                                    dnd_mode: SharedString::from(dnd_mode),
+                                    dnd_message: SharedString::from(dnd_message),
                                 };
                                 window.global::<AppLogic>().set_settings(settings);
                             }
@@ -2126,6 +2246,83 @@ impl App {
                 });
             }
         });
+
+        // Set DND mode callback
+        window.global::<AppLogic>().on_set_dnd_mode({
+            let config = config.clone();
+            let window_weak = window_weak.clone();
+            let shared_endpoint = self.shared_endpoint.clone();
+            let peer_store = self.peer_store.clone();
+
+            move |mode, message| {
+                let mode_str = mode.to_string();
+                let message_str = message.to_string();
+                let config = config.clone();
+                let window_weak = window_weak.clone();
+                let shared_endpoint = shared_endpoint.clone();
+                let peer_store = peer_store.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Update config
+                        {
+                            let mut config_guard = config.write().await;
+                            config_guard.dnd_mode = croh_core::DndMode::from_ui_string(&mode_str);
+                            config_guard.dnd_message = if message_str.is_empty() { None } else { Some(message_str.clone()) };
+                            if let Err(e) = config_guard.save() {
+                                error!("Failed to save DND settings: {}", e);
+                            }
+                        }
+
+                        // Update UI
+                        let mode_ui = mode_str.clone();
+                        let message_ui = message_str.clone();
+                        let _ = slint::invoke_from_event_loop({
+                            let window_weak = window_weak.clone();
+                            move || {
+                                if let Some(window) = window_weak.upgrade() {
+                                    let mut settings = window.global::<AppLogic>().get_settings();
+                                    settings.dnd_mode = SharedString::from(&mode_ui);
+                                    settings.dnd_message = SharedString::from(&message_ui);
+                                    window.global::<AppLogic>().set_settings(settings);
+                                }
+                            }
+                        });
+
+                        // Broadcast DND status to all online peers
+                        let endpoint_opt = shared_endpoint.read().await.clone();
+                        if let Some(endpoint) = endpoint_opt {
+                            let store = peer_store.read().await;
+                            for peer in store.list() {
+                                // Try to connect and send DND status
+                                match endpoint.connect(&peer.endpoint_id).await {
+                                    Ok(mut conn) => {
+                                        let msg = ControlMessage::DndStatus {
+                                            enabled: mode_str != "off",
+                                            mode: mode_str.clone(),
+                                            until: None,
+                                            message: if message_str.is_empty() { None } else { Some(message_str.clone()) },
+                                        };
+                                        if let Err(e) = conn.send(&msg).await {
+                                            warn!("Failed to send DND status to {}: {}", peer.name, e);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        // Peer may be offline, that's ok
+                                        debug!("Failed to connect to {} for DND broadcast: {}", peer.name, e);
+                                    }
+                                }
+                            }
+                        }
+                    });
+                });
+            }
+        });
     }
 
     fn setup_peer_callbacks(&self, window: &MainWindow) {
@@ -2137,6 +2334,7 @@ impl App {
         let config = self.config.clone();
         let pending_trust = self.pending_trust.clone();
         let peer_status = self.peer_status.clone();
+        let transfer_history = self.transfer_history.clone();
 
         // Initiate trust callback
         window.global::<AppLogic>().on_initiate_trust({
@@ -2486,6 +2684,355 @@ impl App {
             }
         });
 
+        // Disconnect peer callback - sends TrustRevoke and removes peer
+        window.global::<AppLogic>().on_disconnect_peer({
+            let window_weak = window_weak.clone();
+            let peer_store = peer_store.clone();
+            let shared_endpoint = self.shared_endpoint.clone();
+            let peers_model = self.peers_model.clone();
+            let peer_status = self.peer_status.clone();
+
+            move |id| {
+                let id_str = id.to_string();
+                info!("Disconnecting from peer: {}", id_str);
+                let window_weak = window_weak.clone();
+                let peer_store = peer_store.clone();
+                let shared_endpoint = shared_endpoint.clone();
+                let peers_model = peers_model.clone();
+                let peer_status = peer_status.clone();
+
+                // Remove from UI model immediately
+                let count = peers_model.row_count();
+                for i in 0..count {
+                    if let Some(peer) = peers_model.row_data(i) {
+                        if peer.id.to_string() == id_str {
+                            peers_model.remove(i);
+                            break;
+                        }
+                    }
+                }
+
+                // Send TrustRevoke and remove from persistent store in background
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Get the peer before removing
+                        let peer = {
+                            let store = peer_store.read().await;
+                            store.find_by_id(&id_str).cloned()
+                        };
+
+                        // Try to send TrustRevoke to the peer (best effort)
+                        if let Some(peer) = peer {
+                            let endpoint_guard = shared_endpoint.read().await;
+                            if let Some(endpoint) = endpoint_guard.as_ref() {
+                                match endpoint.connect(&peer.endpoint_id).await {
+                                    Ok(mut conn) => {
+                                        let revoke = ControlMessage::TrustRevoke {
+                                            reason: "User disconnected".to_string(),
+                                        };
+                                        if let Err(e) = conn.send(&revoke).await {
+                                            warn!("Failed to send TrustRevoke: {}", e);
+                                        }
+                                        let _ = conn.close().await;
+                                        info!("Sent TrustRevoke to {}", peer.name);
+                                    }
+                                    Err(e) => {
+                                        debug!("Could not connect to peer for TrustRevoke: {}", e);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Remove from persistent store
+                        {
+                            let mut store = peer_store.write().await;
+                            if let Err(e) = store.remove(&id_str) {
+                                error!("Failed to remove peer from store: {}", e);
+                                update_status(&window_weak, &format!("Error: {}", e));
+                                return;
+                            }
+                        }
+
+                        // Remove from status map
+                        {
+                            let mut status_map = peer_status.write().await;
+                            status_map.remove(&id_str);
+                        }
+
+                        update_status(&window_weak, "Disconnected from peer");
+                    });
+                });
+            }
+        });
+
+        // Refresh peer status callback - triggers immediate ping and status query
+        window.global::<AppLogic>().on_refresh_peer_status({
+            let window_weak = window_weak.clone();
+            let peer_store = peer_store.clone();
+            let shared_endpoint = self.shared_endpoint.clone();
+            let peer_status = self.peer_status.clone();
+
+            move |id| {
+                let id_str = id.to_string();
+                info!("Refreshing status for peer: {}", id_str);
+                let window_weak = window_weak.clone();
+                let peer_store = peer_store.clone();
+                let shared_endpoint = shared_endpoint.clone();
+                let peer_status = peer_status.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Get the peer
+                        let peer = {
+                            let store = peer_store.read().await;
+                            store.find_by_id(&id_str).cloned()
+                        };
+
+                        let peer = match peer {
+                            Some(p) => p,
+                            None => {
+                                error!("Peer not found: {}", id_str);
+                                return;
+                            }
+                        };
+
+                        let endpoint_guard = shared_endpoint.read().await;
+                        let endpoint = match endpoint_guard.as_ref() {
+                            Some(ep) => ep.clone(),
+                            None => {
+                                error!("Endpoint not ready");
+                                return;
+                            }
+                        };
+                        drop(endpoint_guard);
+
+                        // Ping the peer
+                        let start = std::time::Instant::now();
+                        let online = ping_peer(&endpoint, &peer).await;
+                        let latency_ms = if online {
+                            Some(start.elapsed().as_millis() as u32)
+                        } else {
+                            None
+                        };
+
+                        // Update status
+                        {
+                            let mut status_map = peer_status.write().await;
+                            let status = status_map.entry(id_str.clone()).or_default();
+                            status.online = online;
+                            if online {
+                                status.last_ping = Some(std::time::Instant::now());
+                                status.last_contact = Some(chrono::Utc::now());
+                                status.latency_ms = latency_ms;
+                                status.ping_count += 1;
+
+                                if let Some(lat) = latency_ms {
+                                    status.latency_history.push(lat);
+                                    if status.latency_history.len() > 10 {
+                                        status.latency_history.remove(0);
+                                    }
+                                    let sum: u32 = status.latency_history.iter().sum();
+                                    status.avg_latency_ms = Some(sum / status.latency_history.len() as u32);
+                                }
+
+                                status.connection_type = if peer.relay_url.is_some() {
+                                    "relay".to_string()
+                                } else {
+                                    "direct".to_string()
+                                };
+                            }
+                        }
+
+                        // If online, also query StatusRequest for more info
+                        if online {
+                            match endpoint.connect(&peer.endpoint_id).await {
+                                Ok(mut conn) => {
+                                    if conn.send(&ControlMessage::StatusRequest).await.is_ok() {
+                                        if let Ok(ControlMessage::StatusResponse {
+                                            hostname, os, free_space, version, ..
+                                        }) = conn.recv().await {
+                                            let mut status_map = peer_status.write().await;
+                                            if let Some(status) = status_map.get_mut(&id_str) {
+                                                status.peer_hostname = Some(hostname);
+                                                status.peer_os = Some(os);
+                                                status.peer_version = Some(version);
+                                                status.peer_free_space = Some(free_space);
+                                            }
+                                        }
+                                    }
+                                    let _ = conn.close().await;
+                                }
+                                Err(e) => {
+                                    debug!("Could not connect for status: {}", e);
+                                }
+                            }
+                        }
+
+                        // Update UI
+                        update_peers_ui_with_status(&window_weak, &peer_store, &peer_status).await;
+
+                        if online {
+                            update_status(&window_weak, &format!("Refreshed status for {}", peer.name));
+                        } else {
+                            update_status(&window_weak, &format!("{} is offline", peer.name));
+                        }
+                    });
+                });
+            }
+        });
+
+        // Run speed test callback
+        window.global::<AppLogic>().on_run_speed_test({
+            let window_weak = window_weak.clone();
+            let peer_store = peer_store.clone();
+            let shared_endpoint = self.shared_endpoint.clone();
+            let peer_status = self.peer_status.clone();
+
+            move |id| {
+                let id_str = id.to_string();
+                info!("Starting speed test for peer: {}", id_str);
+                let window_weak = window_weak.clone();
+                let peer_store = peer_store.clone();
+                let shared_endpoint = shared_endpoint.clone();
+                let peer_status = peer_status.clone();
+
+                // Set speed_test_running to true in UI
+                {
+                    let window_weak_ui = window_weak.clone();
+                    let id_str_ui = id_str.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(window) = window_weak_ui.upgrade() {
+                            let model = window.global::<AppLogic>().get_peers();
+                            for i in 0..model.row_count() {
+                                if let Some(mut item) = model.row_data(i) {
+                                    if item.id.as_str() == id_str_ui {
+                                        item.speed_test_running = true;
+                                        model.set_row_data(i, item);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Get the peer
+                        let peer = {
+                            let store = peer_store.read().await;
+                            store.find_by_id(&id_str).cloned()
+                        };
+
+                        let peer = match peer {
+                            Some(p) => p,
+                            None => {
+                                error!("Peer not found: {}", id_str);
+                                return;
+                            }
+                        };
+
+                        let endpoint_guard = shared_endpoint.read().await;
+                        let endpoint = match endpoint_guard.as_ref() {
+                            Some(ep) => ep.clone(),
+                            None => {
+                                error!("Endpoint not ready");
+                                return;
+                            }
+                        };
+                        drop(endpoint_guard);
+
+                        // Connect to peer and run speed test
+                        let result = match endpoint.connect(&peer.endpoint_id).await {
+                            Ok(mut conn) => {
+                                match croh_core::run_speed_test(&mut conn, croh_core::DEFAULT_TEST_SIZE).await {
+                                    Ok(result) => {
+                                        info!(
+                                            "Speed test completed: upload={}, download={}, latency={}ms",
+                                            result.upload_speed_formatted(),
+                                            result.download_speed_formatted(),
+                                            result.latency_ms
+                                        );
+                                        Some(result)
+                                    }
+                                    Err(e) => {
+                                        error!("Speed test failed: {}", e);
+                                        update_status(&window_weak, &format!("Speed test failed: {}", e));
+                                        None
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("Could not connect to peer for speed test: {}", e);
+                                update_status(&window_weak, &format!("Could not connect: {}", e));
+                                None
+                            }
+                        };
+
+                        // Update peer status with results
+                        if let Some(ref res) = result {
+                            let mut status_map = peer_status.write().await;
+                            let status = status_map.entry(id_str.clone()).or_default();
+                            status.last_upload_speed = Some(res.upload_speed_formatted());
+                            status.last_download_speed = Some(res.download_speed_formatted());
+                        }
+
+                        // Prepare status message before moving result
+                        let status_msg = result.as_ref().map(|res| {
+                            format!(
+                                "Speed test: ↑{} ↓{} ({}ms)",
+                                res.upload_speed_formatted(),
+                                res.download_speed_formatted(),
+                                res.latency_ms
+                            )
+                        });
+
+                        // Update UI with results
+                        let id_str_ui = id_str.clone();
+                        let window_weak_final = window_weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(window) = window_weak_final.upgrade() {
+                                let model = window.global::<AppLogic>().get_peers();
+                                for i in 0..model.row_count() {
+                                    if let Some(mut item) = model.row_data(i) {
+                                        if item.id.as_str() == id_str_ui {
+                                            item.speed_test_running = false;
+                                            if let Some(ref res) = result {
+                                                item.speed_test_upload = SharedString::from(res.upload_speed_formatted());
+                                                item.speed_test_download = SharedString::from(res.download_speed_formatted());
+                                                item.speed_test_latency = SharedString::from(format!("{} ms", res.latency_ms));
+                                            }
+                                            model.set_row_data(i, item);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        });
+
+                        if let Some(msg) = status_msg {
+                            update_status(&window_weak, &msg);
+                        }
+                    });
+                });
+            }
+        });
+
         // Update peer permissions callback
         window.global::<AppLogic>().on_update_peer_permissions({
             let window_weak = window_weak.clone();
@@ -2613,6 +3160,7 @@ impl App {
             let peer_store = peer_store.clone();
             let selected_files = self.selected_files.clone();
             let transfer_manager = self.transfer_manager.clone();
+            let transfer_history = self.transfer_history.clone();
             let shared_endpoint = self.shared_endpoint.clone();
 
             move |peer_id| {
@@ -2622,6 +3170,7 @@ impl App {
                 let peer_store = peer_store.clone();
                 let selected_files = selected_files.clone();
                 let transfer_manager = transfer_manager.clone();
+                let transfer_history = transfer_history.clone();
                 let shared_endpoint = shared_endpoint.clone();
 
                 std::thread::spawn(move || {
@@ -2695,6 +3244,7 @@ impl App {
 
                         // Spawn progress handler
                         let transfer_manager_progress = transfer_manager.clone();
+                        let transfer_history_progress = transfer_history.clone();
                         let window_weak_progress = window_weak.clone();
                         let transfer_id_progress = transfer_id.clone();
                         tokio::spawn(async move {
@@ -2727,6 +3277,7 @@ impl App {
                                         }).await;
                                         update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                         update_status(&window_weak_progress, "Push completed successfully");
+                                        save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
                                     }
                                     TransferEvent::Failed { error, .. } => {
                                         error!("Transfer failed: {}", error);
@@ -2736,6 +3287,7 @@ impl App {
                                         }).await;
                                         update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                         update_status(&window_weak_progress, &format!("Push failed: {}", error));
+                                        save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
                                     }
                                     TransferEvent::Cancelled { .. } => {
                                         let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
@@ -2743,6 +3295,7 @@ impl App {
                                         }).await;
                                         update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                         update_status(&window_weak_progress, "Push cancelled");
+                                        save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
                                     }
                                 }
                             }
@@ -2777,6 +3330,7 @@ impl App {
         let browse_state = self.browse_state.clone();
         let config = self.config.clone();
         let transfer_manager = self.transfer_manager.clone();
+        let transfer_history = self.transfer_history.clone();
 
         // Browse peer - open file browser for a peer
         window.global::<AppLogic>().on_browse_peer({
@@ -3202,6 +3756,7 @@ impl App {
             let browse_state = browse_state.clone();
             let config = config.clone();
             let transfer_manager = transfer_manager.clone();
+            let transfer_history = transfer_history.clone();
 
             move || {
                 info!("Pull selected files");
@@ -3211,6 +3766,7 @@ impl App {
                 let browse_state = browse_state.clone();
                 let config = config.clone();
                 let transfer_manager = transfer_manager.clone();
+                let transfer_history = transfer_history.clone();
 
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
@@ -3304,6 +3860,7 @@ impl App {
 
                         // Spawn progress handler
                         let transfer_manager_progress = transfer_manager.clone();
+                        let transfer_history_progress = transfer_history.clone();
                         let window_weak_progress = window_weak.clone();
                         let transfer_id_progress = transfer_id.clone();
                         let peer_name = peer.name.clone();
@@ -3337,6 +3894,7 @@ impl App {
                                         }).await;
                                         update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                         update_status(&window_weak_progress, &format!("Pull from {} completed", peer_name));
+                                        save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
                                     }
                                     TransferEvent::Failed { error, .. } => {
                                         error!("Pull failed: {}", error);
@@ -3346,12 +3904,14 @@ impl App {
                                         }).await;
                                         update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                         update_status(&window_weak_progress, &format!("Pull failed: {}", error));
+                                        save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
                                     }
                                     TransferEvent::Cancelled { .. } => {
                                         let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
                                             t.status = TransferStatus::Cancelled;
                                         }).await;
                                         update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                        save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
                                     }
                                 }
                             }
@@ -3748,11 +4308,11 @@ fn trusted_peer_to_item(p: &TrustedPeer) -> PeerItem {
         id: SharedString::from(p.id.clone()),
         name: SharedString::from(p.name.clone()),
         endpoint_id: SharedString::from(endpoint_display),
-        status: SharedString::from("offline"), // TODO: real presence detection
+        status: SharedString::from("offline"),
         last_seen: SharedString::from(last_seen),
         relay_url: SharedString::from(p.relay_url.clone().unwrap_or_default()),
         added_at: SharedString::from(added_at),
-        expanded: false, // UI state: collapsed by default
+        expanded: false,
         // What they allow us to do
         can_push: p.their_permissions.push,
         can_pull: p.their_permissions.pull,
@@ -3761,6 +4321,99 @@ fn trusted_peer_to_item(p: &TrustedPeer) -> PeerItem {
         allow_push: p.permissions_granted.push,
         allow_pull: p.permissions_granted.pull,
         allow_browse: p.permissions_granted.browse,
+        // Connection status (filled in by apply_status_to_peer_item)
+        latency_ms: -1,
+        avg_latency_ms: -1,
+        connection_type: SharedString::from(""),
+        last_contact: SharedString::from(""),
+        ping_count: 0,
+        last_upload_speed: SharedString::from(""),
+        last_download_speed: SharedString::from(""),
+        peer_hostname: SharedString::from(""),
+        peer_os: SharedString::from(""),
+        peer_version: SharedString::from(""),
+        peer_free_space: SharedString::from(""),
+        // DND status (filled in by status updates)
+        peer_dnd_mode: SharedString::from("off"),
+        peer_dnd_message: SharedString::from(""),
+        // Speed test results (filled in when test completes)
+        speed_test_running: false,
+        speed_test_upload: SharedString::from(""),
+        speed_test_download: SharedString::from(""),
+        speed_test_latency: SharedString::from(""),
+    }
+}
+
+/// Apply connection status to a PeerItem.
+fn apply_status_to_peer_item(item: &mut PeerItem, status: &PeerConnectionStatus) {
+    item.status = SharedString::from(if status.online { "online" } else { "offline" });
+    item.latency_ms = status.latency_ms.map(|v| v as i32).unwrap_or(-1);
+    item.avg_latency_ms = status.avg_latency_ms.map(|v| v as i32).unwrap_or(-1);
+    item.connection_type = SharedString::from(status.connection_type.clone());
+    item.ping_count = status.ping_count as i32;
+
+    // Format last contact as relative time
+    item.last_contact = SharedString::from(
+        status.last_contact
+            .map(|dt| format_relative_time(dt))
+            .unwrap_or_default()
+    );
+
+    // Transfer speeds
+    item.last_upload_speed = SharedString::from(
+        status.last_upload_speed.clone().unwrap_or_default()
+    );
+    item.last_download_speed = SharedString::from(
+        status.last_download_speed.clone().unwrap_or_default()
+    );
+
+    // Peer info
+    item.peer_hostname = SharedString::from(
+        status.peer_hostname.clone().unwrap_or_default()
+    );
+    item.peer_os = SharedString::from(
+        status.peer_os.clone().unwrap_or_default()
+    );
+    item.peer_version = SharedString::from(
+        status.peer_version.clone().unwrap_or_default()
+    );
+    item.peer_free_space = SharedString::from(
+        status.peer_free_space
+            .map(|bytes| format_size(bytes))
+            .unwrap_or_default()
+    );
+}
+
+/// Format a timestamp as relative time ("Just now", "5 min ago", "2 hours ago", etc.)
+fn format_relative_time(dt: chrono::DateTime<chrono::Utc>) -> String {
+    let now = chrono::Utc::now();
+    let duration = now.signed_duration_since(dt);
+
+    if duration.num_seconds() < 10 {
+        "Just now".to_string()
+    } else if duration.num_seconds() < 60 {
+        format!("{} sec ago", duration.num_seconds())
+    } else if duration.num_minutes() < 60 {
+        let mins = duration.num_minutes();
+        if mins == 1 {
+            "1 min ago".to_string()
+        } else {
+            format!("{} min ago", mins)
+        }
+    } else if duration.num_hours() < 24 {
+        let hours = duration.num_hours();
+        if hours == 1 {
+            "1 hour ago".to_string()
+        } else {
+            format!("{} hours ago", hours)
+        }
+    } else {
+        let days = duration.num_days();
+        if days == 1 {
+            "1 day ago".to_string()
+        } else {
+            format!("{} days ago", days)
+        }
     }
 }
 
@@ -3775,11 +4428,11 @@ async fn update_peers_ui_with_status(
     let mut new_items: Vec<PeerItem> = peers.list().iter().map(trusted_peer_to_item).collect();
     drop(peers);
 
-    // Apply status from the peer_status map
+    // Apply full status from the peer_status map
     let status_map = peer_status.read().await;
     for item in &mut new_items {
         if let Some(status) = status_map.get(&item.id.to_string()) {
-            item.status = SharedString::from(if status.online { "online" } else { "offline" });
+            apply_status_to_peer_item(item, status);
         }
     }
     drop(status_map);
@@ -3903,6 +4556,22 @@ async fn wait_for_trust_handshake(
                 "unexpected message: expected TrustConfirm, got {:?}",
                 other
             )))
+        }
+    }
+}
+
+/// Save a completed transfer to history.
+async fn save_to_history(
+    transfer_history: &Arc<RwLock<TransferHistory>>,
+    transfer_manager: &TransferManager,
+    transfer_id: &TransferId,
+) {
+    if let Some(transfer) = transfer_manager.get(transfer_id).await {
+        if transfer.status.is_terminal() {
+            let mut history = transfer_history.write().await;
+            if let Err(e) = history.add_and_save(transfer) {
+                warn!("Failed to save transfer to history: {}", e);
+            }
         }
     }
 }

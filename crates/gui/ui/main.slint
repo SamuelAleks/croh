@@ -272,6 +272,9 @@ export struct AppSettings {
     browse-show-hidden: bool,     // show hidden files (starting with .)
     browse-show-protected: bool,  // show protected system dirs (.ssh, .gnupg, etc.)
     browse-exclude-patterns: string,  // comma-separated exclude patterns
+    // Do Not Disturb settings
+    dnd-mode: string,        // "off", "silent", "busy"
+    dnd-message: string,     // custom status message
 }
 
 export struct PeerItem {
@@ -291,6 +294,27 @@ export struct PeerItem {
     allow-push: bool,        // they can push files to us
     allow-pull: bool,        // they can pull files from us
     allow-browse: bool,      // they can browse our filesystem
+    // Connection status details
+    latency-ms: int,              // current ping latency (-1 if unknown)
+    avg-latency-ms: int,          // rolling average latency
+    connection-type: string,      // "direct", "relay", "unknown"
+    last-contact: string,         // formatted relative time "Just now", "5 min ago"
+    ping-count: int,              // number of successful pings
+    last-upload-speed: string,    // last transfer upload speed
+    last-download-speed: string,  // last transfer download speed
+    // Remote peer info (from StatusResponse)
+    peer-hostname: string,
+    peer-os: string,
+    peer-version: string,
+    peer-free-space: string,      // formatted "50.2 GB"
+    // Peer's DND status
+    peer-dnd-mode: string,        // "off", "silent", "busy"
+    peer-dnd-message: string,     // their custom status message
+    // Speed test results
+    speed-test-running: bool,     // true while speed test is in progress
+    speed-test-upload: string,    // formatted upload speed e.g. "12.5 MB/s"
+    speed-test-download: string,  // formatted download speed e.g. "10.2 MB/s"
+    speed-test-latency: string,   // formatted latency e.g. "45 ms"
 }
 
 export struct BrowseEntry {
@@ -327,17 +351,24 @@ export global AppLogic {
     callback auto-save-settings(string, string, string, string, string, string, bool);
     // save-browse-settings: show-hidden, show-protected, exclude-patterns
     callback save-browse-settings(bool, bool, string);
+    // set-dnd-mode: mode ("off", "silent", "busy"), message
+    callback set-dnd-mode(string, string);
 
     // Trusted peers callbacks
     callback initiate-trust();
     callback cancel-trust();
     callback remove-peer(string);  // peer id
+    callback disconnect-peer(string);  // peer id - send TrustRevoke and remove
     callback push-to-peer(string); // peer id - push selected files to peer
     callback pull-from-peer(string); // peer id - open browse dialog for peer
     // peer id, allow-push, allow-pull, allow-browse
     callback update-peer-permissions(string, bool, bool, bool);
     // peer id, expanded state
     callback set-peer-expanded(string, bool);
+    // Refresh peer status (trigger immediate ping)
+    callback refresh-peer-status(string);  // peer id
+    // Run speed test with peer
+    callback run-speed-test(string);  // peer id
 
     // File browser callbacks (for remote peer browsing)
     callback browse-peer(string);              // peer id - start browsing
@@ -1140,16 +1171,77 @@ component ReceivePanel inherits Rectangle {
 // Peers Panel
 // ============================================================================
 
+// Mini toggle switch component for permissions
+component MiniToggle inherits HorizontalLayout {
+    in property <bool> checked;
+    in property <string> label;
+    callback toggled();
+
+    spacing: 4px;
+    height: 18px;
+    alignment: center;
+
+    Rectangle {
+        width: 32px;
+        height: 18px;
+        border-radius: 9px;
+        background: checked ? Theme.accent : Theme.bg-input;
+        TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.toggled(); }
+        }
+        Rectangle {
+            x: checked ? parent.width - self.width - 2px : 2px;
+            y: 2px;
+            width: 14px;
+            height: 14px;
+            border-radius: 7px;
+            background: #ffffff;
+            animate x { duration: 100ms; }
+        }
+    }
+    Text {
+        text: label;
+        font-size: 11px;
+        color: Theme.text-dim;
+        vertical-alignment: center;
+    }
+}
+
+// Stat box for connection details
+component StatBox inherits VerticalLayout {
+    in property <string> label;
+    in property <string> value;
+    in property <color> value-color: Theme.text;
+
+    spacing: 1px;
+
+    Text {
+        text: label;
+        font-size: 9px;
+        color: Theme.text-muted;
+    }
+    Text {
+        text: value;
+        font-size: 11px;
+        font-weight: 500;
+        color: value-color;
+    }
+}
+
 component PeerCard inherits Rectangle {
     in property <PeerItem> peer;
     callback remove-clicked();
+    callback disconnect-clicked();
     callback push-clicked();
     callback browse-clicked();
+    callback refresh-clicked();
+    callback speed-test-clicked();
     callback permissions-changed(bool, bool, bool); // allow-push, allow-pull, allow-browse
     callback expanded-changed(bool); // notify when expanded state changes
 
     private property <length> header-height: 56px;
-    private property <length> details-height: 72px;
+    private property <length> details-height: 230px;  // Includes speed test section
 
     height: peer.expanded ? header-height + details-height : header-height;
     background: Theme.bg-card;
@@ -1166,53 +1258,117 @@ component PeerCard inherits Rectangle {
             padding: Theme.spacing-sm;
             spacing: Theme.spacing-sm;
 
-            // Status indicator
+            // Status indicator with pulse animation when online
             Rectangle {
-                width: 8px;
-                height: 8px;
+                width: 10px;
+                height: 10px;
                 y: (parent.height - self.height) / 2;
-                border-radius: 4px;
+                border-radius: 5px;
                 background: peer.status == "online" ? Theme.success :
                            peer.status == "connecting" ? Theme.warning : Theme.text-muted;
+
+                // Ping indicator ring (shows when we have recent latency)
+                if peer.status == "online" && peer.latency-ms > 0: Rectangle {
+                    x: -2px;
+                    y: -2px;
+                    width: 14px;
+                    height: 14px;
+                    border-radius: 7px;
+                    border-width: 1px;
+                    border-color: Theme.success;
+                    opacity: 0.5;
+                }
             }
 
-            // Peer info
+            // Peer info with latency inline
             VerticalLayout {
                 horizontal-stretch: 1;
                 spacing: 2px;
 
-                Text {
-                    text: peer.name;
-                    font-size: 13px;
-                    color: Theme.text;
-                    overflow: elide;
+                HorizontalLayout {
+                    spacing: Theme.spacing-sm;
+
+                    Text {
+                        text: peer.name;
+                        font-size: 13px;
+                        color: Theme.text;
+                        overflow: elide;
+                    }
+
+                    // Inline latency badge when online
+                    if peer.status == "online" && peer.latency-ms > 0: Rectangle {
+                        width: 45px;
+                        height: 16px;
+                        border-radius: 3px;
+                        background: peer.latency-ms < 50 ? #22c55e20 :
+                                   peer.latency-ms < 150 ? #eab30820 : #ef444420;
+
+                        Text {
+                            text: peer.latency-ms + " ms";
+                            font-size: 10px;
+                            color: peer.latency-ms < 50 ? Theme.success :
+                                  peer.latency-ms < 150 ? Theme.warning : Theme.error;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
                 }
 
-                Text {
-                    text: peer.endpoint-id;
-                    font-size: 11px;
-                    font-family: "monospace";
-                    color: Theme.text-dim;
-                    overflow: elide;
+                HorizontalLayout {
+                    spacing: Theme.spacing-sm;
+
+                    Text {
+                        text: peer.endpoint-id;
+                        font-size: 10px;
+                        font-family: "monospace";
+                        color: Theme.text-dim;
+                        overflow: elide;
+                    }
                 }
             }
 
-            // Last seen
-            Text {
-                text: peer.last-seen;
-                font-size: 11px;
-                color: Theme.text-muted;
-                vertical-alignment: center;
+            // Connection type badge
+            Rectangle {
+                width: 50px;
+                height: 20px;
+                border-radius: 3px;
+                background: peer.connection-type == "direct" ? #22c55e15 :
+                           peer.connection-type == "relay" ? #3b82f615 : Theme.bg-hover;
+
+                Text {
+                    text: peer.connection-type == "" ? "—" : peer.connection-type;
+                    font-size: 10px;
+                    color: peer.connection-type == "direct" ? Theme.success :
+                          peer.connection-type == "relay" ? Theme.accent : Theme.text-muted;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            // DND badge (shows when peer has DND enabled)
+            if peer.peer-dnd-mode != "" && peer.peer-dnd-mode != "off": Rectangle {
+                width: 36px;
+                height: 20px;
+                border-radius: 3px;
+                background: peer.peer-dnd-mode == "busy" ? #ef444420 : #eab30820;
+
+                Text {
+                    text: peer.peer-dnd-mode == "busy" ? "Busy" : "DND";
+                    font-size: 10px;
+                    color: peer.peer-dnd-mode == "busy" ? Theme.error : Theme.warning;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
             }
 
             // Browse button (for pulling files from peer)
-            if peer.can-browse : CompactButton {
+            if peer.can-browse && peer.status == "online": CompactButton {
                 label: "Browse";
                 clicked => { root.browse-clicked(); }
             }
 
             // Push button (only show if files selected and peer has permission)
-            if peer.can-push && AppLogic.selected-files.length > 0 : CompactButton {
+            if peer.can-push && peer.status == "online" && AppLogic.selected-files.length > 0: CompactButton {
                 label: "Push";
                 clicked => { root.push-clicked(); }
             }
@@ -1224,7 +1380,7 @@ component PeerCard inherits Rectangle {
                 clicked => { root.expanded-changed(!peer.expanded); }
             }
 
-            // Remove button
+            // Remove button (just removes locally, no notification)
             ImageIconBtn {
                 icon: Icons.x;
                 icon-color: Theme.text-muted;
@@ -1233,23 +1389,106 @@ component PeerCard inherits Rectangle {
         }
 
         // Expanded details (only visible when expanded)
-        if peer.expanded : Rectangle {
+        if peer.expanded: Rectangle {
             background: Theme.bg-hover;
             border-radius: Theme.radius-sm;
-            height: root.details-height;
 
             VerticalLayout {
                 padding: Theme.spacing-sm;
-                spacing: Theme.spacing-xs;
+                spacing: Theme.spacing-sm;
 
-                // Connection info row
+                // Connection status row
                 HorizontalLayout {
                     spacing: Theme.spacing-md;
-                    height: 16px;
+                    height: 36px;
+
+                    StatBox {
+                        label: "LATENCY";
+                        value: peer.latency-ms > 0 ? peer.latency-ms + " ms" : "—";
+                        value-color: peer.latency-ms > 0 ?
+                            (peer.latency-ms < 50 ? Theme.success :
+                             peer.latency-ms < 150 ? Theme.warning : Theme.error) : Theme.text-muted;
+                    }
+
+                    StatBox {
+                        label: "AVG LATENCY";
+                        value: peer.avg-latency-ms > 0 ? peer.avg-latency-ms + " ms" : "—";
+                        value-color: Theme.text-dim;
+                    }
+
+                    StatBox {
+                        label: "LAST CONTACT";
+                        value: peer.last-contact == "" ? "Never" : peer.last-contact;
+                        value-color: Theme.text-dim;
+                    }
+
+                    StatBox {
+                        label: "PINGS";
+                        value: peer.ping-count > 0 ? peer.ping-count + "" : "0";
+                        value-color: Theme.text-dim;
+                    }
+
+                    Rectangle { horizontal-stretch: 1; }
+
+                    // Refresh button
+                    CompactButton {
+                        label: "↻ Refresh";
+                        clicked => { root.refresh-clicked(); }
+                    }
+                }
+
+                // Transfer speeds row (if we have data)
+                if peer.last-upload-speed != "" || peer.last-download-speed != "": HorizontalLayout {
+                    spacing: Theme.spacing-md;
+                    height: 28px;
+
+                    StatBox {
+                        label: "LAST UPLOAD";
+                        value: peer.last-upload-speed == "" ? "—" : peer.last-upload-speed;
+                        value-color: Theme.accent;
+                    }
+
+                    StatBox {
+                        label: "LAST DOWNLOAD";
+                        value: peer.last-download-speed == "" ? "—" : peer.last-download-speed;
+                        value-color: Theme.accent;
+                    }
+                }
+
+                // Remote peer info row (if we have StatusResponse data)
+                if peer.peer-hostname != "" || peer.peer-os != "": HorizontalLayout {
+                    spacing: Theme.spacing-md;
+                    height: 28px;
+
+                    StatBox {
+                        label: "HOSTNAME";
+                        value: peer.peer-hostname == "" ? "—" : peer.peer-hostname;
+                    }
+
+                    StatBox {
+                        label: "OS";
+                        value: peer.peer-os == "" ? "—" : peer.peer-os;
+                    }
+
+                    StatBox {
+                        label: "VERSION";
+                        value: peer.peer-version == "" ? "—" : peer.peer-version;
+                    }
+
+                    StatBox {
+                        label: "FREE SPACE";
+                        value: peer.peer-free-space == "" ? "—" : peer.peer-free-space;
+                    }
+                }
+
+                // Basic info row
+                HorizontalLayout {
+                    spacing: Theme.spacing-md;
+                    height: 20px;
 
                     Text {
                         text: "Added: " + peer.added-at;
-                        font-size: 11px;
+                        font-size: 10px;
                         color: Theme.text-dim;
                         vertical-alignment: center;
                     }
@@ -1257,19 +1496,18 @@ component PeerCard inherits Rectangle {
                     Rectangle { horizontal-stretch: 1; }
 
                     Text {
-                        text: "Relay: " + (peer.relay-url == "" ? "direct" : peer.relay-url);
-                        font-size: 11px;
+                        text: peer.relay-url == "" ? "No relay configured" : "Relay: " + peer.relay-url;
+                        font-size: 10px;
                         color: Theme.text-dim;
                         overflow: elide;
                         vertical-alignment: center;
-                        horizontal-alignment: right;
                     }
                 }
 
                 // Permissions section
                 HorizontalLayout {
                     spacing: Theme.spacing-lg;
-                    height: 36px;
+                    height: 40px;
 
                     // What we can do (their permissions to us)
                     VerticalLayout {
@@ -1277,7 +1515,7 @@ component PeerCard inherits Rectangle {
 
                         Text {
                             text: "They allow us:";
-                            font-size: 11px;
+                            font-size: 10px;
                             color: Theme.text-muted;
                         }
 
@@ -1308,13 +1546,13 @@ component PeerCard inherits Rectangle {
 
                     Rectangle { horizontal-stretch: 1; }
 
-                    // What they can do (our permissions to them) - right aligned
+                    // What they can do (our permissions to them)
                     VerticalLayout {
                         spacing: 2px;
 
                         Text {
                             text: "We allow them:";
-                            font-size: 11px;
+                            font-size: 10px;
                             color: Theme.text-muted;
                             horizontal-alignment: right;
                         }
@@ -1323,111 +1561,84 @@ component PeerCard inherits Rectangle {
                             spacing: Theme.spacing-sm;
                             height: 18px;
 
-                            // Push toggle
-                            HorizontalLayout {
-                                spacing: 4px;
-                                height: 18px;
-                                alignment: center;
-
-                                Rectangle {
-                                    width: 32px;
-                                    height: 18px;
-                                    border-radius: 9px;
-                                    background: peer.allow-push ? Theme.accent : Theme.bg-input;
-                                    TouchArea {
-                                        mouse-cursor: pointer;
-                                        clicked => {
-                                            root.permissions-changed(!peer.allow-push, peer.allow-pull, peer.allow-browse);
-                                        }
-                                    }
-                                    Rectangle {
-                                        x: peer.allow-push ? parent.width - self.width - 2px : 2px;
-                                        y: 2px;
-                                        width: 14px;
-                                        height: 14px;
-                                        border-radius: 7px;
-                                        background: #ffffff;
-                                        animate x { duration: 100ms; }
-                                    }
-                                }
-                                Text {
-                                    text: "Push";
-                                    font-size: 11px;
-                                    color: Theme.text-dim;
-                                    vertical-alignment: center;
-                                }
+                            MiniToggle {
+                                label: "Push";
+                                checked: peer.allow-push;
+                                toggled => { root.permissions-changed(!peer.allow-push, peer.allow-pull, peer.allow-browse); }
                             }
 
-                            // Pull toggle
-                            HorizontalLayout {
-                                spacing: 4px;
-                                height: 18px;
-                                alignment: center;
-
-                                Rectangle {
-                                    width: 32px;
-                                    height: 18px;
-                                    border-radius: 9px;
-                                    background: peer.allow-pull ? Theme.accent : Theme.bg-input;
-                                    TouchArea {
-                                        mouse-cursor: pointer;
-                                        clicked => {
-                                            root.permissions-changed(peer.allow-push, !peer.allow-pull, peer.allow-browse);
-                                        }
-                                    }
-                                    Rectangle {
-                                        x: peer.allow-pull ? parent.width - self.width - 2px : 2px;
-                                        y: 2px;
-                                        width: 14px;
-                                        height: 14px;
-                                        border-radius: 7px;
-                                        background: #ffffff;
-                                        animate x { duration: 100ms; }
-                                    }
-                                }
-                                Text {
-                                    text: "Pull";
-                                    font-size: 11px;
-                                    color: Theme.text-dim;
-                                    vertical-alignment: center;
-                                }
+                            MiniToggle {
+                                label: "Pull";
+                                checked: peer.allow-pull;
+                                toggled => { root.permissions-changed(peer.allow-push, !peer.allow-pull, peer.allow-browse); }
                             }
 
-                            // Browse toggle
-                            HorizontalLayout {
-                                spacing: 4px;
-                                height: 18px;
-                                alignment: center;
-
-                                Rectangle {
-                                    width: 32px;
-                                    height: 18px;
-                                    border-radius: 9px;
-                                    background: peer.allow-browse ? Theme.accent : Theme.bg-input;
-                                    TouchArea {
-                                        mouse-cursor: pointer;
-                                        clicked => {
-                                            root.permissions-changed(peer.allow-push, peer.allow-pull, !peer.allow-browse);
-                                        }
-                                    }
-                                    Rectangle {
-                                        x: peer.allow-browse ? parent.width - self.width - 2px : 2px;
-                                        y: 2px;
-                                        width: 14px;
-                                        height: 14px;
-                                        border-radius: 7px;
-                                        background: #ffffff;
-                                        animate x { duration: 100ms; }
-                                    }
-                                }
-                                Text {
-                                    text: "Browse";
-                                    font-size: 11px;
-                                    color: Theme.text-dim;
-                                    vertical-alignment: center;
-                                }
+                            MiniToggle {
+                                label: "Browse";
+                                checked: peer.allow-browse;
+                                toggled => { root.permissions-changed(peer.allow-push, peer.allow-pull, !peer.allow-browse); }
                             }
                         }
+                    }
+                }
+
+                // Speed test section
+                HorizontalLayout {
+                    spacing: Theme.spacing-md;
+                    height: 32px;
+
+                    // Speed test button
+                    CompactButton {
+                        label: peer.speed-test-running ? "Testing..." : "Speed Test";
+                        enabled: peer.status == "online" && !peer.speed-test-running;
+                        clicked => { root.speed-test-clicked(); }
+                    }
+
+                    // Speed test results (if available)
+                    if peer.speed-test-upload != "" || peer.speed-test-download != "": HorizontalLayout {
+                        spacing: Theme.spacing-md;
+
+                        StatBox {
+                            label: "UPLOAD";
+                            value: peer.speed-test-upload;
+                            value-color: Theme.success;
+                        }
+
+                        StatBox {
+                            label: "DOWNLOAD";
+                            value: peer.speed-test-download;
+                            value-color: Theme.accent;
+                        }
+
+                        StatBox {
+                            label: "LATENCY";
+                            value: peer.speed-test-latency;
+                            value-color: Theme.text-dim;
+                        }
+                    }
+
+                    // Loading indicator while running
+                    if peer.speed-test-running: Text {
+                        text: "Running speed test...";
+                        font-size: 11px;
+                        color: Theme.text-muted;
+                        vertical-alignment: center;
+                    }
+
+                    Rectangle { horizontal-stretch: 1; }
+                }
+
+                // Action buttons row
+                HorizontalLayout {
+                    spacing: Theme.spacing-sm;
+                    height: 28px;
+
+                    Rectangle { horizontal-stretch: 1; }
+
+                    // Disconnect button - sends TrustRevoke and removes peer
+                    CompactButton {
+                        label: "Disconnect";
+                        clicked => { root.disconnect-clicked(); }
                     }
                 }
             }
@@ -1563,8 +1774,11 @@ component PeersPanel inherits Rectangle {
                     for peer in AppLogic.peers : PeerCard {
                         peer: peer;
                         remove-clicked => { AppLogic.remove-peer(peer.id); }
+                        disconnect-clicked => { AppLogic.disconnect-peer(peer.id); }
                         push-clicked => { AppLogic.push-to-peer(peer.id); }
                         browse-clicked => { AppLogic.browse-peer(peer.id); }
+                        refresh-clicked => { AppLogic.refresh-peer-status(peer.id); }
+                        speed-test-clicked => { AppLogic.run-speed-test(peer.id); }
                         permissions-changed(push, pull, browse) => {
                             AppLogic.update-peer-permissions(peer.id, push, pull, browse);
                         }
@@ -1848,6 +2062,46 @@ component SettingsPanel inherits Rectangle {
                                 AppLogic.settings.browse-show-protected,
                                 self.text
                             );
+                        }
+                    }
+                }
+            }
+
+            // Do Not Disturb
+            Section {
+                title: "Do Not Disturb";
+
+                SettingRow {
+                    label: "Status";
+                    sublabel: AppLogic.settings.dnd-mode == "off" ? "Available for transfers" :
+                              AppLogic.settings.dnd-mode == "silent" ? "Receive but silence notifications" :
+                              "Reject incoming transfer requests";
+
+                    ThemedDropdown {
+                        dropdown-width: 100px;
+                        model: ["Off", "Silent", "Busy"];
+                        current-index: AppLogic.settings.dnd-mode == "silent" ? 1 :
+                                       AppLogic.settings.dnd-mode == "busy" ? 2 : 0;
+                        changed(idx) => {
+                            AppLogic.set-dnd-mode(
+                                idx == 0 ? "off" : idx == 1 ? "silent" : "busy",
+                                AppLogic.settings.dnd-message
+                            );
+                        }
+                    }
+                }
+
+                if AppLogic.settings.dnd-mode != "off": SettingRow {
+                    label: "Status Message";
+                    sublabel: "Optional message shown to peers";
+
+                    ThemedInput {
+                        input-width: 180px;
+                        text: AppLogic.settings.dnd-message;
+                        placeholder-text: "Away from keyboard...";
+                        font-size: 12px;
+                        edited => {
+                            AppLogic.set-dnd-mode(AppLogic.settings.dnd-mode, self.text);
                         }
                     }
                 }
