@@ -727,12 +727,13 @@ pub async fn handle_incoming_push(
 /// This function:
 /// 1. Validates the requester is a trusted peer with browse permission
 /// 2. Resolves the requested path against allowed paths
-/// 3. Lists directory contents
+/// 3. Lists directory contents applying browse settings (hidden, protected, excludes)
 /// 4. Returns the directory listing
 pub async fn handle_browse_request(
     conn: &mut crate::iroh::endpoint::ControlConnection,
     request_path: Option<String>,
     allowed_paths: Option<&[PathBuf]>,
+    browse_settings: &crate::config::BrowseSettings,
 ) -> Result<()> {
     let roots = get_browsable_roots(allowed_paths);
 
@@ -742,8 +743,8 @@ pub async fn handle_browse_request(
         None => None,
     };
 
-    // Browse the directory
-    let (path, entries) = match browse_directory(resolved_path.as_deref(), &roots, false) {
+    // Browse the directory with settings
+    let (path, entries) = match browse_directory(resolved_path.as_deref(), &roots, browse_settings) {
         Ok(result) => result,
         Err(e) => {
             // Send error response

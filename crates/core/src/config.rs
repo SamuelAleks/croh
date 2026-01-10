@@ -76,6 +76,44 @@ impl Default for WindowSize {
     }
 }
 
+/// Browse settings for file sharing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowseSettings {
+    /// Show hidden files (files starting with .)
+    #[serde(default)]
+    pub show_hidden: bool,
+
+    /// Show protected system files/folders
+    #[serde(default)]
+    pub show_protected: bool,
+
+    /// Patterns to exclude from browsing (glob patterns like "*.tmp", "node_modules")
+    #[serde(default)]
+    pub exclude_patterns: Vec<String>,
+
+    /// Custom allowed paths for browsing (if empty, uses default home directory)
+    #[serde(default)]
+    pub allowed_paths: Vec<PathBuf>,
+}
+
+impl Default for BrowseSettings {
+    fn default() -> Self {
+        Self {
+            show_hidden: false,
+            show_protected: false,
+            exclude_patterns: vec![
+                // Common excludes
+                "node_modules".to_string(),
+                ".git".to_string(),
+                "__pycache__".to_string(),
+                "*.tmp".to_string(),
+                "*.swp".to_string(),
+            ],
+            allowed_paths: Vec::new(),
+        }
+    }
+}
+
 /// Main configuration struct.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -110,6 +148,10 @@ pub struct Config {
     /// Window size (persisted across sessions).
     #[serde(default)]
     pub window_size: WindowSize,
+
+    /// Browse settings for file sharing.
+    #[serde(default)]
+    pub browse_settings: BrowseSettings,
 }
 
 impl Default for Config {
@@ -124,6 +166,7 @@ impl Default for Config {
             throttle: None,
             no_local: false,
             window_size: WindowSize::default(),
+            browse_settings: BrowseSettings::default(),
         }
     }
 }

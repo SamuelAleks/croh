@@ -255,6 +255,10 @@ export struct AppSettings {
     curve: string,           // "siec", "p256", "p384", "p521", or "" for default
     throttle: string,        // bandwidth limit e.g. "1M", "500K", or "" for unlimited
     no-local: bool,          // force relay-only transfers
+    // Browse settings
+    browse-show-hidden: bool,     // show hidden files (starting with .)
+    browse-show-protected: bool,  // show protected system dirs (.ssh, .gnupg, etc.)
+    browse-exclude-patterns: string,  // comma-separated exclude patterns
 }
 
 export struct PeerItem {
@@ -308,6 +312,8 @@ export global AppLogic {
     callback set-theme(string);  // live theme change: "system", "light", "dark"
     // auto-save-settings: download-dir, relay, theme, hash, curve, throttle, no-local
     callback auto-save-settings(string, string, string, string, string, string, bool);
+    // save-browse-settings: show-hidden, show-protected, exclude-patterns
+    callback save-browse-settings(bool, bool, string);
 
     // Trusted peers callbacks
     callback initiate-trust();
@@ -341,6 +347,9 @@ export global AppLogic {
         curve: "",
         throttle: "",
         no-local: false,
+        browse-show-hidden: false,
+        browse-show-protected: false,
+        browse-exclude-patterns: "",
     };
 
     // Trusted peers state
@@ -348,6 +357,10 @@ export global AppLogic {
     in property <bool> trust-in-progress: false;
     in property <string> trust-code: "";
     in property <string> endpoint-id: "";
+
+    // Push-to-peer helpers (names and IDs of peers that allow push)
+    in property <[string]> peer-names-for-push: [];
+    in property <[string]> pushable-peer-ids: [];
 
     // File browser state
     in property <bool> browse-open: false;
@@ -968,6 +981,35 @@ component SendPanel inherits Rectangle {
                         clicked => {
                             AppLogic.start-send(custom-code);
                             custom-code = "";
+                        }
+                    }
+                }
+
+                // Push to Peer section - only show if there are peers that allow push
+                if AppLogic.peer-names-for-push.length > 0: HorizontalLayout {
+                    spacing: Theme.spacing-sm;
+                    padding-top: 8px;
+
+                    Text {
+                        text: "Push to:";
+                        font-size: 11px;
+                        color: Theme.text-muted;
+                        vertical-alignment: center;
+                    }
+
+                    peer-selector := ThemedDropdown {
+                        dropdown-width: 140px;
+                        model: AppLogic.peer-names-for-push;
+                        current-index: 0;
+                    }
+
+                    CompactButton {
+                        label: "Push";
+                        enabled: AppLogic.selected-files.length > 0 && AppLogic.peer-names-for-push.length > 0;
+                        clicked => {
+                            if (peer-selector.current-index >= 0 && peer-selector.current-index < AppLogic.pushable-peer-ids.length) {
+                                AppLogic.push-to-peer(AppLogic.pushable-peer-ids[peer-selector.current-index]);
+                            }
                         }
                     }
                 }
@@ -1641,6 +1683,102 @@ component SettingsPanel inherits Rectangle {
                         font-size: 12px;
                         edited => {
                             AppLogic.auto-save-settings(download-dir, relay, current-theme(), current-hash(), current-curve(), throttle, no-local);
+                        }
+                    }
+                }
+            }
+
+            // File Sharing (peer browsing settings)
+            Section {
+                title: "File Sharing";
+
+                SettingRow {
+                    label: "Show Hidden Files";
+                    sublabel: "Files starting with '.'";
+
+                    Rectangle {
+                        width: 40px;
+                        height: 22px;
+                        border-radius: 11px;
+                        background: AppLogic.settings.browse-show-hidden ? Theme.accent : Theme.bg-hover;
+                        border-width: 1px;
+                        border-color: Theme.border;
+
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppLogic.save-browse-settings(
+                                    !AppLogic.settings.browse-show-hidden,
+                                    AppLogic.settings.browse-show-protected,
+                                    AppLogic.settings.browse-exclude-patterns
+                                );
+                            }
+                        }
+
+                        Rectangle {
+                            x: AppLogic.settings.browse-show-hidden ? parent.width - self.width - 2px : 2px;
+                            y: 2px;
+                            width: 18px;
+                            height: 18px;
+                            border-radius: 9px;
+                            background: #ffffff;
+
+                            animate x { duration: 150ms; easing: ease-out; }
+                        }
+                    }
+                }
+
+                SettingRow {
+                    label: "Show Protected Dirs";
+                    sublabel: ".ssh, .gnupg, .config, etc.";
+
+                    Rectangle {
+                        width: 40px;
+                        height: 22px;
+                        border-radius: 11px;
+                        background: AppLogic.settings.browse-show-protected ? Theme.accent : Theme.bg-hover;
+                        border-width: 1px;
+                        border-color: Theme.border;
+
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppLogic.save-browse-settings(
+                                    AppLogic.settings.browse-show-hidden,
+                                    !AppLogic.settings.browse-show-protected,
+                                    AppLogic.settings.browse-exclude-patterns
+                                );
+                            }
+                        }
+
+                        Rectangle {
+                            x: AppLogic.settings.browse-show-protected ? parent.width - self.width - 2px : 2px;
+                            y: 2px;
+                            width: 18px;
+                            height: 18px;
+                            border-radius: 9px;
+                            background: #ffffff;
+
+                            animate x { duration: 150ms; easing: ease-out; }
+                        }
+                    }
+                }
+
+                SettingRow {
+                    label: "Exclude Patterns";
+                    sublabel: "Comma-separated (e.g. node_modules, *.tmp)";
+
+                    ThemedInput {
+                        input-width: 200px;
+                        text: AppLogic.settings.browse-exclude-patterns;
+                        placeholder-text: "node_modules, .git, *.tmp";
+                        font-size: 12px;
+                        edited => {
+                            AppLogic.save-browse-settings(
+                                AppLogic.settings.browse-show-hidden,
+                                AppLogic.settings.browse-show-protected,
+                                self.text
+                            );
                         }
                     }
                 }

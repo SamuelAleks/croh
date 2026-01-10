@@ -2,42 +2,77 @@
 //!
 //! This module provides directory listing and path validation for remote file browsing.
 
+use crate::config::BrowseSettings;
 use crate::error::{Error, Result};
 use crate::iroh::protocol::DirectoryEntry;
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
+/// Protected system paths that should be hidden by default.
+/// These are paths that typically contain sensitive system data.
+const PROTECTED_NAMES: &[&str] = &[
+    ".ssh",
+    ".gnupg",
+    ".config",
+    ".local",
+    ".cache",
+    ".mozilla",
+    ".thunderbird",
+    ".password-store",
+    ".aws",
+    ".kube",
+    ".docker",
+];
+
+/// Check if a filename matches any of the exclude patterns.
+fn matches_exclude_pattern(name: &str, patterns: &[String]) -> bool {
+    for pattern in patterns {
+        // Simple glob matching: support * as wildcard
+        if pattern.contains('*') {
+            // Convert glob to simple prefix/suffix matching
+            if pattern.starts_with('*') && pattern.ends_with('*') {
+                // *foo* - contains
+                let middle = &pattern[1..pattern.len() - 1];
+                if name.contains(middle) {
+                    return true;
+                }
+            } else if pattern.starts_with('*') {
+                // *.txt - suffix match
+                let suffix = &pattern[1..];
+                if name.ends_with(suffix) {
+                    return true;
+                }
+            } else if pattern.ends_with('*') {
+                // foo* - prefix match
+                let prefix = &pattern[..pattern.len() - 1];
+                if name.starts_with(prefix) {
+                    return true;
+                }
+            }
+        } else {
+            // Exact match
+            if name == pattern {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check if a name is a protected system path.
+fn is_protected(name: &str) -> bool {
+    PROTECTED_NAMES.contains(&name)
+}
+
 /// Default allowed paths for browsing if none are configured.
-/// Returns common user directories that can be browsed.
+/// Returns the home directory as the browsable root.
+/// This provides consistent behavior - users always start at home and can
+/// navigate to any subdirectory.
 pub fn default_browsable_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
     if let Some(home) = dirs::home_dir() {
-        // Add common subdirectories
-        let downloads = home.join("Downloads");
-        if downloads.exists() {
-            paths.push(downloads);
-        }
-
-        let documents = home.join("Documents");
-        if documents.exists() {
-            paths.push(documents);
-        }
-
-        // On Linux, also check XDG directories
-        #[cfg(target_os = "linux")]
-        {
-            if let Some(download_dir) = dirs::download_dir() {
-                if !paths.contains(&download_dir) {
-                    paths.push(download_dir);
-                }
-            }
-            if let Some(document_dir) = dirs::document_dir() {
-                if !paths.contains(&document_dir) {
-                    paths.push(document_dir);
-                }
-            }
-        }
+        paths.push(home);
     }
 
     paths
@@ -95,10 +130,15 @@ pub fn validate_path(path: &Path, allowed_paths: &[PathBuf]) -> Result<PathBuf> 
 ///
 /// If `path` is None, returns the list of allowed root paths.
 /// If `path` is Some, returns the directory contents if it's within allowed paths.
+///
+/// The `settings` parameter controls filtering:
+/// - `show_hidden`: Show files starting with `.`
+/// - `show_protected`: Show protected system directories like `.ssh`, `.gnupg`
+/// - `exclude_patterns`: Glob patterns to exclude (e.g., `*.tmp`, `node_modules`)
 pub fn browse_directory(
     path: Option<&Path>,
     allowed_paths: &[PathBuf],
-    show_hidden: bool,
+    settings: &BrowseSettings,
 ) -> Result<(String, Vec<DirectoryEntry>)> {
     match path {
         None => {
@@ -152,7 +192,17 @@ pub fn browse_directory(
                 let name = entry.file_name().to_string_lossy().to_string();
 
                 // Skip hidden files unless requested
-                if !show_hidden && name.starts_with('.') {
+                if !settings.show_hidden && name.starts_with('.') {
+                    continue;
+                }
+
+                // Skip protected paths unless requested
+                if !settings.show_protected && is_protected(&name) {
+                    continue;
+                }
+
+                // Skip files matching exclude patterns
+                if matches_exclude_pattern(&name, &settings.exclude_patterns) {
                     continue;
                 }
 
@@ -264,12 +314,22 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    fn default_settings() -> BrowseSettings {
+        BrowseSettings {
+            show_hidden: false,
+            show_protected: false,
+            exclude_patterns: Vec::new(),
+            allowed_paths: Vec::new(),
+        }
+    }
+
     #[test]
     fn test_browse_roots() {
         let temp = TempDir::new().unwrap();
         let allowed = vec![temp.path().to_path_buf()];
+        let settings = default_settings();
 
-        let (path, entries) = browse_directory(None, &allowed, false).unwrap();
+        let (path, entries) = browse_directory(None, &allowed, &settings).unwrap();
         assert_eq!(path, "/");
         assert_eq!(entries.len(), 1);
         assert!(entries[0].is_dir);
@@ -287,16 +347,86 @@ mod tests {
         fs::write(temp.path().join(".hidden"), "secret").unwrap();
 
         // Browse without hidden
-        let (_, entries) = browse_directory(Some(temp.path()), &allowed, false).unwrap();
+        let settings = default_settings();
+        let (_, entries) = browse_directory(Some(temp.path()), &allowed, &settings).unwrap();
         assert_eq!(entries.len(), 3); // subdir, file1.txt, file2.txt
 
         // Browse with hidden
-        let (_, entries) = browse_directory(Some(temp.path()), &allowed, true).unwrap();
+        let mut settings_with_hidden = default_settings();
+        settings_with_hidden.show_hidden = true;
+        let (_, entries) = browse_directory(Some(temp.path()), &allowed, &settings_with_hidden).unwrap();
         assert_eq!(entries.len(), 4); // includes .hidden
 
         // Verify sorting: directory first
         assert!(entries[0].is_dir);
         assert_eq!(entries[0].name, "subdir");
+    }
+
+    #[test]
+    fn test_exclude_patterns() {
+        let temp = TempDir::new().unwrap();
+        let allowed = vec![temp.path().to_path_buf()];
+
+        // Create files with various names
+        fs::write(temp.path().join("file.txt"), "hello").unwrap();
+        fs::write(temp.path().join("file.tmp"), "temp").unwrap();
+        fs::create_dir(temp.path().join("node_modules")).unwrap();
+        fs::create_dir(temp.path().join("src")).unwrap();
+
+        // Without exclusions
+        let settings = default_settings();
+        let (_, entries) = browse_directory(Some(temp.path()), &allowed, &settings).unwrap();
+        assert_eq!(entries.len(), 4);
+
+        // With exclusions
+        let mut settings_exclude = default_settings();
+        settings_exclude.exclude_patterns = vec!["*.tmp".to_string(), "node_modules".to_string()];
+        let (_, entries) = browse_directory(Some(temp.path()), &allowed, &settings_exclude).unwrap();
+        assert_eq!(entries.len(), 2); // only file.txt and src
+        assert!(entries.iter().any(|e| e.name == "file.txt"));
+        assert!(entries.iter().any(|e| e.name == "src"));
+    }
+
+    #[test]
+    fn test_protected_paths() {
+        let temp = TempDir::new().unwrap();
+        let allowed = vec![temp.path().to_path_buf()];
+
+        // Create protected and normal directories
+        fs::create_dir(temp.path().join(".ssh")).unwrap();
+        fs::create_dir(temp.path().join(".gnupg")).unwrap();
+        fs::create_dir(temp.path().join("Documents")).unwrap();
+
+        // Without showing protected (but showing hidden)
+        let mut settings = default_settings();
+        settings.show_hidden = true;
+        settings.show_protected = false;
+        let (_, entries) = browse_directory(Some(temp.path()), &allowed, &settings).unwrap();
+        assert_eq!(entries.len(), 1); // only Documents
+        assert_eq!(entries[0].name, "Documents");
+
+        // With showing protected
+        settings.show_protected = true;
+        let (_, entries) = browse_directory(Some(temp.path()), &allowed, &settings).unwrap();
+        assert_eq!(entries.len(), 3); // all three
+    }
+
+    #[test]
+    fn test_glob_matching() {
+        // Suffix match
+        assert!(matches_exclude_pattern("file.tmp", &vec!["*.tmp".to_string()]));
+        assert!(!matches_exclude_pattern("file.txt", &vec!["*.tmp".to_string()]));
+
+        // Prefix match
+        assert!(matches_exclude_pattern("test_file.rs", &vec!["test_*".to_string()]));
+        assert!(!matches_exclude_pattern("file_test.rs", &vec!["test_*".to_string()]));
+
+        // Contains match
+        assert!(matches_exclude_pattern("my_temp_file", &vec!["*temp*".to_string()]));
+
+        // Exact match
+        assert!(matches_exclude_pattern("node_modules", &vec!["node_modules".to_string()]));
+        assert!(!matches_exclude_pattern("node_modules_backup", &vec!["node_modules".to_string()]));
     }
 
     #[test]

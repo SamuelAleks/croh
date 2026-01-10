@@ -6,6 +6,7 @@ use croh_core::{
     files, platform, Config, ControlMessage, FileRequest, Identity, IrohEndpoint, PeerStore, Permissions,
     Transfer, TransferId, TransferEvent, TransferManager, TransferStatus, TransferType,
     TrustedPeer, TrustBundle, push_files, pull_files, handle_incoming_push, handle_incoming_pull, handle_browse_request, browse_remote, default_browsable_paths,
+    NodeAddr, NodeId,
 };
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 use std::collections::HashMap;
@@ -15,6 +16,17 @@ use tokio::sync::{oneshot, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::{AppLogic, AppSettings, BrowseEntry, MainWindow, PeerItem, SelectedFile, TransferItem};
+
+/// Connection status for a peer.
+#[derive(Clone, Debug, Default)]
+pub struct PeerConnectionStatus {
+    /// Whether the peer is currently online.
+    pub online: bool,
+    /// Last successful ping time.
+    pub last_ping: Option<std::time::Instant>,
+    /// Round-trip latency in milliseconds (from last ping).
+    pub latency_ms: Option<u32>,
+}
 
 /// Application state.
 pub struct App {
@@ -40,6 +52,8 @@ pub struct App {
     pending_trust: Arc<RwLock<Option<PendingTrust>>>,
     /// Shared peers model for UI (allows in-place updates).
     peers_model: std::rc::Rc<VecModel<PeerItem>>,
+    /// Connection status for each peer (keyed by peer ID).
+    peer_status: Arc<RwLock<HashMap<String, PeerConnectionStatus>>>,
 }
 
 /// State for file browser dialog.
@@ -106,6 +120,7 @@ impl App {
             browse_state: Arc::new(RwLock::new(BrowseState::default())),
             pending_trust: Arc::new(RwLock::new(None)),
             peers_model,
+            peer_status: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -124,6 +139,9 @@ impl App {
 
         // Start background listener for incoming transfers
         self.start_background_listener();
+
+        // Start peer status checker (pings peers periodically)
+        self.start_peer_status_checker();
     }
 
     /// Refresh the peers model with the given items (clears and repopulates).
@@ -132,10 +150,152 @@ impl App {
         while self.peers_model.row_count() > 0 {
             self.peers_model.remove(0);
         }
+
+        // Collect peers that allow push for the send panel dropdown
+        let mut pushable_names: Vec<SharedString> = Vec::new();
+        let mut pushable_ids: Vec<SharedString> = Vec::new();
+
         // Add new items
-        for item in items {
-            self.peers_model.push(item);
+        for item in &items {
+            // Check if this peer allows us to push (their_permissions.push == true means can_push)
+            if item.can_push {
+                pushable_names.push(item.name.clone());
+                pushable_ids.push(item.id.clone());
+            }
+            self.peers_model.push(item.clone());
         }
+
+        // Update the push-to-peer dropdown data
+        if let Some(window) = self.window.upgrade() {
+            window.global::<AppLogic>().set_peer_names_for_push(
+                ModelRc::new(VecModel::from(pushable_names))
+            );
+            window.global::<AppLogic>().set_pushable_peer_ids(
+                ModelRc::new(VecModel::from(pushable_ids))
+            );
+        }
+    }
+
+    /// Start a background task that periodically pings peers to check their status.
+    fn start_peer_status_checker(&self) {
+        let shared_endpoint = self.shared_endpoint.clone();
+        let peer_store = self.peer_store.clone();
+        let peer_status = self.peer_status.clone();
+        let window_weak = self.window.clone();
+        let shutdown = self.listener_shutdown.clone();
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            rt.block_on(async {
+                // Wait for endpoint to be ready
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    let ep_guard = shared_endpoint.read().await;
+                    if ep_guard.is_some() {
+                        break;
+                    }
+                    drop(ep_guard);
+
+                    if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+                }
+
+                // Ping loop - check peer status every 30 seconds
+                loop {
+                    if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+
+                    // Get list of peers to ping
+                    let peers: Vec<TrustedPeer> = {
+                        let store = peer_store.read().await;
+                        store.list().to_vec()
+                    };
+
+                    // Get the endpoint
+                    let endpoint = {
+                        let ep_guard = shared_endpoint.read().await;
+                        match ep_guard.as_ref() {
+                            Some(ep) => ep.clone(),
+                            None => {
+                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                                continue;
+                            }
+                        }
+                    };
+
+                    // Ping each peer concurrently
+                    let mut ping_tasks = Vec::new();
+                    for peer in peers {
+                        let endpoint = endpoint.clone();
+                        let peer_status = peer_status.clone();
+                        let peer_id = peer.id.clone();
+
+                        ping_tasks.push(tokio::spawn(async move {
+                            let start = std::time::Instant::now();
+                            let online = ping_peer(&endpoint, &peer).await;
+                            let latency_ms = if online {
+                                Some(start.elapsed().as_millis() as u32)
+                            } else {
+                                None
+                            };
+
+                            // Update status
+                            let mut status_map = peer_status.write().await;
+                            let status = status_map.entry(peer_id).or_default();
+                            status.online = online;
+                            if online {
+                                status.last_ping = Some(std::time::Instant::now());
+                                status.latency_ms = latency_ms;
+                            }
+                        }));
+                    }
+
+                    // Wait for all pings to complete
+                    for task in ping_tasks {
+                        let _ = task.await;
+                    }
+
+                    // Update UI with new statuses
+                    let status_map = peer_status.read().await;
+                    let status_snapshot: HashMap<String, bool> = status_map
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.online))
+                        .collect();
+                    drop(status_map);
+
+                    let window_weak_ui = window_weak.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(window) = window_weak_ui.upgrade() {
+                            let logic = window.global::<AppLogic>();
+                            let model = logic.get_peers();
+
+                            // Update status for each peer in the model
+                            for i in 0..model.row_count() {
+                                if let Some(mut peer) = model.row_data(i) {
+                                    let id = peer.id.to_string();
+                                    if let Some(&online) = status_snapshot.get(&id) {
+                                        let new_status = if online { "online" } else { "offline" };
+                                        if peer.status.as_str() != new_status {
+                                            peer.status = SharedString::from(new_status);
+                                            model.set_row_data(i, peer);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+
+                    // Wait 30 seconds before next ping cycle
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
+            });
+        });
     }
 
     /// Start a background listener for incoming peer connections.
@@ -148,6 +308,7 @@ impl App {
         let window_weak = self.window.clone();
         let shutdown = self.listener_shutdown.clone();
         let pending_trust = self.pending_trust.clone();
+        let peer_status = self.peer_status.clone();
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -298,14 +459,22 @@ impl App {
                                     }
                                     drop(store);
 
+                                    // Mark the new peer as online (they just connected to us)
+                                    {
+                                        let mut status_map = peer_status.write().await;
+                                        let status = status_map.entry(new_peer.id.clone()).or_default();
+                                        status.online = true;
+                                        status.last_ping = Some(std::time::Instant::now());
+                                    }
+
                                     // Close connection gracefully
                                     let _ = conn.close().await;
 
                                     // Send success result
                                     let _ = pending.result_tx.send(Ok(new_peer));
 
-                                    // Update peers UI
-                                    update_peers_ui(&window_weak, &peer_store).await;
+                                    // Update peers UI with online status
+                                    update_peers_ui_with_status(&window_weak, &peer_store, &peer_status).await;
                                     continue;
                                 } else {
                                     warn!("Invalid nonce from {}: expected {}, got {}", remote_id, pending.nonce, nonce);
@@ -468,10 +637,16 @@ impl App {
                                 continue;
                             }
 
-                            // Use default browsable paths for now
-                            // TODO: Add configurable paths per peer
-                            let allowed_paths = default_browsable_paths();
-                            match handle_browse_request(&mut conn, path.clone(), Some(&allowed_paths)).await {
+                            // Get browse settings from config
+                            let cfg = config.read().await;
+                            let browse_settings = cfg.browse_settings.clone();
+                            let allowed_paths = if browse_settings.allowed_paths.is_empty() {
+                                default_browsable_paths()
+                            } else {
+                                browse_settings.allowed_paths.clone()
+                            };
+                            drop(cfg);
+                            match handle_browse_request(&mut conn, path.clone(), Some(&allowed_paths), &browse_settings).await {
                                 Ok(_) => {
                                     info!("Browse request handled successfully for {}", peer.name);
                                 }
@@ -620,6 +795,37 @@ impl App {
                             // Close connection gracefully
                             let _ = conn.close().await;
                         }
+                        ControlMessage::Ping { timestamp } => {
+                            debug!("Received ping from {}, responding with pong", peer.name);
+                            let _ = conn.send(&ControlMessage::Pong { timestamp: *timestamp }).await;
+                            let _ = conn.close().await;
+                        }
+                        ControlMessage::Pong { .. } => {
+                            // Pong received, connection will be closed by caller
+                            debug!("Received pong from {}", peer.name);
+                            let _ = conn.close().await;
+                        }
+                        ControlMessage::StatusRequest => {
+                            debug!("Received status request from {}", peer.name);
+                            let cfg = config.read().await;
+                            let download_dir = cfg.download_dir.to_string_lossy().to_string();
+                            drop(cfg);
+
+                            let hostname = std::env::var("HOSTNAME")
+                                .or_else(|_| std::env::var("COMPUTERNAME"))
+                                .unwrap_or_else(|_| "unknown".to_string());
+
+                            let _ = conn.send(&ControlMessage::StatusResponse {
+                                hostname,
+                                os: std::env::consts::OS.to_string(),
+                                free_space: 0, // TODO: Get actual free space
+                                download_dir,
+                                uptime: 0, // TODO: Track uptime
+                                version: env!("CARGO_PKG_VERSION").to_string(),
+                                active_transfers: 0, // Simplified for now
+                            }).await;
+                            let _ = conn.close().await;
+                        }
                         other => {
                             warn!("Unexpected message type from {}: {:?}", remote_id, other);
                         }
@@ -667,6 +873,11 @@ impl App {
                 let throttle = config_guard.throttle.clone().unwrap_or_default();
                 let no_local = config_guard.no_local;
 
+                // Browse settings
+                let browse_show_hidden = config_guard.browse_settings.show_hidden;
+                let browse_show_protected = config_guard.browse_settings.show_protected;
+                let browse_exclude_patterns = config_guard.browse_settings.exclude_patterns.join(", ");
+
                 drop(config_guard);
 
                 // Update UI on main thread
@@ -682,6 +893,9 @@ impl App {
                             curve: SharedString::from(curve),
                             throttle: SharedString::from(throttle),
                             no_local,
+                            browse_show_hidden,
+                            browse_show_protected,
+                            browse_exclude_patterns: SharedString::from(browse_exclude_patterns),
                         };
                         window.global::<AppLogic>().set_settings(settings);
                     }
@@ -1164,6 +1378,7 @@ impl App {
             let identity = identity.clone();
             let peer_store = peer_store.clone();
             let shared_endpoint = self.shared_endpoint.clone();
+            let peer_status = self.peer_status.clone();
 
             move |code| {
                 // Sanitize code: remove nul bytes and other control characters
@@ -1186,6 +1401,7 @@ impl App {
                 let identity = identity.clone();
                 let peer_store = peer_store.clone();
                 let shared_endpoint = shared_endpoint.clone();
+                let peer_status = peer_status.clone();
 
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
@@ -1307,7 +1523,7 @@ impl App {
                                                 .await;
 
                                             // Check for trust bundles in received files
-                                            check_and_handle_trust_bundle(&download_dir, &window_weak, &identity, &shared_endpoint, &peer_store).await;
+                                            check_and_handle_trust_bundle(&download_dir, &window_weak, &identity, &shared_endpoint, &peer_store, &peer_status).await;
                                             break;
                                         }
                                         Some(CrocEvent::Failed(err)) => {
@@ -1357,7 +1573,7 @@ impl App {
                                             update_transfers_ui(&window_weak, &transfer_manager).await;
 
                                             // Check for trust bundles in received files
-                                            check_and_handle_trust_bundle(&download_dir, &window_weak, &identity, &shared_endpoint, &peer_store).await;
+                                            check_and_handle_trust_bundle(&download_dir, &window_weak, &identity, &shared_endpoint, &peer_store, &peer_status).await;
                                         }
                                         Ok(status) => {
                                             warn!("Receive process exited with status: {:?}", status);
@@ -1762,6 +1978,9 @@ impl App {
                             .unwrap_or_default();
                         let throttle = config_guard.throttle.clone().unwrap_or_default();
                         let no_local = config_guard.no_local;
+                        let browse_show_hidden = config_guard.browse_settings.show_hidden;
+                        let browse_show_protected = config_guard.browse_settings.show_protected;
+                        let browse_exclude_patterns = config_guard.browse_settings.exclude_patterns.join(", ");
                         let (croc_path, croc_found) = match find_croc_executable() {
                             Ok(path) => (path.to_string_lossy().to_string(), true),
                             Err(_) => ("Not found".to_string(), false),
@@ -1780,6 +1999,9 @@ impl App {
                                     curve: SharedString::from(curve),
                                     throttle: SharedString::from(throttle),
                                     no_local,
+                                    browse_show_hidden,
+                                    browse_show_protected,
+                                    browse_exclude_patterns: SharedString::from(browse_exclude_patterns),
                                 };
                                 window.global::<AppLogic>().set_settings(settings);
                             }
@@ -1836,6 +2058,60 @@ impl App {
                         if let Err(e) = config_guard.save() {
                             error!("Failed to auto-save config: {}", e);
                         }
+                    });
+                });
+            }
+        });
+
+        // Save browse settings callback
+        window.global::<AppLogic>().on_save_browse_settings({
+            let config = config.clone();
+            let window_weak = window_weak.clone();
+
+            move |show_hidden, show_protected, exclude_patterns| {
+                let exclude_patterns = exclude_patterns.to_string();
+                let config = config.clone();
+                let window_weak = window_weak.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        let mut config_guard = config.write().await;
+
+                        // Update browse settings
+                        config_guard.browse_settings.show_hidden = show_hidden;
+                        config_guard.browse_settings.show_protected = show_protected;
+
+                        // Parse comma-separated exclude patterns
+                        config_guard.browse_settings.exclude_patterns = exclude_patterns
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+
+                        if let Err(e) = config_guard.save() {
+                            error!("Failed to save browse settings: {}", e);
+                        }
+
+                        // Update UI to reflect changes
+                        let patterns_str = config_guard.browse_settings.exclude_patterns.join(", ");
+                        let show_hidden = config_guard.browse_settings.show_hidden;
+                        let show_protected = config_guard.browse_settings.show_protected;
+                        drop(config_guard);
+
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(window) = window_weak.upgrade() {
+                                let mut settings = window.global::<AppLogic>().get_settings();
+                                settings.browse_show_hidden = show_hidden;
+                                settings.browse_show_protected = show_protected;
+                                settings.browse_exclude_patterns = SharedString::from(&patterns_str);
+                                window.global::<AppLogic>().set_settings(settings);
+                            }
+                        });
                     });
                 });
             }
@@ -2201,7 +2477,6 @@ impl App {
         window.global::<AppLogic>().on_update_peer_permissions({
             let window_weak = window_weak.clone();
             let peer_store = peer_store.clone();
-            let peers_model = self.peers_model.clone();
             let shared_endpoint = self.shared_endpoint.clone();
 
             move |id, allow_push, allow_pull, allow_browse| {
@@ -2272,21 +2547,22 @@ impl App {
                     });
                 });
 
-                // Update UI model - remove and re-insert to force re-render
-                // (Slint's for-loop doesn't re-render on set_row_data alone)
-                for i in 0..peers_model.row_count() {
-                    if let Some(peer) = peers_model.row_data(i) {
-                        if peer.id.to_string() == id_str {
-                            let updated_peer = PeerItem {
-                                allow_push,
-                                allow_pull,
-                                allow_browse,
-                                ..peer
-                            };
-                            // Remove and re-insert at same position to trigger re-render
-                            peers_model.remove(i);
-                            peers_model.insert(i, updated_peer);
-                            break;
+                // Update UI model by getting the current model from the window
+                // (The model may have been replaced by update_peers_ui, so we need to get it fresh)
+                if let Some(window) = window_weak.upgrade() {
+                    let model = window.global::<AppLogic>().get_peers();
+                    for i in 0..model.row_count() {
+                        if let Some(peer) = model.row_data(i) {
+                            if peer.id.to_string() == id_str {
+                                let updated_peer = PeerItem {
+                                    allow_push,
+                                    allow_pull,
+                                    allow_browse,
+                                    ..peer
+                                };
+                                model.set_row_data(i, updated_peer);
+                                break;
+                            }
                         }
                     }
                 }
@@ -2295,21 +2571,23 @@ impl App {
 
         // Set peer expanded state callback
         window.global::<AppLogic>().on_set_peer_expanded({
-            let peers_model = self.peers_model.clone();
+            let window_weak = window_weak.clone();
 
             move |id, expanded| {
                 let id_str = id.to_string();
-                // Update UI model - remove and re-insert to force re-render
-                for i in 0..peers_model.row_count() {
-                    if let Some(peer) = peers_model.row_data(i) {
-                        if peer.id.to_string() == id_str {
-                            let updated_peer = PeerItem {
-                                expanded,
-                                ..peer
-                            };
-                            peers_model.remove(i);
-                            peers_model.insert(i, updated_peer);
-                            break;
+                // Update UI model by getting the current model from the window
+                if let Some(window) = window_weak.upgrade() {
+                    let model = window.global::<AppLogic>().get_peers();
+                    for i in 0..model.row_count() {
+                        if let Some(peer) = model.row_data(i) {
+                            if peer.id.to_string() == id_str {
+                                let updated_peer = PeerItem {
+                                    expanded,
+                                    ..peer
+                                };
+                                model.set_row_data(i, updated_peer);
+                                break;
+                            }
                         }
                     }
                 }
@@ -2574,6 +2852,65 @@ impl App {
                         match browse_remote(&endpoint, &peer, None).await {
                             Ok((path, entries)) => {
                                 info!("Browse succeeded: {} entries at {}", entries.len(), path);
+
+                                // If at root with exactly one directory, auto-navigate into it
+                                // This provides a better UX as users usually want to browse the home dir
+                                if path == "/" && entries.len() == 1 && entries[0].is_dir {
+                                    let home_name = entries[0].name.clone();
+                                    info!("Auto-navigating into home directory: {}", home_name);
+
+                                    // Browse into the home directory instead
+                                    match browse_remote(&endpoint, &peer, Some(&home_name)).await {
+                                        Ok((home_path, home_entries)) => {
+                                            info!("Browse home succeeded: {} entries at {}", home_entries.len(), home_path);
+
+                                            // Convert to internal state
+                                            let browse_entries: Vec<BrowseEntryData> = home_entries.iter().map(|e| {
+                                                BrowseEntryData {
+                                                    name: e.name.clone(),
+                                                    is_dir: e.is_dir,
+                                                    size: e.size,
+                                                    modified: e.modified,
+                                                    path: format!("{}/{}", home_path, e.name),
+                                                    selected: false,
+                                                }
+                                            }).collect();
+
+                                            // Update state
+                                            {
+                                                let mut state = browse_state.write().await;
+                                                state.current_path = home_path.clone();
+                                                state.entries = browse_entries.clone();
+                                            }
+
+                                            // Update UI
+                                            let window_weak_ok = window_weak.clone();
+                                            let _ = slint::invoke_from_event_loop(move || {
+                                                if let Some(window) = window_weak_ok.upgrade() {
+                                                    window.global::<AppLogic>().set_browse_loading(false);
+                                                    window.global::<AppLogic>().set_browse_current_path(SharedString::from(&home_path));
+
+                                                    let ui_entries: Vec<BrowseEntry> = browse_entries.iter().map(|e| {
+                                                        BrowseEntry {
+                                                            name: SharedString::from(&e.name),
+                                                            is_dir: e.is_dir,
+                                                            size: SharedString::from(format_size(e.size)),
+                                                            modified: SharedString::from(format_timestamp(e.modified)),
+                                                            path: SharedString::from(&e.path),
+                                                            selected: e.selected,
+                                                        }
+                                                    }).collect();
+                                                    window.global::<AppLogic>().set_browse_entries(ModelRc::new(VecModel::from(ui_entries)));
+                                                }
+                                            });
+                                            return;
+                                        }
+                                        Err(e) => {
+                                            warn!("Failed to auto-navigate into home, showing root: {}", e);
+                                            // Fall through to show root entries
+                                        }
+                                    }
+                                }
 
                                 // Convert to internal state
                                 let browse_entries: Vec<BrowseEntryData> = entries.iter().map(|e| {
@@ -3128,6 +3465,88 @@ fn update_status(window_weak: &Weak<MainWindow>, status: &str) {
     });
 }
 
+/// Ping a peer to check if they're online.
+/// Returns true if the peer responds to ping, false otherwise.
+async fn ping_peer(endpoint: &IrohEndpoint, peer: &TrustedPeer) -> bool {
+    use std::time::Duration;
+
+    // Parse the node ID
+    let node_id: NodeId = match peer.endpoint_id.parse() {
+        Ok(id) => id,
+        Err(_) => return false,
+    };
+
+    // Add peer's address info before connecting (if relay URL is known)
+    let mut node_addr = NodeAddr::new(node_id);
+    if let Some(relay_url) = &peer.relay_url {
+        if let Ok(url) = relay_url.parse() {
+            node_addr = node_addr.with_relay_url(url);
+        }
+    }
+    let _ = endpoint.add_node_addr(node_addr);
+
+    // Try to connect with a short timeout
+    let connect_result = tokio::time::timeout(
+        Duration::from_secs(5),
+        endpoint.connect(&peer.endpoint_id)
+    ).await;
+
+    let mut conn = match connect_result {
+        Ok(Ok(c)) => c,
+        Ok(Err(_)) | Err(_) => return false,
+    };
+
+    // Send ping
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let ping = ControlMessage::Ping { timestamp };
+    if conn.send(&ping).await.is_err() {
+        let _ = conn.close().await;
+        return false;
+    }
+
+    // Wait for pong with timeout
+    let pong_result = tokio::time::timeout(
+        Duration::from_secs(5),
+        conn.recv()
+    ).await;
+
+    let _ = conn.close().await;
+
+    match pong_result {
+        Ok(Ok(ControlMessage::Pong { .. })) => true,
+        _ => false,
+    }
+}
+
+/// Set peers and push-to-peer dropdown data on the window.
+fn set_peers_with_push_data(window: &MainWindow, items: Vec<PeerItem>) {
+    // Collect peers that allow push for the send panel dropdown
+    let mut pushable_names: Vec<SharedString> = Vec::new();
+    let mut pushable_ids: Vec<SharedString> = Vec::new();
+
+    for item in &items {
+        if item.can_push {
+            pushable_names.push(item.name.clone());
+            pushable_ids.push(item.id.clone());
+        }
+    }
+
+    // Update the peers list
+    window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));
+
+    // Update the push-to-peer dropdown data
+    window.global::<AppLogic>().set_peer_names_for_push(
+        ModelRc::new(VecModel::from(pushable_names))
+    );
+    window.global::<AppLogic>().set_pushable_peer_ids(
+        ModelRc::new(VecModel::from(pushable_ids))
+    );
+}
+
 /// Check for trust bundles in a directory and handle them.
 async fn check_and_handle_trust_bundle(
     download_dir: &PathBuf,
@@ -3135,6 +3554,7 @@ async fn check_and_handle_trust_bundle(
     identity: &Arc<RwLock<Option<Identity>>>,
     shared_endpoint: &Arc<RwLock<Option<IrohEndpoint>>>,
     peer_store: &Arc<RwLock<PeerStore>>,
+    peer_status: &Arc<RwLock<HashMap<String, PeerConnectionStatus>>>,
 ) {
     use croh_core::complete_trust_as_receiver;
 
@@ -3249,16 +3669,18 @@ async fn check_and_handle_trust_bundle(
                     } else {
                         info!("Added new peer: {}", result.peer.name);
                     }
-                    // Update peers UI
-                    let items: Vec<PeerItem> = store.list().iter().map(trusted_peer_to_item).collect();
                     drop(store);
 
-                    let window_weak_peers = window_weak.clone();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(window) = window_weak_peers.upgrade() {
-                            window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));
-                        }
-                    });
+                    // Mark the new peer as online (we just connected to them)
+                    {
+                        let mut status_map = peer_status.write().await;
+                        let status = status_map.entry(result.peer.id.clone()).or_default();
+                        status.online = true;
+                        status.last_ping = Some(std::time::Instant::now());
+                    }
+
+                    // Update peers UI with status
+                    update_peers_ui_with_status(window_weak, peer_store, peer_status).await;
                 }
                 Err(e) => {
                     error!("Failed to save peer: {}", e);
@@ -3340,7 +3762,56 @@ async fn update_peers_ui(window_weak: &Weak<MainWindow>, peer_store: &Arc<RwLock
                 item
             }).collect();
 
-            logic.set_peers(ModelRc::new(VecModel::from(items_with_state)));
+            // Use the helper to set peers and push data
+            set_peers_with_push_data(&window, items_with_state);
+        }
+    });
+}
+
+/// Update the peers UI from the peer store with status information.
+/// Preserves UI state (like expanded) from the existing model.
+async fn update_peers_ui_with_status(
+    window_weak: &Weak<MainWindow>,
+    peer_store: &Arc<RwLock<PeerStore>>,
+    peer_status: &Arc<RwLock<HashMap<String, PeerConnectionStatus>>>,
+) {
+    let peers = peer_store.read().await;
+    let mut new_items: Vec<PeerItem> = peers.list().iter().map(trusted_peer_to_item).collect();
+    drop(peers);
+
+    // Apply status from the peer_status map
+    let status_map = peer_status.read().await;
+    for item in &mut new_items {
+        if let Some(status) = status_map.get(&item.id.to_string()) {
+            item.status = SharedString::from(if status.online { "online" } else { "offline" });
+        }
+    }
+    drop(status_map);
+
+    let window_weak = window_weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(window) = window_weak.upgrade() {
+            let logic = window.global::<AppLogic>();
+            let current_model = logic.get_peers();
+
+            // Build a map of current expanded states by peer ID
+            let mut expanded_states: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+            for i in 0..current_model.row_count() {
+                if let Some(peer) = current_model.row_data(i) {
+                    expanded_states.insert(peer.id.to_string(), peer.expanded);
+                }
+            }
+
+            // Apply preserved expanded states to new items
+            let items_with_state: Vec<PeerItem> = new_items.into_iter().map(|mut item| {
+                if let Some(&expanded) = expanded_states.get(&item.id.to_string()) {
+                    item.expanded = expanded;
+                }
+                item
+            }).collect();
+
+            // Use the helper to set peers and push data
+            set_peers_with_push_data(&window, items_with_state);
         }
     });
 }
