@@ -62,6 +62,8 @@ struct BrowseState {
     peer_id: String,
     peer_name: String,
     current_path: String,
+    /// Previous successful path (for "Go Back" when errors occur)
+    previous_path: Option<String>,
     entries: Vec<BrowseEntryData>,
 }
 
@@ -788,8 +790,16 @@ impl App {
                                 }
                             }
 
-                            // Update UI
-                            update_peers_ui(&window_weak, &peer_store).await;
+                            // Mark peer as online since they just connected to us
+                            {
+                                let mut status_map = peer_status.write().await;
+                                let status = status_map.entry(peer.id.clone()).or_default();
+                                status.online = true;
+                                status.last_ping = Some(std::time::Instant::now());
+                            }
+
+                            // Update UI with status preserved
+                            update_peers_ui_with_status(&window_weak, &peer_store, &peer_status).await;
                             update_status(&window_weak, &format!("{} updated permissions", peer.name));
 
                             // Close connection gracefully
@@ -2126,6 +2136,7 @@ impl App {
         let trust_in_progress = self.trust_in_progress.clone();
         let config = self.config.clone();
         let pending_trust = self.pending_trust.clone();
+        let peer_status = self.peer_status.clone();
 
         // Initiate trust callback
         window.global::<AppLogic>().on_initiate_trust({
@@ -2136,6 +2147,7 @@ impl App {
             let config = config.clone();
             let peer_store = peer_store.clone();
             let pending_trust = pending_trust.clone();
+            let peer_status = peer_status.clone();
 
             move || {
                 info!("Initiating trust...");
@@ -2146,6 +2158,7 @@ impl App {
                 let pending_trust = pending_trust.clone();
                 let config = config.clone();
                 let peer_store = peer_store.clone();
+                let peer_status = peer_status.clone();
 
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
@@ -2312,8 +2325,8 @@ impl App {
                                                     info!("Trust established with {}", peer.name);
                                                     update_status(&window_weak, &format!("Trusted peer added: {}", peer.name));
 
-                                                    // Update peers UI (background listener already added to store)
-                                                    update_peers_ui(&window_weak, &peer_store).await;
+                                                    // Update peers UI with status (background listener already marked peer online)
+                                                    update_peers_ui_with_status(&window_weak, &peer_store, &peer_status).await;
                                                 }
                                                 Ok(Ok(Err(e))) => {
                                                     error!("Handshake failed: {}", e);
@@ -2823,8 +2836,10 @@ impl App {
                                 window.global::<AppLogic>().set_browse_peer_id(SharedString::from(&peer_id_str));
                                 window.global::<AppLogic>().set_browse_peer_name(SharedString::from(&peer_name));
                                 window.global::<AppLogic>().set_browse_current_path(SharedString::from("/"));
+                                window.global::<AppLogic>().set_browse_previous_path(SharedString::from(""));
                                 window.global::<AppLogic>().set_browse_loading(true);
                                 window.global::<AppLogic>().set_browse_error(SharedString::from(""));
+                                window.global::<AppLogic>().set_browse_selected_count(0);
                                 window.global::<AppLogic>().set_browse_entries(ModelRc::new(VecModel::from(Vec::<BrowseEntry>::new())));
                             }
                         });
@@ -2876,9 +2891,10 @@ impl App {
                                                 }
                                             }).collect();
 
-                                            // Update state
+                                            // Update state - this is the first successful browse, set previous to root
                                             {
                                                 let mut state = browse_state.write().await;
+                                                state.previous_path = Some("/".to_string());
                                                 state.current_path = home_path.clone();
                                                 state.entries = browse_entries.clone();
                                             }
@@ -2889,6 +2905,8 @@ impl App {
                                                 if let Some(window) = window_weak_ok.upgrade() {
                                                     window.global::<AppLogic>().set_browse_loading(false);
                                                     window.global::<AppLogic>().set_browse_current_path(SharedString::from(&home_path));
+                                                    window.global::<AppLogic>().set_browse_previous_path(SharedString::from("/"));
+                                                    window.global::<AppLogic>().set_browse_error(SharedString::from(""));
 
                                                     let ui_entries: Vec<BrowseEntry> = browse_entries.iter().map(|e| {
                                                         BrowseEntry {
@@ -2929,8 +2947,10 @@ impl App {
                                 }).collect();
 
                                 // Update state
+                                // Initial browse at root - no previous path
                                 {
                                     let mut state = browse_state.write().await;
+                                    state.previous_path = None;  // Root is the first location
                                     state.current_path = path.clone();
                                     state.entries = browse_entries.clone();
                                 }
@@ -2941,6 +2961,8 @@ impl App {
                                     if let Some(window) = window_weak_ok.upgrade() {
                                         window.global::<AppLogic>().set_browse_loading(false);
                                         window.global::<AppLogic>().set_browse_current_path(SharedString::from(&path));
+                                        window.global::<AppLogic>().set_browse_previous_path(SharedString::from(""));
+                                        window.global::<AppLogic>().set_browse_error(SharedString::from(""));
 
                                         let ui_entries: Vec<BrowseEntry> = browse_entries.iter().map(|e| {
                                             BrowseEntry {
@@ -3071,17 +3093,24 @@ impl App {
                                     }
                                 }).collect();
 
-                                {
+                                // Save previous path before updating
+                                let previous_path = {
                                     let mut state = browse_state.write().await;
+                                    let prev = state.current_path.clone();
+                                    state.previous_path = Some(prev.clone());
                                     state.current_path = path.clone();
                                     state.entries = browse_entries.clone();
-                                }
+                                    prev
+                                };
 
                                 let window_weak_ok = window_weak.clone();
                                 let _ = slint::invoke_from_event_loop(move || {
                                     if let Some(window) = window_weak_ok.upgrade() {
                                         window.global::<AppLogic>().set_browse_loading(false);
                                         window.global::<AppLogic>().set_browse_current_path(SharedString::from(&path));
+                                        window.global::<AppLogic>().set_browse_previous_path(SharedString::from(&previous_path));
+                                        window.global::<AppLogic>().set_browse_selected_count(0);
+                                        window.global::<AppLogic>().set_browse_error(SharedString::from(""));
 
                                         let ui_entries: Vec<BrowseEntry> = browse_entries.iter().map(|e| {
                                             BrowseEntry {
@@ -3132,13 +3161,14 @@ impl App {
                         .unwrap();
 
                     rt.block_on(async {
-                        // Toggle selection in state
-                        let entries = {
+                        // Toggle selection in state and count selected
+                        let (entries, selected_count) = {
                             let mut state = browse_state.write().await;
                             if idx < state.entries.len() {
                                 state.entries[idx].selected = !state.entries[idx].selected;
                             }
-                            state.entries.clone()
+                            let count = state.entries.iter().filter(|e| e.selected && !e.is_dir).count();
+                            (state.entries.clone(), count as i32)
                         };
 
                         // Update UI
@@ -3156,6 +3186,7 @@ impl App {
                                     }
                                 }).collect();
                                 window.global::<AppLogic>().set_browse_entries(ModelRc::new(VecModel::from(ui_entries)));
+                                window.global::<AppLogic>().set_browse_selected_count(selected_count);
                             }
                         });
                     });
@@ -3731,41 +3762,6 @@ fn trusted_peer_to_item(p: &TrustedPeer) -> PeerItem {
         allow_pull: p.permissions_granted.pull,
         allow_browse: p.permissions_granted.browse,
     }
-}
-
-/// Update the peers UI from the peer store.
-/// Preserves UI state (like expanded) from the existing model.
-async fn update_peers_ui(window_weak: &Weak<MainWindow>, peer_store: &Arc<RwLock<PeerStore>>) {
-    let peers = peer_store.read().await;
-    let new_items: Vec<PeerItem> = peers.list().iter().map(trusted_peer_to_item).collect();
-    drop(peers);
-
-    let window_weak = window_weak.clone();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(window) = window_weak.upgrade() {
-            let logic = window.global::<AppLogic>();
-            let current_model = logic.get_peers();
-
-            // Build a map of current expanded states by peer ID
-            let mut expanded_states: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
-            for i in 0..current_model.row_count() {
-                if let Some(peer) = current_model.row_data(i) {
-                    expanded_states.insert(peer.id.to_string(), peer.expanded);
-                }
-            }
-
-            // Apply preserved expanded states to new items
-            let items_with_state: Vec<PeerItem> = new_items.into_iter().map(|mut item| {
-                if let Some(&expanded) = expanded_states.get(&item.id.to_string()) {
-                    item.expanded = expanded;
-                }
-                item
-            }).collect();
-
-            // Use the helper to set peers and push data
-            set_peers_with_push_data(&window, items_with_state);
-        }
-    });
 }
 
 /// Update the peers UI from the peer store with status information.

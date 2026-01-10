@@ -224,6 +224,19 @@ global Theme {
 }
 
 // ============================================================================
+// Icons - SVG icon assets for consistent cross-platform rendering
+// ============================================================================
+
+global Icons {
+    out property <image> folder: @image-url("../assets/icons/folder.svg");
+    out property <image> file: @image-url("../assets/icons/file.svg");
+    out property <image> chevron-down: @image-url("../assets/icons/chevron-down.svg");
+    out property <image> chevron-up: @image-url("../assets/icons/chevron-up.svg");
+    out property <image> x: @image-url("../assets/icons/x.svg");
+    out property <image> check: @image-url("../assets/icons/check.svg");
+}
+
+// ============================================================================
 // Data Structures
 // ============================================================================
 
@@ -367,9 +380,11 @@ export global AppLogic {
     in property <string> browse-peer-id: "";
     in property <string> browse-peer-name: "";
     in property <string> browse-current-path: "/";
+    in property <string> browse-previous-path: "";  // For "Go Back" when errors occur
     in property <[BrowseEntry]> browse-entries: [];
     in property <bool> browse-loading: false;
     in property <string> browse-error: "";
+    in property <int> browse-selected-count: 0;  // Count of selected files
 }
 
 // ============================================================================
@@ -408,28 +423,30 @@ component CompactButton inherits Rectangle {
 }
 
 // ============================================================================
-// Icon-only Button
+// Icon Button - Uses SVG icons for consistent cross-platform rendering
 // ============================================================================
 
-component IconBtn inherits Rectangle {
-    in property <string> icon;
+component ImageIconBtn inherits Rectangle {
+    in property <image> icon;
     in property <color> icon-color: Theme.text-dim;
+    in property <length> icon-size: 14px;
     callback clicked();
-    
+
     width: 28px;
     height: 28px;
     border-radius: Theme.radius-sm;
     background: touch.has-hover ? Theme.bg-hover : transparent;
-    
+
     touch := TouchArea {
         mouse-cursor: pointer;
         clicked => { root.clicked(); }
     }
-    
-    Text {
-        text: icon;
-        font-size: 14px;
-        color: touch.has-hover ? Theme.text : icon-color;
+
+    Image {
+        source: icon;
+        width: icon-size;
+        height: icon-size;
+        colorize: touch.has-hover ? Theme.text : icon-color;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -466,10 +483,11 @@ component ThemedDropdown inherits Rectangle {
             overflow: elide;
         }
 
-        Text {
-            text: "▼";
-            font-size: 8px;
-            color: Theme.text-muted;
+        Image {
+            source: Icons.chevron-down;
+            width: 12px;
+            height: 12px;
+            colorize: Theme.text-muted;
             vertical-alignment: center;
         }
     }
@@ -544,15 +562,49 @@ component ThemedInput inherits Rectangle {
         }
     }
 
-    input := TextInput {
+    // Scroll offset for the text input (negative = scrolled left)
+    property <length> scroll-offset: 0;
+
+    // Clipping container for the input area
+    Rectangle {
         x: 8px;
+        y: 0;
         width: parent.width - 16px;
-        text <=> root.text;
-        font-size: root.font-size;
-        color: Theme.text;
-        vertical-alignment: center;
-        single-line: true;
-        accepted => { root.edited(); }  // Also save on Enter
+        height: parent.height;
+        clip: true;
+
+        input := TextInput {
+            x: root.scroll-offset;
+            width: max(parent.width, self.preferred-width + 20px);
+            text <=> root.text;
+            font-size: root.font-size;
+            color: Theme.text;
+            vertical-alignment: center;
+            single-line: true;
+            accepted => { root.edited(); }
+
+            // Handle cursor movement to implement scrolling
+            cursor-position-changed(cursor-pos) => {
+                // Visible area width
+                // Use a direct calculation based on container
+                // cursor-pos.x is relative to the TextInput
+                // We need to check if cursor is outside visible area
+
+                // Margin from edges to trigger scroll
+                // If cursor goes past right edge of visible area, scroll left
+                if cursor-pos.x + root.scroll-offset > parent.width - 4px {
+                    root.scroll-offset = parent.width - cursor-pos.x - 4px;
+                }
+                // If cursor goes past left edge, scroll right
+                if cursor-pos.x + root.scroll-offset < 4px {
+                    root.scroll-offset = 4px - cursor-pos.x;
+                }
+                // Don't scroll past the beginning
+                if root.scroll-offset > 0 {
+                    root.scroll-offset = 0;
+                }
+            }
+        }
     }
 
     // Update focus tracking
@@ -648,28 +700,45 @@ component TransferCard inherits Rectangle {
                 vertical-alignment: center;
             }
 
-            // Status
-            Text {
-                text: transfer.status == "running" ? "●" :
-                      transfer.status == "completed" ? "✓" :
-                      transfer.status == "failed" ? "✗" : "○";
-                font-size: 11px;
-                color: transfer.status == "running" ? Theme.accent :
-                       transfer.status == "completed" ? Theme.success :
-                       transfer.status == "failed" ? Theme.error : #999999;
-                vertical-alignment: center;
+            // Status indicator
+            if transfer.status == "running" || transfer.status == "pending": VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 10px;
+                    height: 10px;
+                    border-radius: 5px;
+                    background: transfer.status == "running" ? Theme.accent : Theme.text-muted;
+                }
+            }
+            if transfer.status == "completed": VerticalLayout {
+                alignment: center;
+                Image {
+                    source: Icons.check;
+                    width: 14px;
+                    height: 14px;
+                    colorize: Theme.success;
+                }
+            }
+            if transfer.status == "failed" || transfer.status == "cancelled": VerticalLayout {
+                alignment: center;
+                Image {
+                    source: Icons.x;
+                    width: 12px;
+                    height: 12px;
+                    colorize: Theme.error;
+                }
             }
 
             // Cancel button (if running)
-            if transfer.status == "running": IconBtn {
-                icon: "×";
+            if transfer.status == "running": ImageIconBtn {
+                icon: Icons.x;
                 icon-color: Theme.error;
                 clicked => { AppLogic.cancel-transfer(transfer.id); }
             }
 
             // Remove button (if completed, failed, or cancelled)
-            if transfer.status == "completed" || transfer.status == "failed" || transfer.status == "cancelled": IconBtn {
-                icon: "×";
+            if transfer.status == "completed" || transfer.status == "failed" || transfer.status == "cancelled": ImageIconBtn {
+                icon: Icons.x;
                 icon-color: Theme.text-muted;
                 clicked => { AppLogic.remove-transfer(transfer.id); }
             }
@@ -935,8 +1004,8 @@ component SendPanel inherits Rectangle {
                             vertical-alignment: center;
                         }
 
-                        IconBtn {
-                            icon: "×";
+                        ImageIconBtn {
+                            icon: Icons.x;
                             icon-color: Theme.text-muted;
                             clicked => { AppLogic.remove-file(i); }
                         }
@@ -1149,15 +1218,15 @@ component PeerCard inherits Rectangle {
             }
 
             // Expand/collapse button
-            IconBtn {
-                icon: peer.expanded ? "▲" : "▼";
+            ImageIconBtn {
+                icon: peer.expanded ? Icons.chevron-up : Icons.chevron-down;
                 icon-color: Theme.text-muted;
                 clicked => { root.expanded-changed(!peer.expanded); }
             }
 
             // Remove button
-            IconBtn {
-                icon: "✕";
+            ImageIconBtn {
+                icon: Icons.x;
                 icon-color: Theme.text-muted;
                 clicked => { root.remove-clicked(); }
             }
@@ -1977,11 +2046,12 @@ component BrowseEntryRow inherits Rectangle {
         spacing: 8px;
 
         // Icon
-        Text {
-            text: entry.is-dir ? "📁" : "📄";
-            font-size: 14px;
+        Image {
+            source: entry.is-dir ? Icons.folder : Icons.file;
+            width: 16px;
+            height: 16px;
+            colorize: entry.is-dir ? Theme.accent : Theme.text-muted;
             vertical-alignment: center;
-            width: 20px;
         }
 
         // Name
@@ -2013,10 +2083,11 @@ component BrowseEntryRow inherits Rectangle {
             border-color: entry.selected ? Theme.accent : Theme.border;
             background: entry.selected ? Theme.accent : transparent;
 
-            Text {
-                text: entry.selected ? "✓" : "";
-                font-size: 12px;
-                color: Theme.accent-text;
+            if entry.selected: Image {
+                source: Icons.check;
+                width: 12px;
+                height: 12px;
+                colorize: Theme.accent-text;
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
@@ -2074,8 +2145,8 @@ component FileBrowserDialog inherits Rectangle {
                         horizontal-stretch: 1;
                     }
 
-                    IconBtn {
-                        icon: "✕";
+                    ImageIconBtn {
+                        icon: Icons.x;
                         icon-color: Theme.text-muted;
                         clicked => { AppLogic.browse-close(); }
                     }
@@ -2131,10 +2202,11 @@ component FileBrowserDialog inherits Rectangle {
                     }
                 }
 
-                // Error message
+                // Error message with Go Back button
                 if AppLogic.browse-error != "" && !AppLogic.browse-loading: VerticalLayout {
                     alignment: center;
                     padding: Theme.spacing-md;
+                    spacing: Theme.spacing-md;
 
                     Text {
                         text: "Error";
@@ -2150,6 +2222,22 @@ component FileBrowserDialog inherits Rectangle {
                         color: Theme.text-dim;
                         horizontal-alignment: center;
                         wrap: word-wrap;
+                    }
+
+                    // Go back button - navigate to previous successful path if available
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: Theme.spacing-sm;
+
+                        CompactButton {
+                            label: "↑ Go Back";
+                            primary: true;
+                            enabled: AppLogic.browse-previous-path != "";
+                            clicked => {
+                                // Navigate to the last successful path
+                                AppLogic.browse-navigate(AppLogic.browse-previous-path);
+                            }
+                        }
                     }
                 }
 
@@ -2215,6 +2303,7 @@ component FileBrowserDialog inherits Rectangle {
                     CompactButton {
                         label: "Pull Selected";
                         primary: true;
+                        enabled: AppLogic.browse-selected-count > 0;
                         clicked => { AppLogic.browse-pull-selected(); }
                     }
                 }
