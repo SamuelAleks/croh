@@ -8,12 +8,72 @@ use std::path::PathBuf;
 
 /// Application theme.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum Theme {
     #[default]
     System,
     Light,
     Dark,
+    Dracula,
+    Nord,
+    SolarizedDark,
+    SolarizedLight,
+    GruvboxDark,
+    GruvboxLight,
+    CatppuccinMocha,
+    CatppuccinLatte,
+}
+
+impl Theme {
+    /// Convert theme to the string format expected by the UI.
+    pub fn to_ui_string(&self) -> &'static str {
+        match self {
+            Theme::System => "system",
+            Theme::Light => "light",
+            Theme::Dark => "dark",
+            Theme::Dracula => "dracula",
+            Theme::Nord => "nord",
+            Theme::SolarizedDark => "solarized-dark",
+            Theme::SolarizedLight => "solarized-light",
+            Theme::GruvboxDark => "gruvbox-dark",
+            Theme::GruvboxLight => "gruvbox-light",
+            Theme::CatppuccinMocha => "catppuccin-mocha",
+            Theme::CatppuccinLatte => "catppuccin-latte",
+        }
+    }
+
+    /// Parse theme from UI string.
+    pub fn from_ui_string(s: &str) -> Self {
+        match s {
+            "light" => Theme::Light,
+            "dark" => Theme::Dark,
+            "dracula" => Theme::Dracula,
+            "nord" => Theme::Nord,
+            "solarized-dark" => Theme::SolarizedDark,
+            "solarized-light" => Theme::SolarizedLight,
+            "gruvbox-dark" => Theme::GruvboxDark,
+            "gruvbox-light" => Theme::GruvboxLight,
+            "catppuccin-mocha" => Theme::CatppuccinMocha,
+            "catppuccin-latte" => Theme::CatppuccinLatte,
+            _ => Theme::System,
+        }
+    }
+}
+
+/// Window size configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Default for WindowSize {
+    fn default() -> Self {
+        Self {
+            width: 700,
+            height: 600,
+        }
+    }
 }
 
 /// Main configuration struct.
@@ -46,6 +106,10 @@ pub struct Config {
     /// Force relay-only transfers (disable local network).
     #[serde(default)]
     pub no_local: bool,
+
+    /// Window size (persisted across sessions).
+    #[serde(default)]
+    pub window_size: WindowSize,
 }
 
 impl Default for Config {
@@ -59,6 +123,7 @@ impl Default for Config {
             default_curve: None,
             throttle: None,
             no_local: false,
+            window_size: WindowSize::default(),
         }
     }
 }
@@ -113,7 +178,10 @@ impl Config {
             config.croc_path = Some(PathBuf::from(path));
         }
 
-        if let Ok(dir) = std::env::var("CROC_GUI_DOWNLOAD_DIR") {
+        // CROH_DOWNLOAD_DIR takes precedence, fall back to legacy CROC_GUI_DOWNLOAD_DIR
+        if let Ok(dir) = std::env::var("CROH_DOWNLOAD_DIR") {
+            config.download_dir = PathBuf::from(dir);
+        } else if let Ok(dir) = std::env::var("CROC_GUI_DOWNLOAD_DIR") {
             config.download_dir = PathBuf::from(dir);
         }
 

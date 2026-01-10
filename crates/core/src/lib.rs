@@ -20,7 +20,7 @@ pub mod transfer;
 pub mod trust;
 
 // Re-export commonly used types
-pub use config::Config;
+pub use config::{Config, WindowSize};
 pub use croc::{CrocOptions, CrocProcess, CrocProcessHandle, find_croc_executable, refresh_croc_cache};
 pub use error::{Error, Result};
 pub use iroh::{

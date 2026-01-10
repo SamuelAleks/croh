@@ -1,39 +1,217 @@
-import { Button, VerticalBox, HorizontalBox, TabWidget, LineEdit, ProgressIndicator, ScrollView, ComboBox } from "std-widgets.slint";
+import { Button, VerticalBox, HorizontalBox, TabWidget, ProgressIndicator, ScrollView } from "std-widgets.slint";
 
 // ============================================================================
-// Theme Colors - Basic/Simple
+// Theme Colors - Reactive to AppLogic.settings.theme
 // ============================================================================
+// Supported themes: system, light, dark, dracula, nord, solarized-dark,
+//                   solarized-light, gruvbox-dark, gruvbox-light,
+//                   catppuccin-mocha, catppuccin-latte
 
 global Theme {
+    property <string> theme: AppLogic.settings.theme;
+
     // Core background colors
-    out property <color> bg-dark: #f5f5f5;
-    out property <color> bg-card: #ffffff;
-    out property <color> bg-hover: #e8e8e8;
-    out property <color> bg-input: #585858;
+    out property <color> bg-dark:
+        theme == "light" ? #f5f5f5 :
+        theme == "dracula" ? #282a36 :
+        theme == "nord" ? #2e3440 :
+        theme == "solarized-dark" ? #002b36 :
+        theme == "solarized-light" ? #fdf6e3 :
+        theme == "gruvbox-dark" ? #282828 :
+        theme == "gruvbox-light" ? #fbf1c7 :
+        theme == "catppuccin-mocha" ? #1e1e2e :
+        theme == "catppuccin-latte" ? #eff1f5 :
+        #1e1e1e; // dark (default)
+
+    out property <color> bg-card:
+        theme == "light" ? #ffffff :
+        theme == "dracula" ? #44475a :
+        theme == "nord" ? #3b4252 :
+        theme == "solarized-dark" ? #073642 :
+        theme == "solarized-light" ? #eee8d5 :
+        theme == "gruvbox-dark" ? #3c3836 :
+        theme == "gruvbox-light" ? #ebdbb2 :
+        theme == "catppuccin-mocha" ? #313244 :
+        theme == "catppuccin-latte" ? #e6e9ef :
+        #2d2d2d;
+
+    out property <color> bg-hover:
+        theme == "light" ? #e8e8e8 :
+        theme == "dracula" ? #6272a4 :
+        theme == "nord" ? #434c5e :
+        theme == "solarized-dark" ? #094959 :
+        theme == "solarized-light" ? #d6ceb5 :
+        theme == "gruvbox-dark" ? #504945 :
+        theme == "gruvbox-light" ? #d5c4a1 :
+        theme == "catppuccin-mocha" ? #45475a :
+        theme == "catppuccin-latte" ? #ccd0da :
+        #3d3d3d;
+
+    out property <color> bg-input:
+        theme == "light" ? #585858 :
+        theme == "dracula" ? #6272a4 :
+        theme == "nord" ? #4c566a :
+        theme == "solarized-dark" ? #586e75 :
+        theme == "solarized-light" ? #93a1a1 :
+        theme == "gruvbox-dark" ? #665c54 :
+        theme == "gruvbox-light" ? #a89984 :
+        theme == "catppuccin-mocha" ? #585b70 :
+        theme == "catppuccin-latte" ? #9ca0b0 :
+        #404040;
 
     // Border & outline
-    out property <color> border: #cccccc;
-    out property <color> border-focus: #0066cc;
+    out property <color> border:
+        theme == "light" ? #cccccc :
+        theme == "dracula" ? #6272a4 :
+        theme == "nord" ? #4c566a :
+        theme == "solarized-dark" ? #586e75 :
+        theme == "solarized-light" ? #93a1a1 :
+        theme == "gruvbox-dark" ? #504945 :
+        theme == "gruvbox-light" ? #bdae93 :
+        theme == "catppuccin-mocha" ? #45475a :
+        theme == "catppuccin-latte" ? #bcc0cc :
+        #4d4d4d;
+
+    out property <color> border-focus:
+        theme == "dracula" ? #bd93f9 :
+        theme == "nord" ? #88c0d0 :
+        theme == "solarized-dark" ? #268bd2 :
+        theme == "solarized-light" ? #268bd2 :
+        theme == "gruvbox-dark" ? #fabd2f :
+        theme == "gruvbox-light" ? #d79921 :
+        theme == "catppuccin-mocha" ? #cba6f7 :
+        theme == "catppuccin-latte" ? #8839ef :
+        #0066cc;
 
     // Text colors
-    out property <color> text: #222222;
-    out property <color> text-dim: #303030;
-    out property <color> text-muted: #999999;
+    out property <color> text:
+        theme == "light" ? #222222 :
+        theme == "dracula" ? #f8f8f2 :
+        theme == "nord" ? #eceff4 :
+        theme == "solarized-dark" ? #839496 :
+        theme == "solarized-light" ? #657b83 :
+        theme == "gruvbox-dark" ? #ebdbb2 :
+        theme == "gruvbox-light" ? #3c3836 :
+        theme == "catppuccin-mocha" ? #cdd6f4 :
+        theme == "catppuccin-latte" ? #4c4f69 :
+        #e0e0e0;
 
-    // Accent - simple blue
-    out property <color> accent: #0066cc;
-    out property <color> accent-glow: #0066cc40;
+    out property <color> text-dim:
+        theme == "light" ? #303030 :
+        theme == "dracula" ? #f8f8f2 :
+        theme == "nord" ? #d8dee9 :
+        theme == "solarized-dark" ? #93a1a1 :
+        theme == "solarized-light" ? #586e75 :
+        theme == "gruvbox-dark" ? #d5c4a1 :
+        theme == "gruvbox-light" ? #504945 :
+        theme == "catppuccin-mocha" ? #bac2de :
+        theme == "catppuccin-latte" ? #5c5f77 :
+        #b0b0b0;
+
+    out property <color> text-muted:
+        theme == "light" ? #999999 :
+        theme == "dracula" ? #6272a4 :
+        theme == "nord" ? #81a1c1 :
+        theme == "solarized-dark" ? #586e75 :
+        theme == "solarized-light" ? #93a1a1 :
+        theme == "gruvbox-dark" ? #928374 :
+        theme == "gruvbox-light" ? #7c6f64 :
+        theme == "catppuccin-mocha" ? #6c7086 :
+        theme == "catppuccin-latte" ? #9ca0b0 :
+        #808080;
+
+    // Accent colors
+    out property <color> accent:
+        theme == "dracula" ? #bd93f9 :
+        theme == "nord" ? #88c0d0 :
+        theme == "solarized-dark" ? #268bd2 :
+        theme == "solarized-light" ? #268bd2 :
+        theme == "gruvbox-dark" ? #fabd2f :
+        theme == "gruvbox-light" ? #d79921 :
+        theme == "catppuccin-mocha" ? #cba6f7 :
+        theme == "catppuccin-latte" ? #8839ef :
+        #0066cc;
+
+    out property <color> accent-glow:
+        theme == "dracula" ? #bd93f940 :
+        theme == "nord" ? #88c0d040 :
+        theme == "solarized-dark" ? #268bd240 :
+        theme == "solarized-light" ? #268bd240 :
+        theme == "gruvbox-dark" ? #fabd2f40 :
+        theme == "gruvbox-light" ? #d7992140 :
+        theme == "catppuccin-mocha" ? #cba6f740 :
+        theme == "catppuccin-latte" ? #8839ef40 :
+        #0066cc40;
+
     out property <color> accent-text: #ffffff;
 
     // Status colors
-    out property <color> success: #228b22;
-    out property <color> error: #cc0000;
-    out property <color> warning: #cc8800;
-    out property <color> info: #0066cc;
+    out property <color> success:
+        theme == "dracula" ? #50fa7b :
+        theme == "nord" ? #a3be8c :
+        theme == "solarized-dark" ? #859900 :
+        theme == "solarized-light" ? #859900 :
+        theme == "gruvbox-dark" ? #b8bb26 :
+        theme == "gruvbox-light" ? #98971a :
+        theme == "catppuccin-mocha" ? #a6e3a1 :
+        theme == "catppuccin-latte" ? #40a02b :
+        #228b22;
+
+    out property <color> error:
+        theme == "dracula" ? #ff5555 :
+        theme == "nord" ? #bf616a :
+        theme == "solarized-dark" ? #dc322f :
+        theme == "solarized-light" ? #dc322f :
+        theme == "gruvbox-dark" ? #fb4934 :
+        theme == "gruvbox-light" ? #cc241d :
+        theme == "catppuccin-mocha" ? #f38ba8 :
+        theme == "catppuccin-latte" ? #d20f39 :
+        #cc0000;
+
+    out property <color> warning:
+        theme == "dracula" ? #f1fa8c :
+        theme == "nord" ? #ebcb8b :
+        theme == "solarized-dark" ? #b58900 :
+        theme == "solarized-light" ? #b58900 :
+        theme == "gruvbox-dark" ? #fe8019 :
+        theme == "gruvbox-light" ? #d65d0e :
+        theme == "catppuccin-mocha" ? #fab387 :
+        theme == "catppuccin-latte" ? #fe640b :
+        #cc8800;
+
+    out property <color> info:
+        theme == "dracula" ? #8be9fd :
+        theme == "nord" ? #81a1c1 :
+        theme == "solarized-dark" ? #2aa198 :
+        theme == "solarized-light" ? #2aa198 :
+        theme == "gruvbox-dark" ? #83a598 :
+        theme == "gruvbox-light" ? #458588 :
+        theme == "catppuccin-mocha" ? #89b4fa :
+        theme == "catppuccin-latte" ? #1e66f5 :
+        #0066cc;
 
     // Transfer type colors
-    out property <color> send-color: #228b22;
-    out property <color> receive-color: #0066cc;
+    out property <color> send-color:
+        theme == "dracula" ? #50fa7b :
+        theme == "nord" ? #a3be8c :
+        theme == "solarized-dark" ? #859900 :
+        theme == "solarized-light" ? #859900 :
+        theme == "gruvbox-dark" ? #b8bb26 :
+        theme == "gruvbox-light" ? #98971a :
+        theme == "catppuccin-mocha" ? #a6e3a1 :
+        theme == "catppuccin-latte" ? #40a02b :
+        #228b22;
+
+    out property <color> receive-color:
+        theme == "dracula" ? #8be9fd :
+        theme == "nord" ? #81a1c1 :
+        theme == "solarized-dark" ? #268bd2 :
+        theme == "solarized-light" ? #268bd2 :
+        theme == "gruvbox-dark" ? #83a598 :
+        theme == "gruvbox-light" ? #458588 :
+        theme == "catppuccin-mocha" ? #89b4fa :
+        theme == "catppuccin-latte" ? #1e66f5 :
+        #0066cc;
 
     // Sizing
     out property <length> radius-sm: 4px;
@@ -118,6 +296,9 @@ export global AppLogic {
     callback open-config-folder();
     callback refresh-croc();
     callback install-croc();
+    callback set-theme(string);  // live theme change: "system", "light", "dark"
+    // auto-save-settings: download-dir, relay, theme, hash, curve, throttle, no-local
+    callback auto-save-settings(string, string, string, string, string, string, bool);
 
     // Trusted peers callbacks
     callback initiate-trust();
@@ -229,6 +410,141 @@ component IconBtn inherits Rectangle {
 }
 
 // ============================================================================
+// Themed Dropdown (custom styled ComboBox alternative)
+// ============================================================================
+
+component ThemedDropdown inherits Rectangle {
+    in property <[string]> model;
+    in-out property <int> current-index: 0;
+    in property <length> dropdown-width: 100px;
+    callback changed(int);
+
+    width: dropdown-width;
+    height: 28px;
+    border-radius: Theme.radius-sm;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.bg-card;
+
+    // Main button
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 6px;
+
+        Text {
+            text: model[current-index];
+            font-size: 12px;
+            color: Theme.text;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+
+        Text {
+            text: "▼";
+            font-size: 8px;
+            color: Theme.text-muted;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { popup.show(); }
+    }
+
+    // Dropdown popup using PopupWindow for proper z-ordering
+    popup := PopupWindow {
+        x: 0;
+        y: root.height;
+        width: root.width;
+
+        Rectangle {
+            background: Theme.bg-card;
+            border-radius: Theme.radius-sm;
+            border-width: 1px;
+            border-color: Theme.border;
+
+            VerticalLayout {
+                for item[i] in model: Rectangle {
+                    height: 28px;
+                    background: item-touch.has-hover ? Theme.bg-hover : transparent;
+
+                    item-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            current-index = i;
+                            popup.close();
+                            root.changed(i);
+                        }
+                    }
+
+                    Text {
+                        text: item;
+                        font-size: 12px;
+                        color: i == current-index ? Theme.accent : Theme.text;
+                        vertical-alignment: center;
+                        x: 8px;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Themed Text Input
+// ============================================================================
+
+component ThemedInput inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder-text: "";
+    in property <length> font-size: 12px;
+    in property <length> input-width: 100px;
+    callback edited();  // Called when text editing is complete (on blur)
+
+    width: input-width;
+    height: 28px;
+    border-radius: Theme.radius-sm;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.border-focus : Theme.border;
+    background: Theme.bg-card;
+
+    // Track focus changes to detect blur
+    property <bool> was-focused: false;
+    changed was-focused => {
+        if was-focused && !input.has-focus {
+            root.edited();
+        }
+    }
+
+    input := TextInput {
+        x: 8px;
+        width: parent.width - 16px;
+        text <=> root.text;
+        font-size: root.font-size;
+        color: Theme.text;
+        vertical-alignment: center;
+        single-line: true;
+        accepted => { root.edited(); }  // Also save on Enter
+    }
+
+    // Update focus tracking
+    states [
+        focused when input.has-focus: { was-focused: true; }
+    ]
+
+    // Placeholder text
+    if root.text == "": Text {
+        x: 8px;
+        text: placeholder-text;
+        font-size: root.font-size;
+        color: Theme.text-muted;
+        vertical-alignment: center;
+    }
+}
+
+// ============================================================================
 // Transfer Card (very compact)
 // ============================================================================
 
@@ -260,7 +576,7 @@ component TransferCard inherits Rectangle {
             Text {
                 text: transfer.files;
                 font-size: 11px;
-                color: #222222;
+                color: Theme.text;
                 overflow: elide;
                 horizontal-stretch: 1;
                 vertical-alignment: center;
@@ -268,7 +584,7 @@ component TransferCard inherits Rectangle {
 
             // Code (if available)
             if transfer.code != "": Rectangle {
-                background: #484848;
+                background: Theme.bg-input;
                 border-radius: 2px;
                 height: 18px;
 
@@ -294,7 +610,7 @@ component TransferCard inherits Rectangle {
             if transfer.status == "running" && transfer.speed != "": Text {
                 text: transfer.speed;
                 font-size: 10px;
-                color: #888888;
+                color: Theme.text-muted;
                 vertical-alignment: center;
             }
 
@@ -302,7 +618,7 @@ component TransferCard inherits Rectangle {
             if transfer.status == "running": Text {
                 text: Math.round(transfer.progress) + "%";
                 font-size: 10px;
-                color: transfer.progress > 0 ? Theme.accent : #666666;
+                color: transfer.progress > 0 ? Theme.accent : Theme.text-muted;
                 vertical-alignment: center;
             }
 
@@ -386,16 +702,12 @@ component DropZone inherits Rectangle {
         clicked => { root.clicked(); }
     }
 
-    VerticalBox {
-        alignment: center;
-        spacing: 4px;
-
-        Text {
-            text: "Drop files here or click to browse";
-            font-size: 13px;
-            color: Theme.text;
-            horizontal-alignment: center;
-        }
+    Text {
+        text: "Drop files here or click to browse";
+        font-size: 13px;
+        color: Theme.text;
+        horizontal-alignment: center;
+        vertical-alignment: center;
     }
 }
 
@@ -416,10 +728,11 @@ component LabeledInput inherits VerticalLayout {
         color: Theme.text;
     }
 
-    LineEdit {
+    ThemedInput {
         text <=> value;
         placeholder-text: placeholder;
         font-size: 13px;
+        input-width: parent.width;
     }
 }
 
@@ -567,13 +880,13 @@ component SendPanel inherits Rectangle {
                 Text {
                     text: "Selected (" + AppLogic.selected-files.length + ")";
                     font-size: 11px;
-                    color: #666666;
+                    color: Theme.text-muted;
                 }
 
                 // File list - compact
                 for file[i] in AppLogic.selected-files: Rectangle {
                     height: 22px;
-                    background: Math.mod(i, 2) == 0 ? #f8f8f8 : #ffffff;
+                    background: Math.mod(i, 2) == 0 ? Theme.bg-dark : Theme.bg-card;
 
                     HorizontalLayout {
                         padding-left: 6px;
@@ -583,7 +896,7 @@ component SendPanel inherits Rectangle {
                         Text {
                             text: file.name;
                             font-size: 11px;
-                            color: #222222;
+                            color: Theme.text;
                             overflow: elide;
                             horizontal-stretch: 1;
                             vertical-alignment: center;
@@ -592,13 +905,13 @@ component SendPanel inherits Rectangle {
                         Text {
                             text: file.size;
                             font-size: 10px;
-                            color: #888888;
+                            color: Theme.text-muted;
                             vertical-alignment: center;
                         }
 
                         IconBtn {
                             icon: "×";
-                            icon-color: #888888;
+                            icon-color: Theme.text-muted;
                             clicked => { AppLogic.remove-file(i); }
                         }
                     }
@@ -612,11 +925,11 @@ component SendPanel inherits Rectangle {
                     Text {
                         text: "Code:";
                         font-size: 11px;
-                        color: #666666;
+                        color: Theme.text-muted;
                         vertical-alignment: center;
                     }
 
-                    LineEdit {
+                    ThemedInput {
                         horizontal-stretch: 1;
                         text <=> custom-code;
                         placeholder-text: "auto-generate";
@@ -923,7 +1236,20 @@ component PeersPanel inherits Rectangle {
 component SettingsPanel inherits Rectangle {
     in-out property <string> download-dir: AppLogic.settings.download-dir;
     in-out property <string> relay: AppLogic.settings.default-relay;
-    in-out property <int> theme-idx: AppLogic.settings.theme == "light" ? 1 : AppLogic.settings.theme == "dark" ? 2 : 0;
+    // Theme index mapping: 0=System, 1=Light, 2=Dark, 3=Dracula, 4=Nord,
+    //   5=Solarized Dark, 6=Solarized Light, 7=Gruvbox Dark, 8=Gruvbox Light,
+    //   9=Catppuccin Mocha, 10=Catppuccin Latte
+    in-out property <int> theme-idx:
+        AppLogic.settings.theme == "light" ? 1 :
+        AppLogic.settings.theme == "dark" ? 2 :
+        AppLogic.settings.theme == "dracula" ? 3 :
+        AppLogic.settings.theme == "nord" ? 4 :
+        AppLogic.settings.theme == "solarized-dark" ? 5 :
+        AppLogic.settings.theme == "solarized-light" ? 6 :
+        AppLogic.settings.theme == "gruvbox-dark" ? 7 :
+        AppLogic.settings.theme == "gruvbox-light" ? 8 :
+        AppLogic.settings.theme == "catppuccin-mocha" ? 9 :
+        AppLogic.settings.theme == "catppuccin-latte" ? 10 : 0;
     // Transfer options
     in-out property <int> hash-idx: AppLogic.settings.hash-algorithm == "imohash" ? 1 :
                                      AppLogic.settings.hash-algorithm == "md5" ? 2 : 0;
@@ -932,6 +1258,32 @@ component SettingsPanel inherits Rectangle {
                                       AppLogic.settings.curve == "p521" ? 3 : 0;
     in-out property <string> throttle: AppLogic.settings.throttle;
     in-out property <bool> no-local: AppLogic.settings.no-local;
+
+    // Theme names list for dropdown
+    property <[string]> theme-names: ["System", "Light", "Dark", "Dracula", "Nord",
+        "Solarized Dark", "Solarized Light", "Gruvbox Dark", "Gruvbox Light",
+        "Catppuccin Mocha", "Catppuccin Latte"];
+
+    // Helper function to trigger auto-save with current values
+    pure function current-theme() -> string {
+        return theme-idx == 0 ? "system" :
+               theme-idx == 1 ? "light" :
+               theme-idx == 2 ? "dark" :
+               theme-idx == 3 ? "dracula" :
+               theme-idx == 4 ? "nord" :
+               theme-idx == 5 ? "solarized-dark" :
+               theme-idx == 6 ? "solarized-light" :
+               theme-idx == 7 ? "gruvbox-dark" :
+               theme-idx == 8 ? "gruvbox-light" :
+               theme-idx == 9 ? "catppuccin-mocha" :
+               "catppuccin-latte";
+    }
+    pure function current-hash() -> string {
+        return hash-idx == 0 ? "xxhash" : hash-idx == 1 ? "imohash" : "md5";
+    }
+    pure function current-curve() -> string {
+        return curve-idx == 0 ? "siec" : curve-idx == 1 ? "p256" : curve-idx == 2 ? "p384" : "p521";
+    }
 
     background: Theme.bg-dark;
 
@@ -963,11 +1315,14 @@ component SettingsPanel inherits Rectangle {
                     label: "Custom Relay";
                     sublabel: "Leave empty for default";
 
-                    LineEdit {
-                        width: 160px;
+                    ThemedInput {
+                        input-width: 160px;
                         text <=> relay;
                         placeholder-text: "relay.example.com";
                         font-size: 12px;
+                        edited => {
+                            AppLogic.auto-save-settings(download-dir, relay, current-theme(), current-hash(), current-curve(), throttle, no-local);
+                        }
                     }
                 }
 
@@ -985,7 +1340,10 @@ component SettingsPanel inherits Rectangle {
 
                         toggle-touch := TouchArea {
                             mouse-cursor: pointer;
-                            clicked => { no-local = !no-local; }
+                            clicked => {
+                                no-local = !no-local;
+                                AppLogic.auto-save-settings(download-dir, relay, current-theme(), current-hash(), current-curve(), throttle, no-local);
+                            }
                         }
 
                         Rectangle {
@@ -1010,10 +1368,13 @@ component SettingsPanel inherits Rectangle {
                     label: "Hash Algorithm";
                     sublabel: "File verification method";
 
-                    ComboBox {
-                        width: 110px;
+                    ThemedDropdown {
+                        dropdown-width: 110px;
                         model: ["xxhash", "imohash", "md5"];
                         current-index <=> hash-idx;
+                        changed(idx) => {
+                            AppLogic.auto-save-settings(download-dir, relay, current-theme(), idx == 0 ? "xxhash" : idx == 1 ? "imohash" : "md5", current-curve(), throttle, no-local);
+                        }
                     }
                 }
 
@@ -1021,10 +1382,13 @@ component SettingsPanel inherits Rectangle {
                     label: "Encryption Curve";
                     sublabel: "PAKE elliptic curve";
 
-                    ComboBox {
-                        width: 110px;
+                    ThemedDropdown {
+                        dropdown-width: 110px;
                         model: ["siec", "p256", "p384", "p521"];
                         current-index <=> curve-idx;
+                        changed(idx) => {
+                            AppLogic.auto-save-settings(download-dir, relay, current-theme(), current-hash(), idx == 0 ? "siec" : idx == 1 ? "p256" : idx == 2 ? "p384" : "p521", throttle, no-local);
+                        }
                     }
                 }
 
@@ -1032,11 +1396,14 @@ component SettingsPanel inherits Rectangle {
                     label: "Bandwidth Limit";
                     sublabel: "e.g. 1M, 500K (empty = unlimited)";
 
-                    LineEdit {
-                        width: 110px;
+                    ThemedInput {
+                        input-width: 110px;
                         text <=> throttle;
                         placeholder-text: "unlimited";
                         font-size: 12px;
+                        edited => {
+                            AppLogic.auto-save-settings(download-dir, relay, current-theme(), current-hash(), current-curve(), throttle, no-local);
+                        }
                     }
                 }
             }
@@ -1048,10 +1415,14 @@ component SettingsPanel inherits Rectangle {
                 SettingRow {
                     label: "Theme";
 
-                    ComboBox {
-                        width: 100px;
-                        model: ["System", "Light", "Dark"];
+                    ThemedDropdown {
+                        dropdown-width: 150px;
+                        model: theme-names;
                         current-index <=> theme-idx;
+                        changed(idx) => {
+                            // Live theme preview + auto-save
+                            AppLogic.set-theme(current-theme());
+                        }
                     }
                 }
             }
@@ -1116,9 +1487,9 @@ component SettingsPanel inherits Rectangle {
                         AppLogic.save-settings(
                             download-dir,
                             relay,
-                            theme-idx == 0 ? "system" : theme-idx == 1 ? "light" : "dark",
-                            hash-idx == 0 ? "xxhash" : hash-idx == 1 ? "imohash" : "md5",
-                            curve-idx == 0 ? "siec" : curve-idx == 1 ? "p256" : curve-idx == 2 ? "p384" : "p521",
+                            current-theme(),
+                            current-hash(),
+                            current-curve(),
                             throttle,
                             no-local
                         );
@@ -1176,23 +1547,22 @@ component TransfersBar inherits Rectangle {
         Text {
             text: "Transfers (" + AppLogic.transfers.length + ")";
             font-size: 10px;
-            color: #888888;
+            color: Theme.text-muted;
         }
 
         // Content
         if AppLogic.transfers.length == 0: Text {
             text: "No transfers";
             font-size: 10px;
-            color: #aaaaaa;
+            color: Theme.text-muted;
             horizontal-alignment: center;
             vertical-alignment: center;
             vertical-stretch: 1;
         }
 
         // Transfer list - scrollable
-        if AppLogic.transfers.length > 0: Flickable {
+        if AppLogic.transfers.length > 0: ScrollView {
             vertical-stretch: 1;
-            viewport-height: AppLogic.transfers.length * 32px;
 
             VerticalLayout {
                 spacing: 2px;
@@ -1312,7 +1682,8 @@ component FileBrowserDialog inherits Rectangle {
             Rectangle {
                 height: 44px;
                 background: Theme.bg-dark;
-                border-radius: Theme.radius-md;
+                border-top-left-radius: Theme.radius-md;
+                border-top-right-radius: Theme.radius-md;
 
                 HorizontalLayout {
                     padding: Theme.spacing-sm;
@@ -1484,8 +1855,8 @@ export component MainWindow inherits Window {
     title: "Croh";
     min-width: 480px;
     min-height: 400px;
-    preferred-width: 600px;
-    preferred-height: 500px;
+    preferred-width: 700px;
+    preferred-height: 600px;
     background: Theme.bg-dark;
 
     property <int> active-tab: 0;

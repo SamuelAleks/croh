@@ -610,11 +610,7 @@ impl App {
 
                 let download_dir = config_guard.download_dir.to_string_lossy().to_string();
                 let default_relay = config_guard.default_relay.clone().unwrap_or_default();
-                let theme = match config_guard.theme {
-                    Theme::System => "system",
-                    Theme::Light => "light",
-                    Theme::Dark => "dark",
-                };
+                let theme = config_guard.theme.to_ui_string();
 
                 // Transfer options
                 let hash_algorithm = config_guard.default_hash
@@ -1597,11 +1593,7 @@ impl App {
 
                         config_guard.download_dir = PathBuf::from(&download_dir);
                         config_guard.default_relay = if relay.is_empty() { None } else { Some(relay) };
-                        config_guard.theme = match theme.as_str() {
-                            "light" => Theme::Light,
-                            "dark" => Theme::Dark,
-                            _ => Theme::System,
-                        };
+                        config_guard.theme = Theme::from_ui_string(&theme);
 
                         // Save transfer options
                         config_guard.default_hash = match hash.as_str() {
@@ -1710,6 +1702,124 @@ impl App {
                         .arg(url)
                         .spawn();
                 }
+            }
+        });
+
+        // Live theme change callback
+        window.global::<AppLogic>().on_set_theme({
+            let window_weak = window_weak.clone();
+            let config = config.clone();
+
+            move |theme_str| {
+                let theme_string = theme_str.to_string();
+                let window_weak = window_weak.clone();
+                let config = config.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Update config
+                        {
+                            let mut config_guard = config.write().await;
+                            config_guard.theme = Theme::from_ui_string(&theme_string);
+                            if let Err(e) = config_guard.save() {
+                                error!("Failed to save config: {}", e);
+                            }
+                        }
+
+                        // Update UI settings to trigger theme change
+                        let config_guard = config.read().await;
+                        let theme = config_guard.theme.to_ui_string();
+                        let download_dir = config_guard.download_dir.to_string_lossy().to_string();
+                        let default_relay = config_guard.default_relay.clone().unwrap_or_default();
+                        let hash_algorithm = config_guard.default_hash
+                            .map(|h| h.as_str().to_string())
+                            .unwrap_or_default();
+                        let curve = config_guard.default_curve
+                            .map(|c| c.as_str().to_string())
+                            .unwrap_or_default();
+                        let throttle = config_guard.throttle.clone().unwrap_or_default();
+                        let no_local = config_guard.no_local;
+                        let (croc_path, croc_found) = match find_croc_executable() {
+                            Ok(path) => (path.to_string_lossy().to_string(), true),
+                            Err(_) => ("Not found".to_string(), false),
+                        };
+                        drop(config_guard);
+
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(window) = window_weak.upgrade() {
+                                let settings = AppSettings {
+                                    download_dir: SharedString::from(download_dir),
+                                    default_relay: SharedString::from(default_relay),
+                                    theme: SharedString::from(theme),
+                                    croc_path: SharedString::from(croc_path),
+                                    croc_found,
+                                    hash_algorithm: SharedString::from(hash_algorithm),
+                                    curve: SharedString::from(curve),
+                                    throttle: SharedString::from(throttle),
+                                    no_local,
+                                };
+                                window.global::<AppLogic>().set_settings(settings);
+                            }
+                        });
+                    });
+                });
+            }
+        });
+
+        // Auto-save settings callback (called when any setting changes)
+        window.global::<AppLogic>().on_auto_save_settings({
+            let config = config.clone();
+
+            move |download_dir, relay, theme, hash, curve, throttle, no_local| {
+                let download_dir = download_dir.to_string();
+                let relay = relay.to_string();
+                let theme = theme.to_string();
+                let hash = hash.to_string();
+                let curve = curve.to_string();
+                let throttle = throttle.to_string();
+                let config = config.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        let mut config_guard = config.write().await;
+
+                        // Update config values
+                        if !download_dir.is_empty() {
+                            config_guard.download_dir = PathBuf::from(&download_dir);
+                        }
+                        config_guard.default_relay = if relay.is_empty() { None } else { Some(relay) };
+                        config_guard.theme = Theme::from_ui_string(&theme);
+                        config_guard.default_hash = match hash.as_str() {
+                            "xxhash" => Some(HashAlgorithm::Xxhash),
+                            "imohash" => Some(HashAlgorithm::Imohash),
+                            "md5" => Some(HashAlgorithm::Md5),
+                            _ => None,
+                        };
+                        config_guard.default_curve = match curve.as_str() {
+                            "siec" => Some(Curve::Siec),
+                            "p256" => Some(Curve::P256),
+                            "p384" => Some(Curve::P384),
+                            "p521" => Some(Curve::P521),
+                            _ => None,
+                        };
+                        config_guard.throttle = if throttle.is_empty() { None } else { Some(throttle) };
+                        config_guard.no_local = no_local;
+
+                        if let Err(e) = config_guard.save() {
+                            error!("Failed to auto-save config: {}", e);
+                        }
+                    });
+                });
             }
         });
     }

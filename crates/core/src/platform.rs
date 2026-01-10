@@ -13,10 +13,16 @@ pub fn default_download_dir() -> PathBuf {
 
 /// Get the application data directory.
 ///
+/// Override with `CROH_DATA_DIR` environment variable.
+///
+/// Defaults:
 /// - Linux: `~/.local/share/croh`
 /// - Windows: `%LOCALAPPDATA%\croh`
 /// - macOS: `~/Library/Application Support/croh`
 pub fn data_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("CROH_DATA_DIR") {
+        return PathBuf::from(dir);
+    }
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("croh")
@@ -24,10 +30,16 @@ pub fn data_dir() -> PathBuf {
 
 /// Get the configuration directory.
 ///
+/// Override with `CROH_CONFIG_DIR` environment variable.
+///
+/// Defaults:
 /// - Linux: `~/.config/croh`
 /// - Windows: `%APPDATA%\croh`
 /// - macOS: `~/Library/Application Support/croh`
 pub fn config_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("CROH_CONFIG_DIR") {
+        return PathBuf::from(dir);
+    }
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("croh")
