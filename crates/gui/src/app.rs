@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{oneshot, RwLock};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{AppLogic, AppSettings, BrowseEntry, MainWindow, PeerItem, SelectedFile, TransferItem};
 
@@ -38,6 +38,8 @@ pub struct App {
     browse_state: Arc<RwLock<BrowseState>>,
     /// Pending trust handshake state (nonce + result channel).
     pending_trust: Arc<RwLock<Option<PendingTrust>>>,
+    /// Shared peers model for UI (allows in-place updates).
+    peers_model: std::rc::Rc<VecModel<PeerItem>>,
 }
 
 /// State for file browser dialog.
@@ -84,6 +86,12 @@ impl App {
         let config = Config::load_with_env().unwrap_or_default();
         let peer_store = PeerStore::load().unwrap_or_default();
 
+        // Create shared peers model and set it on the UI
+        let peers_model = std::rc::Rc::new(VecModel::<PeerItem>::default());
+        if let Some(win) = window.upgrade() {
+            win.global::<AppLogic>().set_peers(peers_model.clone().into());
+        }
+
         Self {
             window,
             selected_files: Arc::new(RwLock::new(Vec::new())),
@@ -97,6 +105,7 @@ impl App {
             listener_shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             browse_state: Arc::new(RwLock::new(BrowseState::default())),
             pending_trust: Arc::new(RwLock::new(None)),
+            peers_model,
         }
     }
 
@@ -115,6 +124,18 @@ impl App {
 
         // Start background listener for incoming transfers
         self.start_background_listener();
+    }
+
+    /// Refresh the peers model with the given items (clears and repopulates).
+    fn refresh_peers_model(&self, items: Vec<PeerItem>) {
+        // Clear existing items
+        while self.peers_model.row_count() > 0 {
+            self.peers_model.remove(0);
+        }
+        // Add new items
+        for item in items {
+            self.peers_model.push(item);
+        }
     }
 
     /// Start a background listener for incoming peer connections.
@@ -575,6 +596,30 @@ impl App {
                                 }
                             }
                         }
+                        ControlMessage::PermissionsUpdate { permissions } => {
+                            info!("Received permissions update from {}: push={}, pull={}, browse={}",
+                                  peer.name, permissions.push, permissions.pull, permissions.browse);
+
+                            // Update our record of what they allow us to do
+                            {
+                                let mut store = peer_store.write().await;
+                                if let Err(e) = store.update(&peer.id, |p| {
+                                    p.their_permissions.push = permissions.push;
+                                    p.their_permissions.pull = permissions.pull;
+                                    p.their_permissions.browse = permissions.browse;
+                                    p.their_permissions.status = permissions.status;
+                                }) {
+                                    error!("Failed to update peer permissions in store: {}", e);
+                                }
+                            }
+
+                            // Update UI
+                            update_peers_ui(&window_weak, &peer_store).await;
+                            update_status(&window_weak, &format!("{} updated permissions", peer.name));
+
+                            // Close connection gracefully
+                            let _ = conn.close().await;
+                        }
                         other => {
                             warn!("Unexpected message type from {}: {:?}", remote_id, other);
                         }
@@ -646,9 +691,19 @@ impl App {
     }
 
     /// Initialize identity and load peers.
-    fn init_identity_and_peers(&self, _window: &MainWindow) {
-        let identity_arc = self.identity.clone();
+    fn init_identity_and_peers(&self, window: &MainWindow) {
+        // Load peers synchronously into shared model (Rc can't cross thread boundary)
+        // We use try_read() to avoid blocking, falling back to empty if locked
+        let rt = tokio::runtime::Runtime::new().unwrap();
         let peer_store = self.peer_store.clone();
+        let items: Vec<PeerItem> = rt.block_on(async {
+            let peers = peer_store.read().await;
+            peers.list().iter().map(trusted_peer_to_item).collect()
+        });
+        self.refresh_peers_model(items);
+
+        // Load identity in background thread
+        let identity_arc = self.identity.clone();
         let window_weak = self.window.clone();
 
         std::thread::spawn(move || {
@@ -673,9 +728,8 @@ impl App {
                         info!("Identity loaded");
 
                         // Update UI with endpoint ID
-                        let window_weak_id = window_weak.clone();
                         let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(window) = window_weak_id.upgrade() {
+                            if let Some(window) = window_weak.upgrade() {
                                 window.global::<AppLogic>().set_endpoint_id(SharedString::from(display_id));
                             }
                         });
@@ -684,19 +738,11 @@ impl App {
                         error!("Failed to load identity: {}", e);
                     }
                 }
-
-                // Load peers and update UI
-                let peers = peer_store.read().await;
-                let items: Vec<PeerItem> = peers.list().iter().map(trusted_peer_to_item).collect();
-                drop(peers);
-
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(window) = window_weak.upgrade() {
-                        window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));
-                    }
-                });
             });
         });
+
+        // Mark window as used
+        let _ = window;
     }
 
     fn setup_file_callbacks(&self, window: &MainWindow) {
@@ -2112,6 +2158,7 @@ impl App {
         window.global::<AppLogic>().on_remove_peer({
             let window_weak = window_weak.clone();
             let peer_store = peer_store.clone();
+            let peers_model = self.peers_model.clone();
 
             move |id| {
                 let id_str = id.to_string();
@@ -2119,6 +2166,18 @@ impl App {
                 let window_weak = window_weak.clone();
                 let peer_store = peer_store.clone();
 
+                // Remove from UI model immediately
+                let count = peers_model.row_count();
+                for i in 0..count {
+                    if let Some(peer) = peers_model.row_data(i) {
+                        if peer.id.to_string() == id_str {
+                            peers_model.remove(i);
+                            break;
+                        }
+                    }
+                }
+
+                // Remove from persistent store in background
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
@@ -2128,22 +2187,10 @@ impl App {
                     rt.block_on(async {
                         let mut store = peer_store.write().await;
                         if let Err(e) = store.remove(&id_str) {
-                            error!("Failed to remove peer: {}", e);
+                            error!("Failed to remove peer from store: {}", e);
                             update_status(&window_weak, &format!("Error: {}", e));
                             return;
                         }
-
-                        // Update UI
-                        let items: Vec<PeerItem> = store.list().iter().map(trusted_peer_to_item).collect();
-                        drop(store);
-
-                        let window_weak_ui = window_weak.clone();
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(window) = window_weak_ui.upgrade() {
-                                window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));
-                            }
-                        });
-
                         update_status(&window_weak, "Peer removed");
                     });
                 });
@@ -2154,16 +2201,19 @@ impl App {
         window.global::<AppLogic>().on_update_peer_permissions({
             let window_weak = window_weak.clone();
             let peer_store = peer_store.clone();
+            let peers_model = self.peers_model.clone();
+            let shared_endpoint = self.shared_endpoint.clone();
 
             move |id, allow_push, allow_pull, allow_browse| {
                 let id_str = id.to_string();
                 info!("Updating permissions for peer {}: push={}, pull={}, browse={}",
                       id_str, allow_push, allow_pull, allow_browse);
                 let window_weak_thread = window_weak.clone();
-                let window_weak_ui = window_weak.clone();
                 let peer_store = peer_store.clone();
+                let shared_endpoint = shared_endpoint.clone();
+                let id_str_thread = id_str.clone();
 
-                // Spawn thread to update persistent store (non-blocking)
+                // Spawn thread to update persistent store and notify peer (non-blocking)
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
@@ -2171,30 +2221,95 @@ impl App {
                         .unwrap();
 
                     rt.block_on(async {
-                        let mut store = peer_store.write().await;
-                        if let Err(e) = store.update(&id_str, |peer| {
-                            peer.permissions_granted.push = allow_push;
-                            peer.permissions_granted.pull = allow_pull;
-                            peer.permissions_granted.browse = allow_browse;
-                        }) {
-                            error!("Failed to update peer permissions: {}", e);
-                            update_status(&window_weak_thread, &format!("Error: {}", e));
+                        // Get the peer's endpoint_id before updating
+                        let endpoint_id = {
+                            let store = peer_store.read().await;
+                            store.find_by_id(&id_str_thread).map(|p| p.endpoint_id.clone())
+                        };
+
+                        // Update local store
+                        {
+                            let mut store = peer_store.write().await;
+                            if let Err(e) = store.update(&id_str_thread, |peer| {
+                                peer.permissions_granted.push = allow_push;
+                                peer.permissions_granted.pull = allow_pull;
+                                peer.permissions_granted.browse = allow_browse;
+                            }) {
+                                error!("Failed to update peer permissions: {}", e);
+                                update_status(&window_weak_thread, &format!("Error: {}", e));
+                                return;
+                            }
+                        }
+
+                        // Notify the peer of the permission change
+                        if let Some(endpoint_id) = endpoint_id {
+                            let ep_guard = shared_endpoint.read().await;
+                            if let Some(ref endpoint) = *ep_guard {
+                                match endpoint.connect(&endpoint_id).await {
+                                    Ok(mut conn) => {
+                                        let permissions = Permissions {
+                                            push: allow_push,
+                                            pull: allow_pull,
+                                            browse: allow_browse,
+                                            status: true, // Always allow status
+                                        };
+                                        let msg = ControlMessage::PermissionsUpdate { permissions };
+                                        if let Err(e) = conn.send(&msg).await {
+                                            warn!("Failed to send permissions update to peer: {}", e);
+                                        } else {
+                                            info!("Sent permissions update to peer {}", endpoint_id);
+                                        }
+                                        let _ = conn.close().await;
+                                    }
+                                    Err(e) => {
+                                        // Peer may be offline - that's ok, they'll get updated permissions
+                                        // next time we connect or they connect to us
+                                        debug!("Could not connect to peer to send permissions update: {}", e);
+                                    }
+                                }
+                            }
                         }
                     });
                 });
 
-                // Update UI model in-place immediately (don't replace entire model)
-                if let Some(window) = window_weak_ui.upgrade() {
-                    let peers_model = window.global::<AppLogic>().get_peers();
-                    for i in 0..peers_model.row_count() {
-                        if let Some(mut peer) = peers_model.row_data(i) {
-                            if peer.id == id {
-                                peer.allow_push = allow_push;
-                                peer.allow_pull = allow_pull;
-                                peer.allow_browse = allow_browse;
-                                peers_model.set_row_data(i, peer);
-                                break;
-                            }
+                // Update UI model - remove and re-insert to force re-render
+                // (Slint's for-loop doesn't re-render on set_row_data alone)
+                for i in 0..peers_model.row_count() {
+                    if let Some(peer) = peers_model.row_data(i) {
+                        if peer.id.to_string() == id_str {
+                            let updated_peer = PeerItem {
+                                allow_push,
+                                allow_pull,
+                                allow_browse,
+                                ..peer
+                            };
+                            // Remove and re-insert at same position to trigger re-render
+                            peers_model.remove(i);
+                            peers_model.insert(i, updated_peer);
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        // Set peer expanded state callback
+        window.global::<AppLogic>().on_set_peer_expanded({
+            let peers_model = self.peers_model.clone();
+
+            move |id, expanded| {
+                let id_str = id.to_string();
+                // Update UI model - remove and re-insert to force re-render
+                for i in 0..peers_model.row_count() {
+                    if let Some(peer) = peers_model.row_data(i) {
+                        if peer.id.to_string() == id_str {
+                            let updated_peer = PeerItem {
+                                expanded,
+                                ..peer
+                            };
+                            peers_model.remove(i);
+                            peers_model.insert(i, updated_peer);
+                            break;
                         }
                     }
                 }
@@ -3184,6 +3299,7 @@ fn trusted_peer_to_item(p: &TrustedPeer) -> PeerItem {
         last_seen: SharedString::from(last_seen),
         relay_url: SharedString::from(p.relay_url.clone().unwrap_or_default()),
         added_at: SharedString::from(added_at),
+        expanded: false, // UI state: collapsed by default
         // What they allow us to do
         can_push: p.their_permissions.push,
         can_pull: p.their_permissions.pull,
@@ -3196,15 +3312,35 @@ fn trusted_peer_to_item(p: &TrustedPeer) -> PeerItem {
 }
 
 /// Update the peers UI from the peer store.
+/// Preserves UI state (like expanded) from the existing model.
 async fn update_peers_ui(window_weak: &Weak<MainWindow>, peer_store: &Arc<RwLock<PeerStore>>) {
     let peers = peer_store.read().await;
-    let items: Vec<PeerItem> = peers.list().iter().map(trusted_peer_to_item).collect();
+    let new_items: Vec<PeerItem> = peers.list().iter().map(trusted_peer_to_item).collect();
     drop(peers);
 
     let window_weak = window_weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(window) = window_weak.upgrade() {
-            window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));
+            let logic = window.global::<AppLogic>();
+            let current_model = logic.get_peers();
+
+            // Build a map of current expanded states by peer ID
+            let mut expanded_states: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+            for i in 0..current_model.row_count() {
+                if let Some(peer) = current_model.row_data(i) {
+                    expanded_states.insert(peer.id.to_string(), peer.expanded);
+                }
+            }
+
+            // Apply preserved expanded states to new items
+            let items_with_state: Vec<PeerItem> = new_items.into_iter().map(|mut item| {
+                if let Some(&expanded) = expanded_states.get(&item.id.to_string()) {
+                    item.expanded = expanded;
+                }
+                item
+            }).collect();
+
+            logic.set_peers(ModelRc::new(VecModel::from(items_with_state)));
         }
     });
 }

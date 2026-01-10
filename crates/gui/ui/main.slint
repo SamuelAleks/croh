@@ -265,6 +265,7 @@ export struct PeerItem {
     last-seen: string,
     relay-url: string,       // relay URL for connectivity
     added-at: string,        // when peer was added
+    expanded: bool,          // UI state: whether details panel is expanded
     // Permissions THEY grant to US (what we can do to them)
     can-push: bool,          // we can push files to this peer
     can-pull: bool,          // we can pull files from this peer
@@ -316,6 +317,8 @@ export global AppLogic {
     callback pull-from-peer(string); // peer id - open browse dialog for peer
     // peer id, allow-push, allow-pull, allow-browse
     callback update-peer-permissions(string, bool, bool, bool);
+    // peer id, expanded state
+    callback set-peer-expanded(string, bool);
 
     // File browser callbacks (for remote peer browsing)
     callback browse-peer(string);              // peer id - start browsing
@@ -1028,20 +1031,20 @@ component ReceivePanel inherits Rectangle {
 
 component PeerCard inherits Rectangle {
     in property <PeerItem> peer;
-    in-out property <bool> expanded: false;
     callback remove-clicked();
     callback push-clicked();
     callback browse-clicked();
     callback permissions-changed(bool, bool, bool); // allow-push, allow-pull, allow-browse
+    callback expanded-changed(bool); // notify when expanded state changes
 
     private property <length> header-height: 56px;
     private property <length> details-height: 72px;
 
-    height: expanded ? header-height + details-height : header-height;
+    height: peer.expanded ? header-height + details-height : header-height;
     background: Theme.bg-card;
     border-radius: Theme.radius-sm;
     border-width: 1px;
-    border-color: expanded ? Theme.accent : Theme.border;
+    border-color: peer.expanded ? Theme.accent : Theme.border;
 
     animate height { duration: 150ms; easing: ease-out; }
 
@@ -1105,9 +1108,9 @@ component PeerCard inherits Rectangle {
 
             // Expand/collapse button
             IconBtn {
-                icon: expanded ? "▲" : "▼";
+                icon: peer.expanded ? "▲" : "▼";
                 icon-color: Theme.text-muted;
-                clicked => { expanded = !expanded; }
+                clicked => { root.expanded-changed(!peer.expanded); }
             }
 
             // Remove button
@@ -1119,7 +1122,7 @@ component PeerCard inherits Rectangle {
         }
 
         // Expanded details (only visible when expanded)
-        if expanded : Rectangle {
+        if peer.expanded : Rectangle {
             background: Theme.bg-hover;
             border-radius: Theme.radius-sm;
             height: root.details-height;
@@ -1172,19 +1175,19 @@ component PeerCard inherits Rectangle {
                             height: 18px;
 
                             Text {
-                                text: peer.can-push ? "✓ Push" : "✗ Push";
+                                text: "Push";
                                 font-size: 11px;
                                 color: peer.can-push ? Theme.success : Theme.text-muted;
                                 vertical-alignment: center;
                             }
                             Text {
-                                text: peer.can-pull ? "✓ Pull" : "✗ Pull";
+                                text: "Pull";
                                 font-size: 11px;
                                 color: peer.can-pull ? Theme.success : Theme.text-muted;
                                 vertical-alignment: center;
                             }
                             Text {
-                                text: peer.can-browse ? "✓ Browse" : "✗ Browse";
+                                text: "Browse";
                                 font-size: 11px;
                                 color: peer.can-browse ? Theme.success : Theme.text-muted;
                                 vertical-alignment: center;
@@ -1453,6 +1456,9 @@ component PeersPanel inherits Rectangle {
                         browse-clicked => { AppLogic.browse-peer(peer.id); }
                         permissions-changed(push, pull, browse) => {
                             AppLogic.update-peer-permissions(peer.id, push, pull, browse);
+                        }
+                        expanded-changed(expanded) => {
+                            AppLogic.set-peer-expanded(peer.id, expanded);
                         }
                     }
                 }

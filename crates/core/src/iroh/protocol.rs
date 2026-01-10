@@ -70,6 +70,13 @@ pub enum ControlMessage {
         reason: String,
     },
 
+    /// Permissions update notification.
+    /// Sent when we change the permissions we grant to a peer.
+    PermissionsUpdate {
+        /// Updated permissions we grant to this peer
+        permissions: Permissions,
+    },
+
     /// Ping for keepalive.
     Ping {
         /// Unix timestamp
