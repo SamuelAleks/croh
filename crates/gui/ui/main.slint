@@ -263,8 +263,16 @@ export struct PeerItem {
     endpoint-id: string,
     status: string,          // "online", "offline", "connecting"
     last-seen: string,
-    can-push: bool,          // permission to push files to this peer
-    can-pull: bool,          // permission to pull files from this peer
+    relay-url: string,       // relay URL for connectivity
+    added-at: string,        // when peer was added
+    // Permissions THEY grant to US (what we can do to them)
+    can-push: bool,          // we can push files to this peer
+    can-pull: bool,          // we can pull files from this peer
+    can-browse: bool,        // we can browse this peer's filesystem
+    // Permissions WE grant to THEM (what they can do to us)
+    allow-push: bool,        // they can push files to us
+    allow-pull: bool,        // they can pull files from us
+    allow-browse: bool,      // they can browse our filesystem
 }
 
 export struct BrowseEntry {
@@ -306,6 +314,8 @@ export global AppLogic {
     callback remove-peer(string);  // peer id
     callback push-to-peer(string); // peer id - push selected files to peer
     callback pull-from-peer(string); // peer id - open browse dialog for peer
+    // peer id, allow-push, allow-pull, allow-browse
+    callback update-peer-permissions(string, bool, bool, bool);
 
     // File browser callbacks (for remote peer browsing)
     callback browse-peer(string);              // peer id - start browsing
@@ -1018,76 +1028,295 @@ component ReceivePanel inherits Rectangle {
 
 component PeerCard inherits Rectangle {
     in property <PeerItem> peer;
+    in-out property <bool> expanded: false;
     callback remove-clicked();
     callback push-clicked();
     callback browse-clicked();
+    callback permissions-changed(bool, bool, bool); // allow-push, allow-pull, allow-browse
 
-    height: 56px;
+    private property <length> header-height: 56px;
+    private property <length> details-height: 72px;
+
+    height: expanded ? header-height + details-height : header-height;
     background: Theme.bg-card;
     border-radius: Theme.radius-sm;
     border-width: 1px;
-    border-color: Theme.border;
+    border-color: expanded ? Theme.accent : Theme.border;
 
-    HorizontalLayout {
-        padding: Theme.spacing-sm;
-        spacing: Theme.spacing-sm;
+    animate height { duration: 150ms; easing: ease-out; }
 
-        // Status indicator
-        Rectangle {
-            width: 8px;
-            height: 8px;
-            y: (parent.height - self.height) / 2;
-            border-radius: 4px;
-            background: peer.status == "online" ? Theme.success :
-                       peer.status == "connecting" ? Theme.warning : Theme.text-muted;
-        }
+    VerticalLayout {
+        // Header row (always visible)
+        HorizontalLayout {
+            height: root.header-height;
+            padding: Theme.spacing-sm;
+            spacing: Theme.spacing-sm;
 
-        // Peer info
-        VerticalLayout {
-            horizontal-stretch: 1;
-            spacing: 2px;
-
-            Text {
-                text: peer.name;
-                font-size: 13px;
-                color: Theme.text;
-                overflow: elide;
+            // Status indicator
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                y: (parent.height - self.height) / 2;
+                border-radius: 4px;
+                background: peer.status == "online" ? Theme.success :
+                           peer.status == "connecting" ? Theme.warning : Theme.text-muted;
             }
 
+            // Peer info
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 2px;
+
+                Text {
+                    text: peer.name;
+                    font-size: 13px;
+                    color: Theme.text;
+                    overflow: elide;
+                }
+
+                Text {
+                    text: peer.endpoint-id;
+                    font-size: 11px;
+                    font-family: "monospace";
+                    color: Theme.text-dim;
+                    overflow: elide;
+                }
+            }
+
+            // Last seen
             Text {
-                text: peer.endpoint-id;
+                text: peer.last-seen;
                 font-size: 11px;
-                font-family: "monospace";
-                color: Theme.text-dim;
-                overflow: elide;
+                color: Theme.text-muted;
+                vertical-alignment: center;
+            }
+
+            // Browse button (for pulling files from peer)
+            if peer.can-browse : CompactButton {
+                label: "Browse";
+                clicked => { root.browse-clicked(); }
+            }
+
+            // Push button (only show if files selected and peer has permission)
+            if peer.can-push && AppLogic.selected-files.length > 0 : CompactButton {
+                label: "Push";
+                clicked => { root.push-clicked(); }
+            }
+
+            // Expand/collapse button
+            IconBtn {
+                icon: expanded ? "▲" : "▼";
+                icon-color: Theme.text-muted;
+                clicked => { expanded = !expanded; }
+            }
+
+            // Remove button
+            IconBtn {
+                icon: "✕";
+                icon-color: Theme.text-muted;
+                clicked => { root.remove-clicked(); }
             }
         }
 
-        // Last seen
-        Text {
-            text: peer.last-seen;
-            font-size: 11px;
-            color: Theme.text-muted;
-            vertical-alignment: center;
-        }
+        // Expanded details (only visible when expanded)
+        if expanded : Rectangle {
+            background: Theme.bg-hover;
+            border-radius: Theme.radius-sm;
+            height: root.details-height;
 
-        // Browse button (for pulling files from peer)
-        if peer.can-pull : CompactButton {
-            label: "Browse";
-            clicked => { root.browse-clicked(); }
-        }
+            VerticalLayout {
+                padding: Theme.spacing-sm;
+                spacing: Theme.spacing-xs;
 
-        // Push button (only show if files selected and peer has permission)
-        if peer.can-push && AppLogic.selected-files.length > 0 : CompactButton {
-            label: "Push";
-            clicked => { root.push-clicked(); }
-        }
+                // Connection info row
+                HorizontalLayout {
+                    spacing: Theme.spacing-md;
+                    height: 16px;
 
-        // Remove button
-        IconBtn {
-            icon: "✕";
-            icon-color: Theme.text-muted;
-            clicked => { root.remove-clicked(); }
+                    Text {
+                        text: "Added: " + peer.added-at;
+                        font-size: 11px;
+                        color: Theme.text-dim;
+                        vertical-alignment: center;
+                    }
+
+                    Rectangle { horizontal-stretch: 1; }
+
+                    Text {
+                        text: "Relay: " + (peer.relay-url == "" ? "direct" : peer.relay-url);
+                        font-size: 11px;
+                        color: Theme.text-dim;
+                        overflow: elide;
+                        vertical-alignment: center;
+                        horizontal-alignment: right;
+                    }
+                }
+
+                // Permissions section
+                HorizontalLayout {
+                    spacing: Theme.spacing-lg;
+                    height: 36px;
+
+                    // What we can do (their permissions to us)
+                    VerticalLayout {
+                        spacing: 2px;
+
+                        Text {
+                            text: "They allow us:";
+                            font-size: 11px;
+                            color: Theme.text-muted;
+                        }
+
+                        HorizontalLayout {
+                            spacing: Theme.spacing-sm;
+                            height: 18px;
+
+                            Text {
+                                text: peer.can-push ? "✓ Push" : "✗ Push";
+                                font-size: 11px;
+                                color: peer.can-push ? Theme.success : Theme.text-muted;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: peer.can-pull ? "✓ Pull" : "✗ Pull";
+                                font-size: 11px;
+                                color: peer.can-pull ? Theme.success : Theme.text-muted;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: peer.can-browse ? "✓ Browse" : "✗ Browse";
+                                font-size: 11px;
+                                color: peer.can-browse ? Theme.success : Theme.text-muted;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    Rectangle { horizontal-stretch: 1; }
+
+                    // What they can do (our permissions to them) - right aligned
+                    VerticalLayout {
+                        spacing: 2px;
+
+                        Text {
+                            text: "We allow them:";
+                            font-size: 11px;
+                            color: Theme.text-muted;
+                            horizontal-alignment: right;
+                        }
+
+                        HorizontalLayout {
+                            spacing: Theme.spacing-sm;
+                            height: 18px;
+
+                            // Push toggle
+                            HorizontalLayout {
+                                spacing: 4px;
+                                height: 18px;
+                                alignment: center;
+
+                                Rectangle {
+                                    width: 32px;
+                                    height: 18px;
+                                    border-radius: 9px;
+                                    background: peer.allow-push ? Theme.accent : Theme.bg-input;
+                                    TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            root.permissions-changed(!peer.allow-push, peer.allow-pull, peer.allow-browse);
+                                        }
+                                    }
+                                    Rectangle {
+                                        x: peer.allow-push ? parent.width - self.width - 2px : 2px;
+                                        y: 2px;
+                                        width: 14px;
+                                        height: 14px;
+                                        border-radius: 7px;
+                                        background: #ffffff;
+                                        animate x { duration: 100ms; }
+                                    }
+                                }
+                                Text {
+                                    text: "Push";
+                                    font-size: 11px;
+                                    color: Theme.text-dim;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            // Pull toggle
+                            HorizontalLayout {
+                                spacing: 4px;
+                                height: 18px;
+                                alignment: center;
+
+                                Rectangle {
+                                    width: 32px;
+                                    height: 18px;
+                                    border-radius: 9px;
+                                    background: peer.allow-pull ? Theme.accent : Theme.bg-input;
+                                    TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            root.permissions-changed(peer.allow-push, !peer.allow-pull, peer.allow-browse);
+                                        }
+                                    }
+                                    Rectangle {
+                                        x: peer.allow-pull ? parent.width - self.width - 2px : 2px;
+                                        y: 2px;
+                                        width: 14px;
+                                        height: 14px;
+                                        border-radius: 7px;
+                                        background: #ffffff;
+                                        animate x { duration: 100ms; }
+                                    }
+                                }
+                                Text {
+                                    text: "Pull";
+                                    font-size: 11px;
+                                    color: Theme.text-dim;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            // Browse toggle
+                            HorizontalLayout {
+                                spacing: 4px;
+                                height: 18px;
+                                alignment: center;
+
+                                Rectangle {
+                                    width: 32px;
+                                    height: 18px;
+                                    border-radius: 9px;
+                                    background: peer.allow-browse ? Theme.accent : Theme.bg-input;
+                                    TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            root.permissions-changed(peer.allow-push, peer.allow-pull, !peer.allow-browse);
+                                        }
+                                    }
+                                    Rectangle {
+                                        x: peer.allow-browse ? parent.width - self.width - 2px : 2px;
+                                        y: 2px;
+                                        width: 14px;
+                                        height: 14px;
+                                        border-radius: 7px;
+                                        background: #ffffff;
+                                        animate x { duration: 100ms; }
+                                    }
+                                }
+                                Text {
+                                    text: "Browse";
+                                    font-size: 11px;
+                                    color: Theme.text-dim;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1222,6 +1451,9 @@ component PeersPanel inherits Rectangle {
                         remove-clicked => { AppLogic.remove-peer(peer.id); }
                         push-clicked => { AppLogic.push-to-peer(peer.id); }
                         browse-clicked => { AppLogic.browse-peer(peer.id); }
+                        permissions-changed(push, pull, browse) => {
+                            AppLogic.update-peer-permissions(peer.id, push, pull, browse);
+                        }
                     }
                 }
             }

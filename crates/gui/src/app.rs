@@ -7,7 +7,7 @@ use croh_core::{
     Transfer, TransferId, TransferEvent, TransferManager, TransferStatus, TransferType,
     TrustedPeer, TrustBundle, push_files, pull_files, handle_incoming_push, handle_incoming_pull, handle_browse_request, browse_remote, default_browsable_paths,
 };
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -687,39 +687,11 @@ impl App {
 
                 // Load peers and update UI
                 let peers = peer_store.read().await;
-                let peer_items: Vec<_> = peers.list().iter().map(|p| {
-                    let last_seen = p.last_seen
-                        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                        .unwrap_or_else(|| "Never".to_string());
-                    (
-                        p.id.clone(),
-                        p.name.clone(),
-                        if p.endpoint_id.len() > 16 {
-                            format!("{}...{}", &p.endpoint_id[..8], &p.endpoint_id[p.endpoint_id.len()-8..])
-                        } else {
-                            p.endpoint_id.clone()
-                        },
-                        "offline".to_string(), // Status - will be updated when we add presence
-                        last_seen,
-                        p.their_permissions.push,
-                        p.their_permissions.pull,
-                    )
-                }).collect();
+                let items: Vec<PeerItem> = peers.list().iter().map(trusted_peer_to_item).collect();
                 drop(peers);
 
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(window) = window_weak.upgrade() {
-                        let items: Vec<PeerItem> = peer_items.into_iter()
-                            .map(|(id, name, endpoint_id, status, last_seen, can_push, can_pull)| PeerItem {
-                                id: SharedString::from(id),
-                                name: SharedString::from(name),
-                                endpoint_id: SharedString::from(endpoint_id),
-                                status: SharedString::from(status),
-                                last_seen: SharedString::from(last_seen),
-                                can_push,
-                                can_pull,
-                            })
-                            .collect();
                         window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));
                     }
                 });
@@ -2162,40 +2134,12 @@ impl App {
                         }
 
                         // Update UI
-                        let peer_items: Vec<_> = store.list().iter().map(|p| {
-                            let last_seen = p.last_seen
-                                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                                .unwrap_or_else(|| "Never".to_string());
-                            (
-                                p.id.clone(),
-                                p.name.clone(),
-                                if p.endpoint_id.len() > 16 {
-                                    format!("{}...{}", &p.endpoint_id[..8], &p.endpoint_id[p.endpoint_id.len()-8..])
-                                } else {
-                                    p.endpoint_id.clone()
-                                },
-                                "offline".to_string(),
-                                last_seen,
-                                p.their_permissions.push,
-                                p.their_permissions.pull,
-                            )
-                        }).collect();
+                        let items: Vec<PeerItem> = store.list().iter().map(trusted_peer_to_item).collect();
                         drop(store);
 
                         let window_weak_ui = window_weak.clone();
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(window) = window_weak_ui.upgrade() {
-                                let items: Vec<PeerItem> = peer_items.into_iter()
-                                    .map(|(id, name, endpoint_id, status, last_seen, can_push, can_pull)| PeerItem {
-                                        id: SharedString::from(id),
-                                        name: SharedString::from(name),
-                                        endpoint_id: SharedString::from(endpoint_id),
-                                        status: SharedString::from(status),
-                                        last_seen: SharedString::from(last_seen),
-                                        can_push,
-                                        can_pull,
-                                    })
-                                    .collect();
                                 window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));
                             }
                         });
@@ -2203,6 +2147,57 @@ impl App {
                         update_status(&window_weak, "Peer removed");
                     });
                 });
+            }
+        });
+
+        // Update peer permissions callback
+        window.global::<AppLogic>().on_update_peer_permissions({
+            let window_weak = window_weak.clone();
+            let peer_store = peer_store.clone();
+
+            move |id, allow_push, allow_pull, allow_browse| {
+                let id_str = id.to_string();
+                info!("Updating permissions for peer {}: push={}, pull={}, browse={}",
+                      id_str, allow_push, allow_pull, allow_browse);
+                let window_weak_thread = window_weak.clone();
+                let window_weak_ui = window_weak.clone();
+                let peer_store = peer_store.clone();
+
+                // Spawn thread to update persistent store (non-blocking)
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        let mut store = peer_store.write().await;
+                        if let Err(e) = store.update(&id_str, |peer| {
+                            peer.permissions_granted.push = allow_push;
+                            peer.permissions_granted.pull = allow_pull;
+                            peer.permissions_granted.browse = allow_browse;
+                        }) {
+                            error!("Failed to update peer permissions: {}", e);
+                            update_status(&window_weak_thread, &format!("Error: {}", e));
+                        }
+                    });
+                });
+
+                // Update UI model in-place immediately (don't replace entire model)
+                if let Some(window) = window_weak_ui.upgrade() {
+                    let peers_model = window.global::<AppLogic>().get_peers();
+                    for i in 0..peers_model.row_count() {
+                        if let Some(mut peer) = peers_model.row_data(i) {
+                            if peer.id == id {
+                                peer.allow_push = allow_push;
+                                peer.allow_pull = allow_pull;
+                                peer.allow_browse = allow_browse;
+                                peers_model.set_row_data(i, peer);
+                                break;
+                            }
+                        }
+                    }
+                }
             }
         });
 
@@ -3140,40 +3135,12 @@ async fn check_and_handle_trust_bundle(
                         info!("Added new peer: {}", result.peer.name);
                     }
                     // Update peers UI
-                    let peer_items: Vec<_> = store.list().iter().map(|p| {
-                        let last_seen = p.last_seen
-                            .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                            .unwrap_or_else(|| "Never".to_string());
-                        (
-                            p.id.clone(),
-                            p.name.clone(),
-                            if p.endpoint_id.len() > 16 {
-                                format!("{}...{}", &p.endpoint_id[..8], &p.endpoint_id[p.endpoint_id.len()-8..])
-                            } else {
-                                p.endpoint_id.clone()
-                            },
-                            "offline".to_string(),
-                            last_seen,
-                            p.their_permissions.push,
-                            p.their_permissions.pull,
-                        )
-                    }).collect();
+                    let items: Vec<PeerItem> = store.list().iter().map(trusted_peer_to_item).collect();
                     drop(store);
 
                     let window_weak_peers = window_weak.clone();
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(window) = window_weak_peers.upgrade() {
-                            let items: Vec<PeerItem> = peer_items.into_iter()
-                                .map(|(id, name, endpoint_id, status, last_seen, can_push, can_pull)| PeerItem {
-                                    id: SharedString::from(id),
-                                    name: SharedString::from(name),
-                                    endpoint_id: SharedString::from(endpoint_id),
-                                    status: SharedString::from(status),
-                                    last_seen: SharedString::from(last_seen),
-                                    can_push,
-                                    can_pull,
-                                })
-                                .collect();
                             window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));
                         }
                     });
@@ -3197,43 +3164,46 @@ async fn check_and_handle_trust_bundle(
     }
 }
 
+/// Convert a TrustedPeer to PeerItem for UI display.
+fn trusted_peer_to_item(p: &TrustedPeer) -> PeerItem {
+    let last_seen = p.last_seen
+        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| "Never".to_string());
+    let added_at = p.added_at.format("%Y-%m-%d").to_string();
+    let endpoint_display = if p.endpoint_id.len() > 16 {
+        format!("{}...{}", &p.endpoint_id[..8], &p.endpoint_id[p.endpoint_id.len()-8..])
+    } else {
+        p.endpoint_id.clone()
+    };
+
+    PeerItem {
+        id: SharedString::from(p.id.clone()),
+        name: SharedString::from(p.name.clone()),
+        endpoint_id: SharedString::from(endpoint_display),
+        status: SharedString::from("offline"), // TODO: real presence detection
+        last_seen: SharedString::from(last_seen),
+        relay_url: SharedString::from(p.relay_url.clone().unwrap_or_default()),
+        added_at: SharedString::from(added_at),
+        // What they allow us to do
+        can_push: p.their_permissions.push,
+        can_pull: p.their_permissions.pull,
+        can_browse: p.their_permissions.browse,
+        // What we allow them to do
+        allow_push: p.permissions_granted.push,
+        allow_pull: p.permissions_granted.pull,
+        allow_browse: p.permissions_granted.browse,
+    }
+}
+
 /// Update the peers UI from the peer store.
 async fn update_peers_ui(window_weak: &Weak<MainWindow>, peer_store: &Arc<RwLock<PeerStore>>) {
     let peers = peer_store.read().await;
-    let peer_items: Vec<_> = peers.list().iter().map(|p| {
-        let last_seen = p.last_seen
-            .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-            .unwrap_or_else(|| "Never".to_string());
-        (
-            p.id.clone(),
-            p.name.clone(),
-            if p.endpoint_id.len() > 16 {
-                format!("{}...{}", &p.endpoint_id[..8], &p.endpoint_id[p.endpoint_id.len()-8..])
-            } else {
-                p.endpoint_id.clone()
-            },
-            "offline".to_string(),
-            last_seen,
-            p.their_permissions.push,
-            p.their_permissions.pull,
-        )
-    }).collect();
+    let items: Vec<PeerItem> = peers.list().iter().map(trusted_peer_to_item).collect();
     drop(peers);
 
     let window_weak = window_weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(window) = window_weak.upgrade() {
-            let items: Vec<PeerItem> = peer_items.into_iter()
-                .map(|(id, name, endpoint_id, status, last_seen, can_push, can_pull)| PeerItem {
-                    id: SharedString::from(id),
-                    name: SharedString::from(name),
-                    endpoint_id: SharedString::from(endpoint_id),
-                    status: SharedString::from(status),
-                    last_seen: SharedString::from(last_seen),
-                    can_push,
-                    can_pull,
-                })
-                .collect();
             window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));
         }
     });

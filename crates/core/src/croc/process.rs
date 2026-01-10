@@ -134,6 +134,9 @@ impl CrocProcess {
             cmd.stdin(Stdio::null());
         }
 
+        // Kill croc process when dropped (prevents orphan processes)
+        cmd.kill_on_drop(true);
+
         info!("Spawning croc: {:?}", cmd);
 
         let mut child = cmd.spawn().map_err(|e| {

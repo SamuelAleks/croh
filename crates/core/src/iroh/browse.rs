@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
 /// Default allowed paths for browsing if none are configured.
-/// Returns the user's home directory and common locations.
+/// Returns common user directories that can be browsed.
 pub fn default_browsable_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
@@ -37,6 +37,21 @@ pub fn default_browsable_paths() -> Vec<PathBuf> {
                     paths.push(document_dir);
                 }
             }
+        }
+    }
+
+    paths
+}
+
+/// Returns paths that are allowed for navigation (includes parent directories).
+/// This allows navigating up from allowed paths to their common parent (home dir).
+pub fn navigable_paths(allowed_paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = allowed_paths.to_vec();
+
+    // Add the home directory as navigable (allows going up from Downloads/Documents)
+    if let Some(home) = dirs::home_dir() {
+        if !paths.contains(&home) {
+            paths.push(home);
         }
     }
 
@@ -108,8 +123,9 @@ pub fn browse_directory(
             Ok(("/".to_string(), entries))
         }
         Some(dir_path) => {
-            // Validate and list the directory
-            let validated = validate_path(dir_path, allowed_paths)?;
+            // Use navigable_paths for validation (includes home dir for navigation)
+            let nav_paths = navigable_paths(allowed_paths);
+            let validated = validate_path(dir_path, &nav_paths)?;
 
             if !validated.is_dir() {
                 return Err(Error::Browse(format!(

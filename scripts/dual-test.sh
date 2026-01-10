@@ -8,6 +8,7 @@
 #   ./scripts/dual-test.sh          # Build and run both instances
 #   ./scripts/dual-test.sh --release # Build release and run both instances
 #   ./scripts/dual-test.sh --no-build # Skip build, just run
+#   ./scripts/dual-test.sh --clean    # Delete configs before launching (fresh start)
 
 set -e
 
@@ -16,6 +17,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 BUILD_MODE="debug"
 SKIP_BUILD=false
+CLEAN_CONFIGS=false
 
 for arg in "$@"; do
     case $arg in
@@ -25,14 +27,18 @@ for arg in "$@"; do
         --no-build)
             SKIP_BUILD=true
             ;;
+        --clean)
+            CLEAN_CONFIGS=true
+            ;;
         --help|-h)
-            echo "Usage: $0 [--release] [--no-build]"
+            echo "Usage: $0 [--release] [--no-build] [--clean]"
             echo ""
             echo "Launch two Croh instances for testing Iroh peer-to-peer functionality."
             echo ""
             echo "Options:"
             echo "  --release   Build in release mode"
             echo "  --no-build  Skip cargo build"
+            echo "  --clean     Delete all config/data files before launching (fresh start)"
             echo ""
             echo "Instance directories:"
             echo "  Alice: Default (~/.config/croh, ~/.local/share/croh)"
@@ -68,8 +74,21 @@ if [ ! -f "$BINARY" ]; then
     exit 1
 fi
 
-# Create Bob's directories
+# Set up directories
 BOB_DIR="/tmp/croh-bob"
+ALICE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/croh"
+ALICE_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/croh"
+
+# Clean configs if requested
+if [ "$CLEAN_CONFIGS" = true ]; then
+    echo "Cleaning config/data directories..."
+    rm -rf "$ALICE_CONFIG_DIR" "$ALICE_DATA_DIR" "$BOB_DIR"
+    echo "  Removed: $ALICE_CONFIG_DIR"
+    echo "  Removed: $ALICE_DATA_DIR"
+    echo "  Removed: $BOB_DIR"
+fi
+
+# Create Bob's directories
 mkdir -p "$BOB_DIR/config" "$BOB_DIR/data" "$BOB_DIR/downloads"
 
 echo ""
