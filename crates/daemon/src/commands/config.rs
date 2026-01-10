@@ -1,7 +1,7 @@
 //! Config command - view or modify configuration.
 
 use anyhow::Result;
-use croc_gui_core::Config;
+use croh_core::Config;
 
 pub async fn execute(key: Option<String>, value: Option<String>) -> Result<()> {
     let mut config = Config::load_with_env()?;

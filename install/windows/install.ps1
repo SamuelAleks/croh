@@ -1,14 +1,14 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Croc GUI Installer for Windows
+    Croh Installer for Windows
 
 .DESCRIPTION
-    Installs croc-gui and croc-daemon to the system.
+    Installs croh and croh-daemon to the system.
     Optionally installs as a Windows service using NSSM.
 
 .PARAMETER InstallService
-    If specified, installs croc-daemon as a Windows service.
+    If specified, installs croh-daemon as a Windows service.
 #>
 
 param(
@@ -18,12 +18,12 @@ param(
 $ErrorActionPreference = "Stop"
 
 # Configuration
-$InstallDir = "$env:LOCALAPPDATA\croc-gui"
+$InstallDir = "$env:LOCALAPPDATA\croh"
 $BinDir = "$InstallDir\bin"
 $DataDir = "$InstallDir\data"
-$ConfigDir = "$env:APPDATA\croc-gui"
+$ConfigDir = "$env:APPDATA\croh"
 
-Write-Host "Croc GUI Installer for Windows" -ForegroundColor Green
+Write-Host "Croh Installer for Windows" -ForegroundColor Green
 Write-Host "================================" -ForegroundColor Green
 Write-Host ""
 
@@ -53,14 +53,14 @@ $RepoRoot = Split-Path -Parent (Split-Path -Parent $ScriptDir)
 $GuiBin = $null
 $DaemonBin = $null
 
-if (Test-Path "$RepoRoot\target\release\croc-gui.exe") {
+if (Test-Path "$RepoRoot\target\release\croh.exe") {
     Write-Host "Using pre-built binaries from target\release\"
-    $GuiBin = "$RepoRoot\target\release\croc-gui.exe"
-    $DaemonBin = "$RepoRoot\target\release\croc-daemon.exe"
-} elseif (Test-Path ".\croc-gui.exe") {
+    $GuiBin = "$RepoRoot\target\release\croh.exe"
+    $DaemonBin = "$RepoRoot\target\release\croh-daemon.exe"
+} elseif (Test-Path ".\croh.exe") {
     Write-Host "Using binaries from current directory"
-    $GuiBin = ".\croc-gui.exe"
-    $DaemonBin = ".\croc-daemon.exe"
+    $GuiBin = ".\croh.exe"
+    $DaemonBin = ".\croh-daemon.exe"
 } else {
     Write-Host "Building from source..."
     $cargo = Get-Command cargo -ErrorAction SilentlyContinue
@@ -69,13 +69,13 @@ if (Test-Path "$RepoRoot\target\release\croc-gui.exe") {
         Write-Host "Visit: https://rustup.rs/"
         exit 1
     }
-    
+
     Push-Location $RepoRoot
     cargo build --release
     Pop-Location
-    
-    $GuiBin = "$RepoRoot\target\release\croc-gui.exe"
-    $DaemonBin = "$RepoRoot\target\release\croc-daemon.exe"
+
+    $GuiBin = "$RepoRoot\target\release\croh.exe"
+    $DaemonBin = "$RepoRoot\target\release\croh-daemon.exe"
 }
 
 # Create directories
@@ -87,8 +87,8 @@ New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
 
 # Copy binaries
 Write-Host "Installing binaries to $BinDir..."
-Copy-Item $GuiBin "$BinDir\croc-gui.exe" -Force
-Copy-Item $DaemonBin "$BinDir\croc-daemon.exe" -Force
+Copy-Item $GuiBin "$BinDir\croh.exe" -Force
+Copy-Item $DaemonBin "$BinDir\croh-daemon.exe" -Force
 
 # Add to PATH
 Write-Host "Adding to PATH..."
@@ -105,22 +105,22 @@ if ($currentPath -notlike "*$BinDir*") {
 Write-Host "Creating Start Menu shortcut..."
 $StartMenu = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs"
 $WScriptShell = New-Object -ComObject WScript.Shell
-$Shortcut = $WScriptShell.CreateShortcut("$StartMenu\Croc GUI.lnk")
-$Shortcut.TargetPath = "$BinDir\croc-gui.exe"
+$Shortcut = $WScriptShell.CreateShortcut("$StartMenu\Croh.lnk")
+$Shortcut.TargetPath = "$BinDir\croh.exe"
 $Shortcut.WorkingDirectory = $BinDir
-$Shortcut.Description = "Croc GUI - File Transfer Application"
+$Shortcut.Description = "Croh - File Transfer Application"
 $Shortcut.Save()
 
 # Install as service (optional)
 if ($InstallService) {
     Write-Host ""
     Write-Host "Installing as Windows service..."
-    
+
     # Check for NSSM
     $nssm = Get-Command nssm -ErrorAction SilentlyContinue
     if (-not $nssm) {
         Write-Host "NSSM not found. Installing via Scoop..." -ForegroundColor Yellow
-        
+
         $scoop = Get-Command scoop -ErrorAction SilentlyContinue
         if (-not $scoop) {
             Write-Host "Please install NSSM manually: https://nssm.cc/" -ForegroundColor Red
@@ -130,24 +130,24 @@ if ($InstallService) {
             $nssm = Get-Command nssm -ErrorAction SilentlyContinue
         }
     }
-    
+
     if ($nssm) {
         # Remove existing service if present
-        & nssm stop croc-daemon 2>$null
-        & nssm remove croc-daemon confirm 2>$null
-        
+        & nssm stop croh-daemon 2>$null
+        & nssm remove croh-daemon confirm 2>$null
+
         # Install service
-        & nssm install croc-daemon "$BinDir\croc-daemon.exe" run
-        & nssm set croc-daemon AppDirectory $DataDir
-        & nssm set croc-daemon DisplayName "Croc GUI Daemon"
-        & nssm set croc-daemon Description "Headless file transfer daemon for Croc GUI"
-        & nssm set croc-daemon Start SERVICE_AUTO_START
-        & nssm set croc-daemon AppStdout "$DataDir\daemon.log"
-        & nssm set croc-daemon AppStderr "$DataDir\daemon.log"
-        & nssm set croc-daemon AppRotateFiles 1
-        & nssm set croc-daemon AppRotateBytes 1048576
-        
-        Write-Host "Service installed. Start with: nssm start croc-daemon"
+        & nssm install croh-daemon "$BinDir\croh-daemon.exe" run
+        & nssm set croh-daemon AppDirectory $DataDir
+        & nssm set croh-daemon DisplayName "Croh Daemon"
+        & nssm set croh-daemon Description "Headless file transfer daemon for Croh"
+        & nssm set croh-daemon Start SERVICE_AUTO_START
+        & nssm set croh-daemon AppStdout "$DataDir\daemon.log"
+        & nssm set croh-daemon AppStderr "$DataDir\daemon.log"
+        & nssm set croh-daemon AppRotateFiles 1
+        & nssm set croh-daemon AppRotateBytes 1048576
+
+        Write-Host "Service installed. Start with: nssm start croh-daemon"
     }
 }
 
@@ -155,10 +155,10 @@ Write-Host ""
 Write-Host "Installation complete!" -ForegroundColor Green
 Write-Host ""
 Write-Host "Usage:"
-Write-Host "  croc-gui              # Launch the GUI"
-Write-Host "  croc-daemon run       # Run the daemon manually"
-Write-Host "  croc-daemon status    # Check daemon status"
-Write-Host "  croc-daemon receive <code>  # Receive a file"
+Write-Host "  croh              # Launch the GUI"
+Write-Host "  croh-daemon run       # Run the daemon manually"
+Write-Host "  croh-daemon status    # Check daemon status"
+Write-Host "  croh-daemon receive <code>  # Receive a file"
 Write-Host ""
 Write-Host "Configuration: $ConfigDir\config.json"
 Write-Host "Data directory: $DataDir"
@@ -168,6 +168,3 @@ if (-not $InstallService) {
     Write-Host "To install as a Windows service, run:"
     Write-Host "  .\install.ps1 -InstallService"
 }
-
-
-

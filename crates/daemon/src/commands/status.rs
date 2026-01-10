@@ -1,7 +1,7 @@
 //! Status command - shows daemon status.
 
 use anyhow::Result;
-use croc_gui_core::platform;
+use croh_core::platform;
 
 use super::run::is_daemon_running;
 

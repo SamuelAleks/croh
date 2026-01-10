@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Croc GUI Uninstaller for Linux
+# Croh Uninstaller for Linux
 #
 
 set -e
@@ -13,15 +13,15 @@ NC='\033[0m'
 
 INSTALL_DIR="/usr/local/bin"
 SERVICE_DIR="$HOME/.config/systemd/user"
-DATA_DIR="$HOME/.local/share/croc-gui"
-CONFIG_DIR="$HOME/.config/croc-gui"
+DATA_DIR="$HOME/.local/share/croh"
+CONFIG_DIR="$HOME/.config/croh"
 
-echo -e "${RED}Croc GUI Uninstaller${NC}"
+echo -e "${RED}Croh Uninstaller${NC}"
 echo "====================="
 echo
 
 # Confirm
-read -p "This will remove Croc GUI and all its data. Continue? [y/N] " -n 1 -r
+read -p "This will remove Croh and all its data. Continue? [y/N] " -n 1 -r
 echo
 if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     echo "Cancelled."
@@ -30,18 +30,18 @@ fi
 
 # Stop service if running
 echo "Stopping service..."
-systemctl --user stop "croc-gui@$USER" 2>/dev/null || true
-systemctl --user disable "croc-gui@$USER" 2>/dev/null || true
+systemctl --user stop "croh@$USER" 2>/dev/null || true
+systemctl --user disable "croh@$USER" 2>/dev/null || true
 
 # Remove service file
 echo "Removing service file..."
-rm -f "$SERVICE_DIR/croc-gui@.service"
+rm -f "$SERVICE_DIR/croh@.service"
 systemctl --user daemon-reload 2>/dev/null || true
 
 # Remove binaries
 echo "Removing binaries..."
-sudo rm -f "$INSTALL_DIR/croc-gui"
-sudo rm -f "$INSTALL_DIR/croc-daemon"
+sudo rm -f "$INSTALL_DIR/croh"
+sudo rm -f "$INSTALL_DIR/croh-daemon"
 
 # Ask about data removal
 echo
@@ -55,6 +55,3 @@ fi
 
 echo
 echo -e "${GREEN}Uninstallation complete.${NC}"
-
-
-

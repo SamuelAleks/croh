@@ -1,10 +1,10 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Croc GUI Uninstaller for Windows
+    Croh Uninstaller for Windows
 
 .DESCRIPTION
-    Removes croc-gui and croc-daemon from the system.
+    Removes croh and croh-daemon from the system.
 
 .PARAMETER RemoveData
     If specified, also removes configuration and data.
@@ -16,16 +16,16 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$InstallDir = "$env:LOCALAPPDATA\croc-gui"
+$InstallDir = "$env:LOCALAPPDATA\croh"
 $BinDir = "$InstallDir\bin"
 $DataDir = "$InstallDir\data"
-$ConfigDir = "$env:APPDATA\croc-gui"
+$ConfigDir = "$env:APPDATA\croh"
 
-Write-Host "Croc GUI Uninstaller for Windows" -ForegroundColor Red
+Write-Host "Croh Uninstaller for Windows" -ForegroundColor Red
 Write-Host "==================================" -ForegroundColor Red
 Write-Host ""
 
-$confirm = Read-Host "This will remove Croc GUI. Continue? [y/N]"
+$confirm = Read-Host "This will remove Croh. Continue? [y/N]"
 if ($confirm -ne "y" -and $confirm -ne "Y") {
     Write-Host "Cancelled."
     exit 0
@@ -35,8 +35,8 @@ if ($confirm -ne "y" -and $confirm -ne "Y") {
 Write-Host "Stopping service..."
 $nssm = Get-Command nssm -ErrorAction SilentlyContinue
 if ($nssm) {
-    & nssm stop croc-daemon 2>$null
-    & nssm remove croc-daemon confirm 2>$null
+    & nssm stop croh-daemon 2>$null
+    & nssm remove croh-daemon confirm 2>$null
 }
 
 # Remove from PATH
@@ -50,7 +50,7 @@ if ($currentPath -like "*$BinDir*") {
 # Remove Start Menu shortcut
 Write-Host "Removing Start Menu shortcut..."
 $StartMenu = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs"
-Remove-Item "$StartMenu\Croc GUI.lnk" -ErrorAction SilentlyContinue
+Remove-Item "$StartMenu\Croh.lnk" -ErrorAction SilentlyContinue
 
 # Remove binaries
 Write-Host "Removing binaries..."
@@ -72,6 +72,3 @@ if ($RemoveData) {
 
 Write-Host ""
 Write-Host "Uninstallation complete." -ForegroundColor Green
-
-
-

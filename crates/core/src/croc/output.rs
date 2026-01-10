@@ -245,7 +245,7 @@ mod tests {
         assert!(!detect_completion("sending file..."));
 
         // Test 100% progress with matching byte counts
-        assert!(detect_completion("croc-gui-trust-c13292c2.json 100% || (462/462 B, 910 kB/s)"));
+        assert!(detect_completion("croh-trust-c13292c2.json 100% || (462/462 B, 910 kB/s)"));
         assert!(detect_completion("file.txt 100% |████████████| (1024/1024 B, 1.2 MB/s)"));
 
         // Should not trigger on partial progress

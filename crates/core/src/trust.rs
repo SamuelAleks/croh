@@ -17,7 +17,7 @@ pub const TRUST_BUNDLE_VERSION: u32 = 1;
 const BUNDLE_VALIDITY_MINUTES: i64 = 5;
 
 /// Prefix for trust bundle filenames.
-pub const TRUST_BUNDLE_PREFIX: &str = "croc-gui-trust-";
+pub const TRUST_BUNDLE_PREFIX: &str = "croh-trust-";
 
 /// Information about a peer for trust bundles and handshakes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -66,7 +66,7 @@ impl Capability {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrustBundle {
     /// Version marker (always TRUST_BUNDLE_VERSION)
-    pub croc_gui_trust: u32,
+    pub croh_trust: u32,
 
     /// Information about the sender
     pub sender: PeerInfo,
@@ -96,7 +96,7 @@ impl TrustBundle {
         let expires_at = now + Duration::minutes(BUNDLE_VALIDITY_MINUTES);
 
         Self {
-            croc_gui_trust: TRUST_BUNDLE_VERSION,
+            croh_trust: TRUST_BUNDLE_VERSION,
             sender: identity.to_peer_info_with_relay(relay_url),
             capabilities_offered: Capability::all(),
             nonce: generate_nonce(),
@@ -113,7 +113,7 @@ impl TrustBundle {
     /// Check if a string contains a trust bundle by looking for the marker key.
     pub fn is_trust_bundle(content: &str) -> bool {
         // Quick check for the marker key
-        if !content.contains("\"croc_gui_trust\"") {
+        if !content.contains("\"croh_trust\"") {
             return false;
         }
 
@@ -164,7 +164,7 @@ mod tests {
         let identity = Identity::generate("Test Device".to_string()).unwrap();
         let bundle = TrustBundle::new(&identity);
 
-        assert_eq!(bundle.croc_gui_trust, TRUST_BUNDLE_VERSION);
+        assert_eq!(bundle.croh_trust, TRUST_BUNDLE_VERSION);
         assert_eq!(bundle.sender.endpoint_id, identity.endpoint_id);
         assert!(!bundle.nonce.is_empty());
         assert!(bundle.is_valid());
@@ -184,10 +184,10 @@ mod tests {
     #[test]
     fn test_trust_bundle_filename_detection() {
         assert!(TrustBundle::is_trust_bundle_filename(
-            "croc-gui-trust-abc123.json"
+            "croh-trust-abc123.json"
         ));
         assert!(!TrustBundle::is_trust_bundle_filename("other-file.json"));
-        assert!(!TrustBundle::is_trust_bundle_filename("croc-gui-trust-abc123.txt"));
+        assert!(!TrustBundle::is_trust_bundle_filename("croh-trust-abc123.txt"));
     }
 
     #[test]

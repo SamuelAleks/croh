@@ -1,5 +1,5 @@
 [package]
-name = "croc-daemon"
+name = "croh-daemon"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ description = "Headless daemon for croc file transfer - accepts incoming transfe
 
 [dependencies]
 # Core library
-croc-gui-core = { workspace = true }
+croh-core = { workspace = true }
 
 # Async runtime
 tokio = { workspace = true }

@@ -1,6 +1,6 @@
 //! Application state and callback handling.
 
-use croc_gui_core::{
+use croh_core::{
     config::Theme,
     croc::{find_croc_executable, refresh_croc_cache, Curve, CrocEvent, CrocOptions, CrocProcess, HashAlgorithm},
     files, platform, Config, ControlMessage, FileRequest, Identity, IrohEndpoint, PeerStore, Permissions,
@@ -11,7 +11,7 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{oneshot, RwLock};
 use tracing::{error, info, warn};
 
 use crate::{AppLogic, AppSettings, BrowseEntry, MainWindow, PeerItem, SelectedFile, TransferItem};
@@ -36,6 +36,8 @@ pub struct App {
     listener_shutdown: Arc<std::sync::atomic::AtomicBool>,
     /// Current browse state (peer_id, current_path, entries with selection state).
     browse_state: Arc<RwLock<BrowseState>>,
+    /// Pending trust handshake state (nonce + result channel).
+    pending_trust: Arc<RwLock<Option<PendingTrust>>>,
 }
 
 /// State for file browser dialog.
@@ -66,6 +68,16 @@ struct SelectedFileData {
     path: String,
 }
 
+/// State for pending trust handshake.
+/// When initiating trust, we store the nonce here so the background listener
+/// can complete the handshake when the peer connects.
+struct PendingTrust {
+    /// The nonce from the trust bundle we sent.
+    nonce: String,
+    /// Channel to send the result back to the trust initiation thread.
+    result_tx: oneshot::Sender<Result<TrustedPeer, croh_core::Error>>,
+}
+
 impl App {
     /// Create a new App instance.
     pub fn new(window: Weak<MainWindow>) -> Self {
@@ -84,6 +96,7 @@ impl App {
             trust_in_progress: Arc::new(RwLock::new(false)),
             listener_shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             browse_state: Arc::new(RwLock::new(BrowseState::default())),
+            pending_trust: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -113,6 +126,7 @@ impl App {
         let transfer_manager = self.transfer_manager.clone();
         let window_weak = self.window.clone();
         let shutdown = self.listener_shutdown.clone();
+        let pending_trust = self.pending_trust.clone();
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -197,13 +211,6 @@ impl App {
                     let peer = store.find_by_endpoint_id(&remote_id).cloned();
                     drop(store);
 
-                    if peer.is_none() {
-                        warn!("Connection from unknown peer {}, ignoring", remote_id);
-                        let _ = conn.close().await;
-                        continue;
-                    }
-                    let peer = peer.unwrap();
-
                     // Receive the first message to determine what type of request this is
                     let msg = match tokio::time::timeout(
                         std::time::Duration::from_secs(30),
@@ -219,6 +226,89 @@ impl App {
                             continue;
                         }
                     };
+
+                    // If this is an unknown peer, check if it's a pending trust handshake
+                    if peer.is_none() {
+                        // Check if there's a pending trust and this is a TrustConfirm
+                        if let ControlMessage::TrustConfirm { peer: their_peer_info, nonce, permissions: their_permissions } = msg {
+                            info!("Received TrustConfirm from unknown peer {}", remote_id);
+
+                            // Check if we have a pending trust with matching nonce
+                            let mut pending_guard = pending_trust.write().await;
+                            if let Some(pending) = pending_guard.take() {
+                                if pending.nonce == nonce {
+                                    info!("Valid TrustConfirm from {} ({})", their_peer_info.name, remote_id);
+                                    if their_peer_info.relay_url.is_some() {
+                                        info!("Peer relay URL: {:?}", their_peer_info.relay_url);
+                                    }
+
+                                    // Send TrustComplete
+                                    let response = ControlMessage::TrustComplete;
+                                    if let Err(e) = conn.send(&response).await {
+                                        error!("Failed to send TrustComplete: {}", e);
+                                        let _ = pending.result_tx.send(Err(croh_core::Error::Iroh(e.to_string())));
+                                        continue;
+                                    }
+
+                                    // Create the trusted peer with their relay URL for future connections
+                                    let new_peer = TrustedPeer::new_with_relay(
+                                        their_peer_info.endpoint_id.clone(),
+                                        their_peer_info.name.clone(),
+                                        Permissions::all(), // We grant all permissions
+                                        their_permissions,  // Their permissions to us
+                                        their_peer_info.relay_url.clone(), // Store their relay URL
+                                    );
+
+                                    // Add to peer store
+                                    let mut store = peer_store.write().await;
+                                    match store.add_or_update(new_peer.clone()) {
+                                        Ok(updated) => {
+                                            if updated {
+                                                info!("Updated existing peer: {}", new_peer.name);
+                                            } else {
+                                                info!("Added new peer: {}", new_peer.name);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!("Failed to save peer: {}", e);
+                                            let _ = pending.result_tx.send(Err(e));
+                                            continue;
+                                        }
+                                    }
+                                    drop(store);
+
+                                    // Close connection gracefully
+                                    let _ = conn.close().await;
+
+                                    // Send success result
+                                    let _ = pending.result_tx.send(Ok(new_peer));
+
+                                    // Update peers UI
+                                    update_peers_ui(&window_weak, &peer_store).await;
+                                    continue;
+                                } else {
+                                    warn!("Invalid nonce from {}: expected {}, got {}", remote_id, pending.nonce, nonce);
+                                    // Put the pending trust back since nonce didn't match
+                                    *pending_guard = Some(pending);
+                                    let response = ControlMessage::TrustRevoke {
+                                        reason: "invalid nonce".to_string(),
+                                    };
+                                    let _ = conn.send(&response).await;
+                                    let _ = conn.close().await;
+                                    continue;
+                                }
+                            } else {
+                                warn!("Received TrustConfirm but no pending trust");
+                                let _ = conn.close().await;
+                                continue;
+                            }
+                        } else {
+                            warn!("Connection from unknown peer {}, ignoring", remote_id);
+                            let _ = conn.close().await;
+                            continue;
+                        }
+                    }
+                    let peer = peer.unwrap();
 
                     // Handle different message types
                     match &msg {
@@ -1631,6 +1721,7 @@ impl App {
         let peer_store = self.peer_store.clone();
         let trust_in_progress = self.trust_in_progress.clone();
         let config = self.config.clone();
+        let pending_trust = self.pending_trust.clone();
 
         // Initiate trust callback
         window.global::<AppLogic>().on_initiate_trust({
@@ -1640,6 +1731,7 @@ impl App {
             let trust_in_progress = trust_in_progress.clone();
             let config = config.clone();
             let peer_store = peer_store.clone();
+            let pending_trust = pending_trust.clone();
 
             move || {
                 info!("Initiating trust...");
@@ -1647,6 +1739,7 @@ impl App {
                 let identity = identity.clone();
                 let shared_endpoint = shared_endpoint.clone();
                 let trust_in_progress = trust_in_progress.clone();
+                let pending_trust = pending_trust.clone();
                 let config = config.clone();
                 let peer_store = peer_store.clone();
 
@@ -1790,69 +1883,49 @@ impl App {
                                             info!("Trust bundle sent successfully, waiting for peer to connect...");
                                             update_status(&window_weak, "Trust bundle sent, waiting for peer to connect...");
 
-                                            // Use the endpoint we created earlier (to get the relay URL)
+                                            // Set up pending trust with channel for background listener
                                             let bundle_nonce = bundle.nonce.clone();
+                                            let (result_tx, result_rx) = oneshot::channel();
 
-                                            info!("Waiting for incoming connection on existing endpoint");
+                                            {
+                                                let mut pending_guard = pending_trust.write().await;
+                                                *pending_guard = Some(PendingTrust {
+                                                    nonce: bundle_nonce.clone(),
+                                                    result_tx,
+                                                });
+                                            }
 
-                                            // Wait for incoming connection with timeout
+                                            info!("Set pending trust with nonce, waiting for background listener to handle connection...");
+
+                                            // Wait for the background listener to complete the handshake
                                             let handshake_result = tokio::time::timeout(
                                                 std::time::Duration::from_secs(120), // 2 minute timeout
-                                                wait_for_trust_handshake(&endpoint, &bundle_nonce, &peer_store)
+                                                result_rx
                                             ).await;
 
                                             match handshake_result {
-                                                Ok(Ok(peer)) => {
+                                                Ok(Ok(Ok(peer))) => {
                                                     info!("Trust established with {}", peer.name);
                                                     update_status(&window_weak, &format!("Trusted peer added: {}", peer.name));
 
-                                                    // Update peers UI
-                                                    let peers = peer_store.read().await;
-                                                    let peer_items: Vec<_> = peers.list().iter().map(|p| {
-                                                        let last_seen = p.last_seen
-                                                            .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                                                            .unwrap_or_else(|| "Never".to_string());
-                                                        (
-                                                            p.id.clone(),
-                                                            p.name.clone(),
-                                                            if p.endpoint_id.len() > 16 {
-                                                                format!("{}...{}", &p.endpoint_id[..8], &p.endpoint_id[p.endpoint_id.len()-8..])
-                                                            } else {
-                                                                p.endpoint_id.clone()
-                                                            },
-                                                            "offline".to_string(),
-                                                            last_seen,
-                                                            p.their_permissions.push,
-                                                            p.their_permissions.pull,
-                                                        )
-                                                    }).collect();
-                                                    drop(peers);
-
-                                                    let window_weak_peers = window_weak.clone();
-                                                    let _ = slint::invoke_from_event_loop(move || {
-                                                        if let Some(window) = window_weak_peers.upgrade() {
-                                                            let items: Vec<PeerItem> = peer_items.into_iter()
-                                                                .map(|(id, name, endpoint_id, status, last_seen, can_push, can_pull)| PeerItem {
-                                                                    id: SharedString::from(id),
-                                                                    name: SharedString::from(name),
-                                                                    endpoint_id: SharedString::from(endpoint_id),
-                                                                    status: SharedString::from(status),
-                                                                    last_seen: SharedString::from(last_seen),
-                                                                    can_push,
-                                                                    can_pull,
-                                                                })
-                                                                .collect();
-                                                            window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));
-                                                        }
-                                                    });
+                                                    // Update peers UI (background listener already added to store)
+                                                    update_peers_ui(&window_weak, &peer_store).await;
                                                 }
-                                                Ok(Err(e)) => {
+                                                Ok(Ok(Err(e))) => {
                                                     error!("Handshake failed: {}", e);
                                                     update_status(&window_weak, &format!("Handshake failed: {}", e));
+                                                }
+                                                Ok(Err(_)) => {
+                                                    // Channel was dropped without sending (shouldn't happen)
+                                                    error!("Handshake channel dropped unexpectedly");
+                                                    update_status(&window_weak, "Handshake failed unexpectedly");
                                                 }
                                                 Err(_) => {
                                                     warn!("Handshake timed out");
                                                     update_status(&window_weak, "Timed out waiting for peer");
+                                                    // Clear the pending trust on timeout
+                                                    let mut pending_guard = pending_trust.write().await;
+                                                    *pending_guard = None;
                                                 }
                                             }
 
@@ -2843,7 +2916,7 @@ async fn check_and_handle_trust_bundle(
     shared_endpoint: &Arc<RwLock<Option<IrohEndpoint>>>,
     peer_store: &Arc<RwLock<PeerStore>>,
 ) {
-    use croc_gui_core::complete_trust_as_receiver;
+    use croh_core::complete_trust_as_receiver;
 
     // Look for trust bundle files
     let bundle_files: Vec<_> = match std::fs::read_dir(download_dir) {
@@ -3014,12 +3087,56 @@ async fn check_and_handle_trust_bundle(
     }
 }
 
+/// Update the peers UI from the peer store.
+async fn update_peers_ui(window_weak: &Weak<MainWindow>, peer_store: &Arc<RwLock<PeerStore>>) {
+    let peers = peer_store.read().await;
+    let peer_items: Vec<_> = peers.list().iter().map(|p| {
+        let last_seen = p.last_seen
+            .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_else(|| "Never".to_string());
+        (
+            p.id.clone(),
+            p.name.clone(),
+            if p.endpoint_id.len() > 16 {
+                format!("{}...{}", &p.endpoint_id[..8], &p.endpoint_id[p.endpoint_id.len()-8..])
+            } else {
+                p.endpoint_id.clone()
+            },
+            "offline".to_string(),
+            last_seen,
+            p.their_permissions.push,
+            p.their_permissions.pull,
+        )
+    }).collect();
+    drop(peers);
+
+    let window_weak = window_weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(window) = window_weak.upgrade() {
+            let items: Vec<PeerItem> = peer_items.into_iter()
+                .map(|(id, name, endpoint_id, status, last_seen, can_push, can_pull)| PeerItem {
+                    id: SharedString::from(id),
+                    name: SharedString::from(name),
+                    endpoint_id: SharedString::from(endpoint_id),
+                    status: SharedString::from(status),
+                    last_seen: SharedString::from(last_seen),
+                    can_push,
+                    can_pull,
+                })
+                .collect();
+            window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));
+        }
+    });
+}
+
 /// Wait for incoming trust handshake from a peer who received our trust bundle.
+/// NOTE: This function is deprecated - trust handshakes are now handled by the background listener.
+#[allow(dead_code)]
 async fn wait_for_trust_handshake(
     endpoint: &IrohEndpoint,
     expected_nonce: &str,
     peer_store: &Arc<RwLock<PeerStore>>,
-) -> croc_gui_core::Result<TrustedPeer> {
+) -> croh_core::Result<TrustedPeer> {
     use std::time::Duration;
 
     info!("Waiting for incoming trust connection...");
@@ -3027,7 +3144,7 @@ async fn wait_for_trust_handshake(
     // Accept a connection
     let mut conn = tokio::time::timeout(Duration::from_secs(120), endpoint.accept())
         .await
-        .map_err(|_| croc_gui_core::Error::Iroh("timeout waiting for connection".to_string()))??;
+        .map_err(|_| croh_core::Error::Iroh("timeout waiting for connection".to_string()))??;
 
     let remote_id = conn.remote_id_string();
     info!("Accepted connection from: {}", remote_id);
@@ -3035,7 +3152,7 @@ async fn wait_for_trust_handshake(
     // Receive the TrustConfirm message
     let msg = tokio::time::timeout(Duration::from_secs(30), conn.recv())
         .await
-        .map_err(|_| croc_gui_core::Error::Iroh("timeout waiting for message".to_string()))??;
+        .map_err(|_| croh_core::Error::Iroh("timeout waiting for message".to_string()))??;
 
     match msg {
         ControlMessage::TrustConfirm {
@@ -3050,7 +3167,7 @@ async fn wait_for_trust_handshake(
                     reason: "invalid nonce".to_string(),
                 };
                 let _ = conn.send(&response).await;
-                return Err(croc_gui_core::Error::Trust("invalid nonce".to_string()));
+                return Err(croh_core::Error::Trust("invalid nonce".to_string()));
             }
 
             info!("Valid TrustConfirm from {} ({})", their_peer_info.name, remote_id);
@@ -3099,7 +3216,7 @@ async fn wait_for_trust_handshake(
         }
         other => {
             error!("Unexpected message during handshake: {:?}", other);
-            Err(croc_gui_core::Error::Iroh(format!(
+            Err(croh_core::Error::Iroh(format!(
                 "unexpected message: expected TrustConfirm, got {:?}",
                 other
             )))

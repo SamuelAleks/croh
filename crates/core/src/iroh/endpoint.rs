@@ -291,7 +291,14 @@ mod tests {
     }
 
     // Note: This test requires network/relay connectivity which may not be available
-    // in all CI environments. The real connection test happens in integration tests.
+    // in all CI environments.
+    //
+    // For testing connections without relay, see the test_support module which provides:
+    // - TestEndpoint: Relay-disabled endpoint wrapper
+    // - EndpointPair: Pre-configured pair of endpoints
+    //
+    // For comprehensive testing with relay, enable the `test-relay` feature:
+    //   cargo test --features test-relay
     #[tokio::test]
     #[ignore = "requires network connectivity via relay"]
     async fn test_endpoint_connection() {

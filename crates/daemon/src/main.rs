@@ -12,9 +12,9 @@ use tracing_subscriber::FmtSubscriber;
 
 mod commands;
 
-/// Croc Daemon - Headless file transfer service
+/// Croh Daemon - Headless file transfer service
 #[derive(Parser)]
-#[command(name = "croc-daemon")]
+#[command(name = "croh-daemon")]
 #[command(about = "Headless daemon for croc file transfers", long_about = None)]
 struct Cli {
     /// Enable verbose logging
@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Run { config } => {
-            info!("Starting croc daemon...");
+            info!("Starting croh daemon...");
             commands::run::execute(config).await
         }
         Commands::Receive { code } => {

@@ -7,10 +7,10 @@ use crate::trust::PeerInfo;
 use serde::{Deserialize, Serialize};
 
 /// ALPN identifier for the control protocol.
-pub const ALPN_CONTROL: &[u8] = b"croc-gui/control/1";
+pub const ALPN_CONTROL: &[u8] = b"croh/control/1";
 
 /// ALPN identifier for the blob transfer protocol.
-pub const ALPN_BLOBS: &[u8] = b"croc-gui/blobs/1";
+pub const ALPN_BLOBS: &[u8] = b"croh/blobs/1";
 
 /// Information about a file for transfer.
 #[derive(Debug, Clone, Serialize, Deserialize)]

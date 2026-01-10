@@ -107,7 +107,8 @@ mod tests {
         assert_eq!(secure_filename("normal.txt"), "normal.txt");
         assert_eq!(secure_filename("../../../etc/passwd"), "passwd");
         assert_eq!(secure_filename("file<with>bad:chars"), "file_with_bad_chars");
-        assert_eq!(secure_filename("..."), "");
+        // "..." becomes empty after stripping leading dots, so falls back to "unnamed"
+        assert_eq!(secure_filename("..."), "unnamed");
         assert_eq!(secure_filename(""), "unnamed");
     }
 

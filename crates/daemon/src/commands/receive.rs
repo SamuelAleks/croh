@@ -1,7 +1,7 @@
 //! Receive command - receives files using a croc code.
 
 use anyhow::Result;
-use croc_gui_core::{
+use croh_core::{
     complete_trust_as_receiver,
     croc::{CrocEvent, CrocProcess, Progress},
     Config, CrocOptions, Identity, IrohEndpoint, PeerStore,

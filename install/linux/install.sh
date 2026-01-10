@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# Croc GUI Installer for Linux
-# This script installs the croc-gui and croc-daemon binaries
+# Croh Installer for Linux
+# This script installs the croh and croh-daemon binaries
 #
 
 set -e
@@ -15,10 +15,10 @@ NC='\033[0m' # No Color
 # Installation paths
 INSTALL_DIR="/usr/local/bin"
 SERVICE_DIR="$HOME/.config/systemd/user"
-DATA_DIR="$HOME/.local/share/croc-gui"
-CONFIG_DIR="$HOME/.config/croc-gui"
+DATA_DIR="$HOME/.local/share/croh"
+CONFIG_DIR="$HOME/.config/croh"
 
-echo -e "${GREEN}Croc GUI Installer${NC}"
+echo -e "${GREEN}Croh Installer${NC}"
 echo "===================="
 echo
 
@@ -56,14 +56,14 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-if [ -f "$REPO_ROOT/target/release/croc-gui" ] && [ -f "$REPO_ROOT/target/release/croc-daemon" ]; then
+if [ -f "$REPO_ROOT/target/release/croh" ] && [ -f "$REPO_ROOT/target/release/croh-daemon" ]; then
     echo "Using pre-built binaries from target/release/"
-    GUI_BIN="$REPO_ROOT/target/release/croc-gui"
-    DAEMON_BIN="$REPO_ROOT/target/release/croc-daemon"
-elif [ -f "./croc-gui" ] && [ -f "./croc-daemon" ]; then
+    GUI_BIN="$REPO_ROOT/target/release/croh"
+    DAEMON_BIN="$REPO_ROOT/target/release/croh-daemon"
+elif [ -f "./croh" ] && [ -f "./croh-daemon" ]; then
     echo "Using binaries from current directory"
-    GUI_BIN="./croc-gui"
-    DAEMON_BIN="./croc-daemon"
+    GUI_BIN="./croh"
+    DAEMON_BIN="./croh-daemon"
 else
     echo "Building from source..."
     if ! command -v cargo &> /dev/null; then
@@ -71,11 +71,11 @@ else
         echo "Visit: https://rustup.rs/"
         exit 1
     fi
-    
+
     cd "$REPO_ROOT"
     cargo build --release
-    GUI_BIN="$REPO_ROOT/target/release/croc-gui"
-    DAEMON_BIN="$REPO_ROOT/target/release/croc-daemon"
+    GUI_BIN="$REPO_ROOT/target/release/croh"
+    DAEMON_BIN="$REPO_ROOT/target/release/croh-daemon"
 fi
 
 # Create directories
@@ -87,14 +87,14 @@ mkdir -p "$SERVICE_DIR"
 
 # Install binaries
 echo "Installing binaries to $INSTALL_DIR..."
-sudo cp "$GUI_BIN" "$INSTALL_DIR/croc-gui"
-sudo cp "$DAEMON_BIN" "$INSTALL_DIR/croc-daemon"
-sudo chmod +x "$INSTALL_DIR/croc-gui"
-sudo chmod +x "$INSTALL_DIR/croc-daemon"
+sudo cp "$GUI_BIN" "$INSTALL_DIR/croh"
+sudo cp "$DAEMON_BIN" "$INSTALL_DIR/croh-daemon"
+sudo chmod +x "$INSTALL_DIR/croh"
+sudo chmod +x "$INSTALL_DIR/croh-daemon"
 
 # Install systemd service
 echo "Installing systemd user service..."
-cp "$SCRIPT_DIR/croc-gui.service" "$SERVICE_DIR/croc-gui@.service"
+cp "$SCRIPT_DIR/croh.service" "$SERVICE_DIR/croh@.service"
 
 # Enable linger for user services to run without login
 echo "Enabling user service lingering..."
@@ -108,17 +108,14 @@ echo
 echo -e "${GREEN}Installation complete!${NC}"
 echo
 echo "Usage:"
-echo "  croc-gui              # Launch the GUI"
-echo "  croc-daemon run       # Run the daemon manually"
-echo "  croc-daemon status    # Check daemon status"
-echo "  croc-daemon receive <code>  # Receive a file"
+echo "  croh              # Launch the GUI"
+echo "  croh-daemon run       # Run the daemon manually"
+echo "  croh-daemon status    # Check daemon status"
+echo "  croh-daemon receive <code>  # Receive a file"
 echo
 echo "To run daemon as a service:"
-echo "  systemctl --user start croc-gui@$USER"
-echo "  systemctl --user enable croc-gui@$USER  # Start on login"
+echo "  systemctl --user start croh@$USER"
+echo "  systemctl --user enable croh@$USER  # Start on login"
 echo
 echo "Configuration: $CONFIG_DIR/config.json"
 echo "Data directory: $DATA_DIR"
-
-
-

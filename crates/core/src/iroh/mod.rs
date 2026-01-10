@@ -7,6 +7,12 @@
 //! - Handshake protocol implementation
 //! - Blob-based file transfer
 //! - File browsing for remote peers
+//!
+//! # Testing
+//!
+//! For integration testing, use the [`test_support`] module which provides
+//! utilities for testing peer-to-peer functionality without external relay servers.
+//! See the module documentation for usage examples.
 
 pub mod blobs;
 pub mod browse;
@@ -15,6 +21,9 @@ pub mod handshake;
 pub mod identity;
 pub mod protocol;
 pub mod transfer;
+
+#[cfg(test)]
+pub mod test_support;
 
 pub use blobs::{hash_file, verify_file_hash, BlobStore};
 pub use browse::{browse_directory, default_browsable_paths, get_browsable_roots, resolve_browse_path, validate_path};

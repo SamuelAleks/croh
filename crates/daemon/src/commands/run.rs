@@ -1,7 +1,7 @@
 //! Run command - starts the daemon service.
 
 use anyhow::Result;
-use croc_gui_core::{platform, Config, TransferManager};
+use croh_core::{platform, Config, TransferManager};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};

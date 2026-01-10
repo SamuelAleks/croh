@@ -1,7 +1,7 @@
 //! Peers command - lists trusted peers.
 
 use anyhow::Result;
-use croc_gui_core::{platform, PeerStore};
+use croh_core::{platform, PeerStore};
 
 pub async fn execute() -> Result<()> {
     println!("Trusted Peers");
@@ -18,7 +18,7 @@ pub async fn execute() -> Result<()> {
         println!("To add a trusted peer:");
         println!("  1. Use the GUI to initiate trust (Add Peer button)");
         println!("  2. Share the croc code with your peer");
-        println!("  3. They run: croc-daemon receive <code>");
+        println!("  3. They run: croh-daemon receive <code>");
         println!();
         let peers_path = platform::peers_file_path();
         println!("Peers file: {:?}", peers_path);
@@ -67,7 +67,7 @@ pub async fn execute() -> Result<()> {
     if pending_path.exists() {
         println!();
         println!("⚠️  Pending trust request found.");
-        println!("Run 'croc-daemon run' to complete the handshake.");
+        println!("Run 'croh-daemon run' to complete the handshake.");
     }
 
     Ok(())

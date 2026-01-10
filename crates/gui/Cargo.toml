@@ -1,5 +1,5 @@
 [package]
-name = "croc-gui"
+name = "croh"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ description = "Native desktop GUI for croc file transfer"
 
 [dependencies]
 # Core library
-croc-gui-core = { workspace = true }
+croh-core = { workspace = true }
 
 # UI Framework
 slint = { workspace = true }

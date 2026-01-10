@@ -1,4 +1,4 @@
-# Croc GUI
+# Croh
 
 A native desktop application for [croc](https://github.com/schollz/croc) file transfers, built with Rust and [Slint](https://slint.dev/).
 
@@ -44,8 +44,8 @@ The application uses a Material Dark theme with:
 cargo build --release
 
 # Copy binaries to a folder in your PATH
-copy target\release\croc-gui.exe C:\Tools\
-copy target\release\croc-daemon.exe C:\Tools\
+copy target\release\croh.exe C:\Tools\
+copy target\release\croh-daemon.exe C:\Tools\
 ```
 
 ### Linux
@@ -62,22 +62,22 @@ chmod +x install/linux/install.sh
 cargo build --release
 
 # Install binaries
-sudo cp target/release/croc-gui /usr/local/bin/
-sudo cp target/release/croc-daemon /usr/local/bin/
+sudo cp target/release/croh /usr/local/bin/
+sudo cp target/release/croh-daemon /usr/local/bin/
 
 # (Optional) Install systemd service
-cp install/linux/croc-gui.service ~/.config/systemd/user/croc-gui@.service
+cp install/linux/croh.service ~/.config/systemd/user/croh@.service
 systemctl --user daemon-reload
-systemctl --user enable croc-gui@$USER
-systemctl --user start croc-gui@$USER
+systemctl --user enable croh@$USER
+systemctl --user start croh@$USER
 ```
 
 ### Building from Source
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/croc-gui.git
-cd croc-gui
+git clone https://github.com/croh/croh.git
+cd croh
 
 # Build all crates (debug)
 cargo build
@@ -86,10 +86,10 @@ cargo build
 cargo build --release
 
 # Run the GUI
-cargo run --release -p croc-gui
+cargo run --release -p croh
 
 # Run the daemon
-cargo run --release -p croc-daemon -- --help
+cargo run --release -p croh-daemon -- --help
 ```
 
 ## Usage
@@ -97,7 +97,7 @@ cargo run --release -p croc-daemon -- --help
 ### GUI Application
 
 ```bash
-croc-gui
+croh
 ```
 
 The GUI provides:
@@ -110,22 +110,22 @@ The GUI provides:
 
 ```bash
 # Run the daemon service
-croc-daemon run
+croh-daemon run
 
 # Receive a file (auto-accept)
-croc-daemon receive 7-alpha-beta-gamma
+croh-daemon receive 7-alpha-beta-gamma
 
 # Check daemon status
-croc-daemon status
+croh-daemon status
 
 # List trusted peers
-croc-daemon peers
+croh-daemon peers
 
 # View configuration
-croc-daemon config
+croh-daemon config
 
 # Set configuration
-croc-daemon config download_dir /path/to/downloads
+croh-daemon config download_dir /path/to/downloads
 ```
 
 ### Running as a Service
@@ -133,29 +133,29 @@ croc-daemon config download_dir /path/to/downloads
 **Linux (systemd)**
 ```bash
 # Start the service
-systemctl --user start croc-gui@$USER
+systemctl --user start croh@$USER
 
 # Enable at login
-systemctl --user enable croc-gui@$USER
+systemctl --user enable croh@$USER
 
 # Check status
-systemctl --user status croc-gui@$USER
+systemctl --user status croh@$USER
 
 # View logs
-journalctl --user -u croc-gui@$USER -f
+journalctl --user -u croh@$USER -f
 ```
 
 **Windows (NSSM)**
 ```powershell
 # Install with NSSM (done by install script with -InstallService)
-nssm start croc-daemon
-nssm stop croc-daemon
+nssm start croh-daemon
+nssm stop croh-daemon
 ```
 
 ## Project Structure
 
 ```
-croc-gui/
+croh/
 ├── Cargo.toml              # Workspace definition
 ├── crates/
 │   ├── core/               # Shared library
@@ -179,9 +179,9 @@ croc-gui/
 ## Configuration
 
 Configuration files are stored in:
-- **Linux**: `~/.config/croc-gui/config.json`
-- **Windows**: `%APPDATA%\croc-gui\config.json`
-- **macOS**: `~/Library/Application Support/croc-gui/config.json`
+- **Linux**: `~/.config/croh/config.json`
+- **Windows**: `%APPDATA%\croh\config.json`
+- **macOS**: `~/Library/Application Support/croh/config.json`
 
 ### Config File Format
 
@@ -199,7 +199,7 @@ Configuration files are stored in:
 | Variable | Description |
 |----------|-------------|
 | `CROC_PATH` | Path to croc executable |
-| `CROC_GUI_DOWNLOAD_DIR` | Default download directory |
+| `CROH_DOWNLOAD_DIR` | Default download directory |
 | `RUST_LOG` | Log level (debug, info, warn, error) |
 
 ## Debugging
@@ -216,10 +216,10 @@ Debug configurations are provided in `.vscode/launch.json`:
 
 ```bash
 # Enable debug logging
-RUST_LOG=debug cargo run -p croc-gui
+RUST_LOG=debug cargo run -p croh
 
 # Enable backtrace on panics
-RUST_BACKTRACE=1 cargo run -p croc-gui
+RUST_BACKTRACE=1 cargo run -p croh
 ```
 
 ## Roadmap

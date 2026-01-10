@@ -13,24 +13,24 @@ pub fn default_download_dir() -> PathBuf {
 
 /// Get the application data directory.
 ///
-/// - Linux: `~/.local/share/croc-gui`
-/// - Windows: `%LOCALAPPDATA%\croc-gui`
-/// - macOS: `~/Library/Application Support/croc-gui`
+/// - Linux: `~/.local/share/croh`
+/// - Windows: `%LOCALAPPDATA%\croh`
+/// - macOS: `~/Library/Application Support/croh`
 pub fn data_dir() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("croc-gui")
+        .join("croh")
 }
 
 /// Get the configuration directory.
 ///
-/// - Linux: `~/.config/croc-gui`
-/// - Windows: `%APPDATA%\croc-gui`
-/// - macOS: `~/Library/Application Support/croc-gui`
+/// - Linux: `~/.config/croh`
+/// - Windows: `%APPDATA%\croh`
+/// - macOS: `~/Library/Application Support/croh`
 pub fn config_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("croc-gui")
+        .join("croh")
 }
 
 /// Get the path to the main config file.

@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Project Status
+
+**Pre-alpha development** - This project has no users yet. Breaking changes to APIs, package names, config paths, and protocols are acceptable and expected during this phase. Do not hesitate to make large refactors or renames when they improve the codebase.
+
 ## Build Commands
 
 ```bash
@@ -12,14 +16,43 @@ cargo build
 cargo build --release
 
 # Run GUI
-cargo run -p croc-gui
+cargo run -p croh
 
 # Run daemon
-cargo run -p croc-daemon -- <subcommand>
+cargo run -p croh-daemon -- <subcommand>
 
 # Run with debug logging
-RUST_LOG=debug cargo run -p croc-gui
+RUST_LOG=debug cargo run -p croh
 ```
+
+## Testing
+
+```bash
+# Run all unit tests (fast, no network required)
+cargo test -p croh-core --lib
+
+# Run integration tests
+cargo test -p croh-core --test iroh_integration
+
+# Run with relay testing (comprehensive, slower)
+cargo test -p croh-core --features test-relay
+
+# Run network-dependent tests (may fail in CI)
+cargo test -p croh-core -- --ignored
+
+# Run with debug logging
+RUST_LOG=croh_core=debug cargo test -p croh-core
+```
+
+### Iroh Test Infrastructure
+
+The `crates/core/src/iroh/test_support.rs` module provides testing utilities:
+
+- **`TestEndpoint`**: Relay-disabled endpoint wrapper for local testing
+- **`EndpointPair`**: Pre-configured pair of endpoints for bidirectional tests
+- **`TestFixtures`**: Temporary directories and test file utilities
+
+For tests requiring actual peer-to-peer connectivity, enable the `test-relay` feature which provides a local relay server.
 
 ## Architecture
 
@@ -27,17 +60,18 @@ This is a Rust workspace wrapping the external [croc](https://github.com/schollz
 
 ### Crate Structure
 
-- **`crates/core`** (`croc-gui-core`): Shared library used by both GUI and daemon
+- **`crates/core`** (`croh-core`): Shared library used by both GUI and daemon
   - `croc/` - Subprocess wrapper: spawns croc CLI, parses stdout/stderr for events (codes, progress, completion)
   - `config.rs` - JSON config management (platform-specific paths via `dirs` crate)
   - `transfer.rs` - Transfer state machine and `TransferManager` for tracking active transfers
+  - `iroh/` - Peer-to-peer networking via Iroh (see below)
 
-- **`crates/gui`** (`croc-gui`): Slint-based desktop app
+- **`crates/gui`** (`croh`): Slint-based desktop app
   - `main.rs` - Window setup, Slint module inclusion via `slint::include_modules!()`
   - `app.rs` - All application state and UI callbacks; spawns threads with tokio runtimes for async operations
   - `ui/main.slint` - UI definition
 
-- **`crates/daemon`** (`croc-daemon`): Headless CLI service using clap
+- **`crates/daemon`** (`croh-daemon`): Headless CLI service using clap
   - Subcommands: `run`, `receive`, `status`, `peers`, `config`
 
 ### Key Patterns
@@ -47,14 +81,41 @@ This is a Rust workspace wrapping the external [croc](https://github.com/schollz
 **GUI Threading**: Slint requires UI updates on the main thread. The app spawns `std::thread` with embedded tokio runtimes for async work, then uses `Weak<MainWindow>` to post updates back to UI.
 
 **Config Locations**:
-- Linux: `~/.config/croc-gui/config.json`
-- Windows: `%APPDATA%\croc-gui\config.json`
+- Linux: `~/.config/croh/config.json`
+- Windows: `%APPDATA%\croh\config.json`
+
+### Iroh Integration
+
+The `iroh/` module provides peer-to-peer networking for trusted peer connections:
+
+**Module Structure:**
+- `identity.rs` - Keypair generation and persistence (SecretKey management)
+- `endpoint.rs` - `IrohEndpoint` wrapper with connection lifecycle management
+- `protocol.rs` - `ControlMessage` definitions (JSON length-prefixed, 1MB max)
+- `handshake.rs` - Trust establishment protocol
+- `transfer.rs` - Push/pull file transfer with chunk streaming
+- `blobs.rs` - BLAKE3 file hashing and verification
+- `browse.rs` - Secure directory browsing with path validation
+- `test_support.rs` - Testing utilities (cfg(test) only)
+
+**Trust Flow:**
+1. Sender creates `TrustBundle` with endpoint ID, relay URL, nonce, capabilities
+2. Bundle sent to receiver via croc (JSON file)
+3. Receiver connects to sender via Iroh, sends `TrustConfirm` with nonce
+4. Sender verifies nonce and sends `TrustComplete`
+5. Both sides store `TrustedPeer` with mutual permissions
+
+**Testing:**
+- Unit tests in each module (run with `cargo test --lib`)
+- Integration tests in `tests/iroh_integration.rs`
+- Test utilities in `test_support.rs` for relay-disabled endpoint testing
+- Feature `test-relay` enables local relay server for comprehensive testing
 
 ## Reference Files
 
 The `/misc` directory (gitignored) contains reference files that may be useful for development context.
 
-**`misc/croc-gui-v2-plan.md`** - Master planning document for the entire project. Contains:
+**`misc/croh-v2-plan.md`** - Master planning document for the entire project. Contains:
 - Migration plan (Part One): Phases 0.1-0.10 covering Python→Rust migration
 - Feature implementation plan (Part Two): Phases 1-8 for Iroh integration, trust, file push/pull
 - Protocol specifications, data models, security model, UI/UX designs
