@@ -298,6 +298,8 @@ export struct AppSettings {
     keep-completed-transfers: bool,  // keep completed transfers in list (vs auto-clear)
     // Security settings
     security-posture: string,     // "relaxed", "balanced", "cautious"
+    // Network/Relay settings
+    relay-preference: string,     // "normal", "direct-preferred", "relay-only", "disabled"
 }
 
 export struct PeerItem {
@@ -345,12 +347,14 @@ export struct PeerItem {
     // Connection control
     connected: bool,              // false = user disconnected, skip pings and block connections
     revoked: bool,                // true = remote peer revoked our trust (grayed out, only remove works)
+    we-revoked: bool,             // true = we revoked their trust (can still remove, shows "revoked by you")
     // Guest peer fields
     is-guest: bool,               // true = temporary guest peer
     expires-at: string,           // formatted expiry time (empty if not a guest)
     time-remaining: string,       // formatted countdown "2h 30m" or "Expired"
     extension-count: int,         // how many times guest was extended
     promotion-pending: bool,      // guest has requested promotion
+    unread-count: int,            // unread chat messages from this peer
 }
 
 export struct BrowseEntry {
@@ -383,8 +387,36 @@ export struct NetworkItem {
     member-count: int,
     is-owner: bool,              // true if we created/own this network
     allow-introductions: bool,   // whether introductions are enabled
+    auto-accept-introductions: bool,  // auto-accept introductions from members
+    share-member-list: bool,     // share member list with other members
     created-at: string,          // formatted date
     members: [NetworkMember],    // list of members in this network
+}
+
+// ============================================================================
+// Chat Types
+// ============================================================================
+
+// A chat message for display in the chat panel
+export struct ChatMessageItem {
+    id: string,                   // unique message ID
+    content: string,              // message text
+    is-mine: bool,                // true = we sent it, false = we received it
+    timestamp: string,            // formatted time "2:34 PM"
+    status: string,               // "pending", "sent", "delivered", "read", "failed"
+    show-date-divider: bool,      // true if this is first message of a new day
+    date-label: string,           // "Today", "Yesterday", "Jan 5"
+}
+
+// Summary of a conversation for the chat list
+export struct ChatConversationItem {
+    peer-id: string,              // peer's endpoint ID
+    peer-name: string,            // display name
+    last-message: string,         // preview of last message
+    last-time: string,            // relative time "5 min ago"
+    unread-count: int,            // number of unread messages
+    is-online: bool,              // peer online status
+    is-typing: bool,              // peer is currently typing
 }
 
 // ============================================================================
@@ -416,19 +448,22 @@ export global AppLogic {
     callback set-dnd-mode(string, string);
     // set-security-posture: posture ("relaxed", "balanced", "cautious")
     callback set-security-posture(string);
+    // set-relay-preference: preference ("normal", "direct-preferred", "relay-only", "disabled")
+    callback set-relay-preference(string);
     // set-device-nickname: nickname (empty = use hostname)
     callback set-device-nickname(string);
 
     // Trusted peers callbacks
     // guest-mode: true to add peer as temporary guest, false for full trust
-    callback initiate-trust(bool);  // guest_mode
+    callback initiate-trust(bool, int);  // guest_mode, duration_hours (0 = use default)
     callback cancel-trust();
     // Toggle for the UI to show guest mode option
     in-out property <bool> add-peer-as-guest: false;
     // Guest duration in hours (0 = use default from config)
-    in-out property <int> guest-duration-hours: 0;
+    in-out property <int> guest-duration-hours: 24;
     callback remove-peer(string);  // peer id
     callback rename-peer(string, string);  // peer id, new name
+    callback revoke-peer(string);  // peer id - revoke trust (notifies peer, but doesn't delete locally)
     callback disconnect-peer(string);  // peer id - pause connections to/from peer
     callback connect-peer(string);     // peer id - resume connections to/from peer
     callback push-to-peer(string); // peer id - push selected files to peer
@@ -453,6 +488,8 @@ export global AppLogic {
     callback add-peer-to-network(string, string);     // network id, peer id
     callback remove-peer-from-network(string, string); // network id, peer id
     callback introduce-peers(string, string, string); // network id, peer1 id, peer2 id
+    // network id, allow-introductions, auto-accept, share-member-list
+    callback update-network-settings(string, bool, bool, bool);
 
     // File browser callbacks (for remote peer browsing)
     callback browse-peer(string);              // peer id - start browsing
@@ -486,6 +523,10 @@ export global AppLogic {
     in property <bool> trust-in-progress: false;
     in property <string> trust-code: "";
     in property <string> endpoint-id: "";
+
+    // Relay connection status
+    in property <string> relay-status: "connecting";  // "connected", "connecting", "disconnected"
+    in property <string> relay-url: "";               // Current relay URL if connected
 
     // Networks state
     in property <[NetworkItem]> networks: [];
@@ -522,6 +563,25 @@ export global AppLogic {
     callback toggle-session-stats();
     // Transfer list setting
     callback toggle-keep-completed-transfers();
+
+    // ==================== Chat ====================
+    // Chat callbacks
+    callback open-chat(string);              // peer_id - open chat with peer
+    callback close-chat();                   // close chat panel
+    callback send-chat-message(string);      // content - send message to active peer
+    callback load-more-messages();           // load older messages (pagination)
+    callback chat-input-changed(string);     // content - for typing indicator
+
+    // Chat state
+    in property <bool> chat-panel-open: false;
+    in property <string> chat-peer-id: "";
+    in property <string> chat-peer-name: "";
+    in property <bool> chat-peer-online: false;
+    in property <bool> chat-peer-typing: false;
+    in property <[ChatMessageItem]> chat-messages: [];
+    in property <bool> chat-loading: false;
+    in property <bool> chat-has-more: false;        // more older messages available
+    in property <int> total-unread-count: 0;        // badge for all conversations
 }
 
 // ============================================================================
@@ -1540,17 +1600,21 @@ component PeerCard inherits Rectangle {
     callback connect-clicked();
     callback push-clicked();
     callback browse-clicked();
+    callback chat-clicked();  // open chat with this peer
     callback refresh-clicked();
     callback speed-test-clicked();
     callback rename-clicked(string);  // new name
+    callback revoke-clicked();  // revoke trust (send notification to peer)
     callback permissions-changed(bool, bool, bool); // allow-push, allow-pull, allow-browse
     callback expanded-changed(bool); // notify when expanded state changes
 
-    background: peer.revoked ? Theme.bg-hover : Theme.bg-card;
+    background: peer.revoked || peer.we-revoked ? Theme.bg-hover : Theme.bg-card;
     border-radius: Theme.radius-sm;
     border-width: 1px;
-    border-color: peer.revoked ? Theme.error : (peer.expanded ? Theme.accent : Theme.border);
-    opacity: peer.revoked ? 0.7 : 1.0;
+    border-color: peer.revoked ? Theme.error :
+                 peer.we-revoked ? Theme.warning :
+                 peer.expanded ? Theme.accent : Theme.border;
+    opacity: peer.revoked || peer.we-revoked ? 0.7 : 1.0;
 
     VerticalLayout {
         // Header row (always visible)
@@ -1597,7 +1661,7 @@ component PeerCard inherits Rectangle {
                         overflow: elide;
                     }
 
-                    // Revoked badge
+                    // Revoked badge (they revoked us)
                     if peer.revoked: Rectangle {
                         width: 60px;
                         height: 16px;
@@ -1608,6 +1672,22 @@ component PeerCard inherits Rectangle {
                             text: "Revoked";
                             font-size: 10px;
                             color: Theme.error;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    // We revoked badge (we revoked them)
+                    if !peer.revoked && peer.we-revoked: Rectangle {
+                        width: 80px;
+                        height: 16px;
+                        border-radius: 3px;
+                        background: #eab30830;
+
+                        Text {
+                            text: "Revoked by you";
+                            font-size: 10px;
+                            color: Theme.warning;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
@@ -1724,14 +1804,44 @@ component PeerCard inherits Rectangle {
             }
 
             // Browse button (for pulling files from peer) - disabled when revoked
-            if !peer.revoked && peer.can-browse && peer.status == "online": CompactButton {
+            if !peer.revoked && !peer.we-revoked && peer.can-browse && peer.status == "online": CompactButton {
                 label: "Browse";
                 small: true;
                 clicked => { root.browse-clicked(); }
             }
 
+            // Chat button with unread badge - always available for trusted peers
+            if !peer.revoked && !peer.we-revoked: Rectangle {
+                width: 45px;
+                height: 20px;
+
+                CompactButton {
+                    label: "Chat";
+                    small: true;
+                    clicked => { root.chat-clicked(); }
+                }
+
+                // Unread badge (positioned absolutely on top-right)
+                if peer.unread-count > 0: Rectangle {
+                    width: 16px;
+                    height: 16px;
+                    x: parent.width - 8px;
+                    y: -4px;
+                    border-radius: 8px;
+                    background: Theme.error;
+
+                    Text {
+                        text: peer.unread-count > 99 ? "99+" : peer.unread-count;
+                        font-size: 9px;
+                        color: #ffffff;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
             // Push button (only show if files selected and peer has permission) - disabled when revoked
-            if !peer.revoked && peer.can-push && peer.status == "online" && AppLogic.selected-files.length > 0: CompactButton {
+            if !peer.revoked && !peer.we-revoked && peer.can-push && peer.status == "online" && AppLogic.selected-files.length > 0: CompactButton {
                 label: "Push";
                 small: true;
                 clicked => { root.push-clicked(); }
@@ -2153,6 +2263,12 @@ component PeerCard inherits Rectangle {
                         enabled: peer.connected;
                         clicked => { root.disconnect-clicked(); }
                     }
+
+                    // Revoke button (only show if not already revoked by either party)
+                    if !peer.revoked && !peer.we-revoked: CompactButton {
+                        label: "Revoke Trust";
+                        clicked => { root.revoke-clicked(); }
+                    }
                 }
             }
         }
@@ -2178,6 +2294,7 @@ component NetworkCard inherits Rectangle {
     callback add-peer(string);        // peer id to add
     callback remove-peer(string);     // peer id to remove
     callback introduce-peer(string, string);  // peer_to_introduce_id, target_member_id
+    callback settings-changed(bool, bool, bool);  // allow-introductions, auto-accept, share-member-list
 
     background: Theme.bg-card;
     border-radius: Theme.radius-sm;
@@ -2287,9 +2404,72 @@ component NetworkCard inherits Rectangle {
                         font-size: 10px;
                         color: Theme.text-muted;
                     }
+                }
+
+                // Network settings (owner only)
+                if network.is-owner : VerticalLayout {
+                    spacing: Theme.spacing-xs;
+
+                    Text {
+                        text: "Settings";
+                        font-size: 11px;
+                        font-weight: 500;
+                        color: Theme.text-dim;
+                    }
+
+                    HorizontalLayout {
+                        spacing: Theme.spacing-lg;
+
+                        MiniToggle {
+                            label: "Allow Introductions";
+                            checked: network.allow-introductions;
+                            toggled => {
+                                root.settings-changed(
+                                    !network.allow-introductions,
+                                    network.auto-accept-introductions,
+                                    network.share-member-list
+                                );
+                            }
+                        }
+
+                        MiniToggle {
+                            label: "Auto-Accept";
+                            checked: network.auto-accept-introductions;
+                            toggled => {
+                                root.settings-changed(
+                                    network.allow-introductions,
+                                    !network.auto-accept-introductions,
+                                    network.share-member-list
+                                );
+                            }
+                        }
+
+                        MiniToggle {
+                            label: "Share Members";
+                            checked: network.share-member-list;
+                            toggled => {
+                                root.settings-changed(
+                                    network.allow-introductions,
+                                    network.auto-accept-introductions,
+                                    !network.share-member-list
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Settings display (non-owner, read-only)
+                if !network.is-owner : HorizontalLayout {
+                    spacing: Theme.spacing-md;
 
                     Text {
                         text: network.allow-introductions ? "Introductions: On" : "Introductions: Off";
+                        font-size: 10px;
+                        color: Theme.text-muted;
+                    }
+
+                    Text {
+                        text: network.auto-accept-introductions ? "Auto-Accept: On" : "Auto-Accept: Off";
                         font-size: 10px;
                         color: Theme.text-muted;
                     }
@@ -2664,8 +2844,9 @@ component PeersPanel inherits Rectangle {
                     if AppLogic.trust-in-progress {
                         AppLogic.cancel-trust();
                         AppLogic.add-peer-as-guest = false;  // Reset toggle
+                        AppLogic.guest-duration-hours = 24;  // Reset duration
                     } else {
-                        AppLogic.initiate-trust(AppLogic.add-peer-as-guest);
+                        AppLogic.initiate-trust(AppLogic.add-peer-as-guest, AppLogic.guest-duration-hours);
                     }
                 }
             }
@@ -2681,6 +2862,34 @@ component PeersPanel inherits Rectangle {
                 label: "Add as guest (temporary)";
                 toggled => {
                     AppLogic.add-peer-as-guest = !AppLogic.add-peer-as-guest;
+                }
+            }
+        }
+
+        // Guest duration selector (shown when guest mode enabled and not in progress)
+        if !AppLogic.trust-in-progress && AppLogic.add-peer-as-guest : HorizontalLayout {
+            alignment: end;
+            spacing: Theme.spacing-sm;
+
+            Text {
+                text: "Duration:";
+                font-size: 11px;
+                color: Theme.text-dim;
+                vertical-alignment: center;
+            }
+
+            ThemedDropdown {
+                dropdown-width: 100px;
+                model: ["1 hour", "6 hours", "24 hours", "3 days", "1 week"];
+                current-index: AppLogic.guest-duration-hours == 1 ? 0 :
+                              AppLogic.guest-duration-hours == 6 ? 1 :
+                              AppLogic.guest-duration-hours == 24 ? 2 :
+                              AppLogic.guest-duration-hours == 72 ? 3 : 4;
+                changed(idx) => {
+                    AppLogic.guest-duration-hours = idx == 0 ? 1 :
+                                                   idx == 1 ? 6 :
+                                                   idx == 2 ? 24 :
+                                                   idx == 3 ? 72 : 168;
                 }
             }
         }
@@ -2777,9 +2986,11 @@ component PeersPanel inherits Rectangle {
                         connect-clicked => { AppLogic.connect-peer(peer.id); }
                         push-clicked => { AppLogic.push-to-peer(peer.id); }
                         browse-clicked => { AppLogic.browse-peer(peer.id); }
+                        chat-clicked => { AppLogic.open-chat(peer.id); }
                         refresh-clicked => { AppLogic.refresh-peer-status(peer.id); }
                         speed-test-clicked => { AppLogic.run-speed-test(peer.id); }
                         rename-clicked(new-name) => { AppLogic.rename-peer(peer.id, new-name); }
+                        revoke-clicked => { AppLogic.revoke-peer(peer.id); }
                         permissions-changed(push, pull, browse) => {
                             AppLogic.update-peer-permissions(peer.id, push, pull, browse);
                         }
@@ -2820,6 +3031,9 @@ component PeersPanel inherits Rectangle {
                     remove-peer(peer-id) => { AppLogic.remove-peer-from-network(network.id, peer-id); }
                     introduce-peer(peer-to-introduce, target-member) => {
                         AppLogic.introduce-peers(network.id, peer-to-introduce, target-member);
+                    }
+                    settings-changed(allow-intro, auto-accept, share-members) => {
+                        AppLogic.update-network-settings(network.id, allow-intro, auto-accept, share-members);
                     }
                 }
 
@@ -3321,6 +3535,34 @@ component SettingsPanel inherits Rectangle {
                 }
             }
 
+            // Network
+            Section {
+                title: "Network";
+
+                SettingRow {
+                    label: "Relay Preference";
+                    sublabel: AppLogic.settings.relay-preference == "relay-only" ? "Always use relay servers (more reliable)" :
+                              AppLogic.settings.relay-preference == "direct-preferred" ? "Prefer direct, relay as fallback" :
+                              AppLogic.settings.relay-preference == "disabled" ? "Direct only, may fail through NAT" :
+                              "Normal - relay with auto direct upgrades";
+
+                    ThemedDropdown {
+                        dropdown-width: 140px;
+                        model: ["Normal", "Direct Preferred", "Relay Only", "Disabled"];
+                        current-index: AppLogic.settings.relay-preference == "direct-preferred" ? 1 :
+                                       AppLogic.settings.relay-preference == "relay-only" ? 2 :
+                                       AppLogic.settings.relay-preference == "disabled" ? 3 : 0;
+                        changed(idx) => {
+                            AppLogic.set-relay-preference(
+                                idx == 1 ? "direct-preferred" :
+                                idx == 2 ? "relay-only" :
+                                idx == 3 ? "disabled" : "normal"
+                            );
+                        }
+                    }
+                }
+            }
+
             // Appearance
             Section {
                 title: "Appearance";
@@ -3570,6 +3812,300 @@ component BrowseEntryRow inherits Rectangle {
                 colorize: Theme.accent-text;
                 horizontal-alignment: center;
                 vertical-alignment: center;
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Chat Panel (Slide-in from right)
+// ============================================================================
+
+component ChatPanel inherits Rectangle {
+    background: #00000080;
+
+    // Click outside to close
+    TouchArea {
+        clicked => { AppLogic.close-chat(); }
+    }
+
+    // Chat panel (slides in from right)
+    panel := Rectangle {
+        x: parent.width - self.width;
+        y: 0;
+        width: min(400px, parent.width - 40px);
+        height: parent.height;
+        background: Theme.bg-card;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        // Prevent clicks from closing
+        TouchArea {}
+
+        VerticalLayout {
+            padding: 0;
+            spacing: 0;
+
+            // Header
+            Rectangle {
+                height: 52px;
+                background: Theme.bg-dark;
+
+                HorizontalLayout {
+                    padding: Theme.spacing-sm;
+                    spacing: Theme.spacing-sm;
+                    alignment: stretch;
+
+                    // Close button
+                    ImageIconBtn {
+                        icon: Icons.x;
+                        icon-color: Theme.text-muted;
+                        clicked => { AppLogic.close-chat(); }
+                    }
+
+                    // Peer info
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: center;
+                        spacing: 2px;
+
+                        Text {
+                            text: AppLogic.chat-peer-name;
+                            font-size: 14px;
+                            font-weight: 600;
+                            color: Theme.text;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 4px;
+                            alignment: start;
+
+                            // Online indicator
+                            Rectangle {
+                                width: 8px;
+                                height: 8px;
+                                border-radius: 4px;
+                                background: AppLogic.chat-peer-online ? Theme.success : Theme.text-muted;
+                                y: (parent.height - self.height) / 2;
+                            }
+
+                            Text {
+                                text: AppLogic.chat-peer-typing ? "typing..." :
+                                      AppLogic.chat-peer-online ? "online" : "offline";
+                                font-size: 11px;
+                                color: AppLogic.chat-peer-typing ? Theme.accent : Theme.text-muted;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Messages area
+            Rectangle {
+                vertical-stretch: 1;
+                background: Theme.bg-dark;
+
+                // Loading indicator
+                if AppLogic.chat-loading: VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: "Loading messages...";
+                        font-size: 13px;
+                        color: Theme.text-muted;
+                        horizontal-alignment: center;
+                    }
+                }
+
+                // Empty state
+                if !AppLogic.chat-loading && AppLogic.chat-messages.length == 0: VerticalLayout {
+                    alignment: center;
+                    padding: Theme.spacing-lg;
+
+                    Text {
+                        text: "No messages yet";
+                        font-size: 14px;
+                        color: Theme.text-muted;
+                        horizontal-alignment: center;
+                    }
+
+                    Text {
+                        text: "Send a message to start the conversation";
+                        font-size: 12px;
+                        color: Theme.text-muted;
+                        horizontal-alignment: center;
+                    }
+                }
+
+                // Messages list
+                if !AppLogic.chat-loading && AppLogic.chat-messages.length > 0: ScrollView {
+                    VerticalLayout {
+                        padding: Theme.spacing-sm;
+                        spacing: Theme.spacing-xs;
+                        alignment: start;
+
+                        // Load more button
+                        if AppLogic.chat-has-more: HorizontalLayout {
+                            alignment: center;
+                            padding-bottom: Theme.spacing-sm;
+
+                            CompactButton {
+                                label: "Load older messages";
+                                small: true;
+                                clicked => { AppLogic.load-more-messages(); }
+                            }
+                        }
+
+                        // Messages
+                        for msg in AppLogic.chat-messages: VerticalLayout {
+                            spacing: 2px;
+
+                            // Date divider
+                            if msg.show-date-divider: HorizontalLayout {
+                                alignment: center;
+                                padding: Theme.spacing-xs;
+
+                                Text {
+                                    text: msg.date-label;
+                                    font-size: 11px;
+                                    color: Theme.text-muted;
+                                }
+                            }
+
+                            // Message bubble
+                            HorizontalLayout {
+                                alignment: msg.is-mine ? end : start;
+                                padding-left: msg.is-mine ? 40px : 0;
+                                padding-right: msg.is-mine ? 0 : 40px;
+
+                                Rectangle {
+                                    max-width: 280px;
+                                    background: msg.is-mine ? Theme.accent : Theme.bg-card;
+                                    border-radius: Theme.radius-sm;
+                                    border-width: msg.is-mine ? 0 : 1px;
+                                    border-color: Theme.border;
+
+                                    VerticalLayout {
+                                        padding: Theme.spacing-xs;
+                                        spacing: 2px;
+
+                                        // Message content
+                                        Text {
+                                            text: msg.content;
+                                            font-size: 13px;
+                                            color: msg.is-mine ? #ffffff : Theme.text;
+                                            wrap: word-wrap;
+                                        }
+
+                                        // Time and status
+                                        HorizontalLayout {
+                                            alignment: end;
+                                            spacing: 4px;
+
+                                            Text {
+                                                text: msg.timestamp;
+                                                font-size: 10px;
+                                                color: msg.is-mine ? #ffffffb0 : Theme.text-muted;
+                                            }
+
+                                            // Status indicator for our messages
+                                            if msg.is-mine: Text {
+                                                text: msg.status == "pending" ? "○" :
+                                                      msg.status == "sent" ? "✓" :
+                                                      msg.status == "delivered" ? "✓✓" :
+                                                      msg.status == "read" ? "✓✓" :
+                                                      msg.status == "failed" ? "✗" : "";
+                                                font-size: 10px;
+                                                color: msg.status == "read" ? Theme.accent :
+                                                       msg.status == "failed" ? Theme.error :
+                                                       msg.is-mine ? #ffffffb0 : Theme.text-muted;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Input area separator
+            Rectangle {
+                height: 1px;
+                background: Theme.border;
+            }
+
+            // Input area
+            Rectangle {
+                height: 55px;
+                background: Theme.bg-card;
+
+                HorizontalLayout {
+                    padding: Theme.spacing-sm;
+                    spacing: Theme.spacing-xs;
+
+                    // Input container
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 32px;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: chat-input.has-focus ? Theme.border-focus : Theme.border;
+                        background: Theme.bg-dark;
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+
+                            chat-input := TextInput {
+                                vertical-alignment: center;
+                                font-size: 13px;
+                                color: Theme.text;
+                                single-line: true;
+
+                                // Track previous text to detect actual changes
+                                property <string> previous-text: "";
+
+                                edited => {
+                                    // Only fire callback if text actually changed
+                                    if self.text != self.previous-text {
+                                        self.previous-text = self.text;
+                                        AppLogic.chat-input-changed(self.text);
+                                    }
+                                }
+
+                                accepted => {
+                                    // Enter sends the message
+                                    if self.text != "" {
+                                        AppLogic.send-chat-message(self.text);
+                                        self.text = "";
+                                        self.previous-text = "";
+                                    }
+                                }
+                            }
+                        }
+
+                        // Placeholder text
+                        if chat-input.text == "": Text {
+                            x: 8px;
+                            vertical-alignment: center;
+                            text: "Type a message...";
+                            font-size: 13px;
+                            color: Theme.text-muted;
+                        }
+                    }
+
+                    CompactButton {
+                        label: "Send";
+                        primary: true;
+                        enabled: chat-input.text != "";
+                        clicked => {
+                            if chat-input.text != "" {
+                                AppLogic.send-chat-message(chat-input.text);
+                                chat-input.text = "";
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -3849,6 +4385,19 @@ export component MainWindow inherits Window {
                     tooltip-text: "Online / Total peers";
                 }
 
+                // Relay connection status indicator
+                StatBadge {
+                    icon: Icons.signal;
+                    value: AppLogic.relay-status == "connected" ? "Relay" :
+                          AppLogic.relay-status == "connecting" ? "..." : "Offline";
+                    value-color: AppLogic.relay-status == "connected" ? Theme.success :
+                                AppLogic.relay-status == "connecting" ? Theme.warning : Theme.error;
+                    tooltip-text: AppLogic.relay-status == "connected" ?
+                                 "Connected to relay: " + AppLogic.relay-url :
+                                 AppLogic.relay-status == "connecting" ?
+                                 "Connecting to relay..." : "No relay connection";
+                }
+
                 // Active transfers badge
                 if AppLogic.active-transfer-count > 0: StatBadge {
                     icon: Icons.activity;
@@ -3934,4 +4483,7 @@ export component MainWindow inherits Window {
 
     // File browser overlay
     if AppLogic.browse-open: FileBrowserDialog {}
+
+    // Chat panel overlay
+    if AppLogic.chat-panel-open: ChatPanel {}
 }

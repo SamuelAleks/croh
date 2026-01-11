@@ -68,6 +68,10 @@ pub enum Error {
     /// Network error
     #[error("network error: {0}")]
     Network(String),
+
+    /// Chat error
+    #[error("chat error: {0}")]
+    Chat(String),
 }
 
 /// Result type alias using our Error type.

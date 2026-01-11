@@ -147,6 +147,49 @@ impl DndMode {
     }
 }
 
+/// Relay connection preference for peer-to-peer connections.
+///
+/// This controls how the application uses relay servers for NAT traversal.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RelayPreference {
+    /// Normal mode - use relays with automatic direct connection upgrades (default).
+    /// Iroh will connect via relay and automatically upgrade to direct when possible.
+    #[default]
+    Normal,
+    /// Prefer direct connections - still use relay as fallback if direct fails.
+    /// May have slightly longer initial connection times.
+    DirectPreferred,
+    /// Relay only - always use relay, never attempt direct connections.
+    /// More reliable but higher latency and bandwidth usage.
+    RelayOnly,
+    /// Disabled - no relay at all, only direct connections.
+    /// May fail to connect through NAT/firewalls.
+    Disabled,
+}
+
+impl RelayPreference {
+    /// Convert to UI string.
+    pub fn to_ui_string(&self) -> &'static str {
+        match self {
+            RelayPreference::Normal => "normal",
+            RelayPreference::DirectPreferred => "direct-preferred",
+            RelayPreference::RelayOnly => "relay-only",
+            RelayPreference::Disabled => "disabled",
+        }
+    }
+
+    /// Parse from UI string.
+    pub fn from_ui_string(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "direct-preferred" => RelayPreference::DirectPreferred,
+            "relay-only" => RelayPreference::RelayOnly,
+            "disabled" => RelayPreference::Disabled,
+            _ => RelayPreference::Normal,
+        }
+    }
+}
+
 /// Security posture for the application.
 ///
 /// This controls default settings for guest peers, auto-accept behavior,
@@ -323,6 +366,10 @@ pub struct Config {
     /// Guest peer policy (derived from security_posture by default).
     #[serde(default)]
     pub guest_policy: GuestPolicy,
+
+    /// Relay connection preference for peer-to-peer connections.
+    #[serde(default)]
+    pub relay_preference: RelayPreference,
 }
 
 fn default_keep_completed_transfers() -> bool {
@@ -349,6 +396,7 @@ impl Default for Config {
             keep_completed_transfers: true,
             security_posture: SecurityPosture::default(),
             guest_policy: GuestPolicy::default(),
+            relay_preference: RelayPreference::default(),
         }
     }
 }

@@ -53,6 +53,9 @@ hex = "0.4"
 # Base64 encoding for speed test data
 base64 = "0.22"
 
+# Embedded database for chat storage
+sled = "0.34"
+
 # Hostname detection
 hostname = "0.4"
 

@@ -6,9 +6,11 @@
 //! - File handling utilities
 //! - Configuration management
 //! - Iroh networking for trusted peers
+//! - Peer-to-peer chat
 //!
 //! It is used by both the GUI and daemon crates.
 
+pub mod chat;
 pub mod config;
 pub mod croc;
 pub mod error;
@@ -22,7 +24,7 @@ pub mod transfer_history;
 pub mod trust;
 
 // Re-export commonly used types
-pub use config::{BrowseSettings, Config, DndMode, GuestPolicy, SecurityPosture, WindowSize};
+pub use config::{BrowseSettings, Config, DndMode, GuestPolicy, RelayPreference, SecurityPosture, WindowSize};
 pub use croc::{CrocOptions, CrocProcess, CrocProcessHandle, find_croc_executable, refresh_croc_cache};
 pub use error::{Error, Result};
 pub use files::{format_size, format_duration, format_uptime, format_eta, get_disk_space};
@@ -39,6 +41,7 @@ pub use peers::{PeerStore, Permissions, TrustedPeer};
 pub use transfer::{Transfer, TransferId, TransferManager, TransferStatus, TransferType};
 pub use transfer_history::TransferHistory;
 pub use trust::{Capability, PeerInfo, TrustBundle};
+pub use chat::{ChatEvent, ChatHandler, ChatMessage, ChatStore, ChatConversation, MessageId, MessageStatus};
 
 // Re-export serde_json for GUI use
 pub use serde_json;

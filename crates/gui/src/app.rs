@@ -7,6 +7,7 @@ use croh_core::{
     Transfer, TransferId, TransferEvent, TransferHistory, TransferManager, TransferStatus, TransferType,
     TrustedPeer, TrustBundle, push_files, pull_files, handle_incoming_push, handle_incoming_pull, handle_browse_request, browse_remote, default_browsable_paths,
     NodeAddr, NodeId, generate_id, serde_json,
+    ChatStore, ChatHandler,
 };
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 use std::collections::HashMap;
@@ -15,7 +16,7 @@ use std::sync::Arc;
 use tokio::sync::{oneshot, RwLock};
 use tracing::{debug, error, info, warn};
 
-use crate::{AppLogic, AppSettings, BrowseEntry, MainWindow, NetworkItem, NetworkMember, PeerItem, SelectedFile, SessionStats, TransferItem};
+use crate::{AppLogic, AppSettings, BrowseEntry, ChatMessageItem, MainWindow, NetworkItem, NetworkMember, PeerItem, SelectedFile, SessionStats, TransferItem};
 
 /// Connection status for a peer.
 #[derive(Clone, Debug, Default)]
@@ -82,10 +83,18 @@ pub struct App {
     session_stats: Arc<RwLock<SessionStatsTracker>>,
     /// Set of peer IDs that are currently disconnected (user paused connections).
     disconnected_peers: Arc<RwLock<std::collections::HashSet<String>>>,
+    /// Set of peer IDs that we have revoked trust for (sent TrustRevoke but kept in store).
+    revoked_by_us: Arc<RwLock<std::collections::HashSet<String>>>,
     /// Network store for peer networks.
     network_store: Arc<RwLock<NetworkStore>>,
     /// Pending peer introductions (introduction_id -> state).
     pending_introductions: Arc<RwLock<HashMap<String, PendingIntroduction>>>,
+    /// Chat store for persistent message history.
+    chat_store: Arc<ChatStore>,
+    /// Currently active chat peer ID.
+    active_chat_peer: Arc<RwLock<Option<String>>>,
+    /// Debounce timer for typing indicator.
+    typing_debounce: Arc<RwLock<Option<std::time::Instant>>>,
 }
 
 /// Tracks session statistics for uploads and downloads.
@@ -164,6 +173,7 @@ impl App {
         let peer_store = PeerStore::load().unwrap_or_default();
         let transfer_history = TransferHistory::load().unwrap_or_default();
         let network_store = NetworkStore::load().unwrap_or_default();
+        let chat_store = ChatStore::open().expect("Failed to open chat store");
 
         Self {
             window,
@@ -183,8 +193,12 @@ impl App {
             app_start_time: std::time::Instant::now(),
             session_stats: Arc::new(RwLock::new(SessionStatsTracker::default())),
             disconnected_peers: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            revoked_by_us: Arc::new(RwLock::new(std::collections::HashSet::new())),
             network_store: Arc::new(RwLock::new(network_store)),
             pending_introductions: Arc::new(RwLock::new(HashMap::new())),
+            chat_store: Arc::new(chat_store),
+            active_chat_peer: Arc::new(RwLock::new(None)),
+            typing_debounce: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -201,6 +215,7 @@ impl App {
         self.setup_peer_callbacks(window);
         self.setup_browse_callbacks(window);
         self.setup_network_callbacks(window);
+        self.setup_chat_callbacks(window);
 
         // Start background listener for incoming transfers
         self.start_background_listener();
@@ -472,6 +487,8 @@ impl App {
         let app_start_time = self.app_start_time;
         let session_stats = self.session_stats.clone();
         let disconnected_peers = self.disconnected_peers.clone();
+        let chat_store = self.chat_store.clone();
+        let active_chat_peer = self.active_chat_peer.clone();
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -522,6 +539,42 @@ impl App {
                 }
 
                 info!("Background listener started, waiting for incoming connections...");
+
+                // Spawn relay status monitoring task
+                {
+                    let endpoint = endpoint.clone();
+                    let window_weak = window_weak.clone();
+                    let shutdown = shutdown.clone();
+                    tokio::spawn(async move {
+                        let mut last_status = String::new();
+                        loop {
+                            if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                                break;
+                            }
+
+                            // Check relay status
+                            let (status, url) = match endpoint.relay_url() {
+                                Some(url) => ("connected".to_string(), url.to_string()),
+                                None => ("disconnected".to_string(), String::new()),
+                            };
+
+                            // Only update UI if status changed
+                            if status != last_status {
+                                last_status = status.clone();
+                                let window_weak = window_weak.clone();
+                                let url_clone = url.clone();
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if let Some(window) = window_weak.upgrade() {
+                                        window.global::<AppLogic>().set_relay_status(SharedString::from(&status));
+                                        window.global::<AppLogic>().set_relay_url(SharedString::from(&url_clone));
+                                    }
+                                });
+                            }
+
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        }
+                    });
+                }
 
                 // Accept connections in a loop
                 loop {
@@ -1535,6 +1588,212 @@ impl App {
 
                             let _ = conn.close().await;
                         }
+                        // ==================== Chat Message Handlers ====================
+                        ControlMessage::ChatMessage { message_id, content, sequence, sent_at } => {
+                            info!("Received chat message from {}: {} bytes", peer.name, content.len());
+
+                            // Check if chat is allowed from this peer
+                            if !peer.permissions_granted.chat {
+                                warn!("Chat not allowed from {}", peer.name);
+                                let _ = conn.close().await;
+                                continue;
+                            }
+
+                            // Get our endpoint ID
+                            let our_id = {
+                                let id_guard = identity.read().await;
+                                match id_guard.as_ref() {
+                                    Some(id) => id.endpoint_id.clone(),
+                                    None => {
+                                        error!("No identity for chat");
+                                        continue;
+                                    }
+                                }
+                            };
+
+                            // Create handler and process message
+                            let handler = ChatHandler::new(chat_store.clone(), our_id.clone());
+                            match handler.handle_chat_message(
+                                &peer.endpoint_id,
+                                &peer.name,
+                                message_id.clone(),
+                                content.clone(),
+                                sequence,
+                                sent_at,
+                            ) {
+                                Ok(events) => {
+                                    // Send delivery receipt
+                                    let _ = conn.send(&ControlMessage::ChatDelivered {
+                                        message_ids: vec![message_id.clone()],
+                                    }).await;
+
+                                    // Update UI if chat is open with this peer
+                                    let active = active_chat_peer.read().await;
+                                    let is_active = active.as_ref().map(|id| id == &peer.endpoint_id).unwrap_or(false);
+                                    drop(active);
+
+                                    if is_active {
+                                        // Reload messages in the chat panel
+                                        let mut messages = chat_store.get_messages(&peer.endpoint_id, 50, None)
+                                            .unwrap_or_default();
+
+                                        // Reverse to get chronological order (oldest first for display)
+                                        messages.reverse();
+
+                                        let ui_messages: Vec<ChatMessageItem> = messages
+                                            .iter()
+                                            .map(|m| {
+                                                let is_mine = m.sender_id == our_id;
+                                                ChatMessageItem {
+                                                    id: SharedString::from(m.id.as_str()),
+                                                    content: SharedString::from(&m.content),
+                                                    is_mine,
+                                                    timestamp: SharedString::from(format_chat_time(m.sent_at)),
+                                                    status: SharedString::from(m.status.as_str()),
+                                                    show_date_divider: false,
+                                                    date_label: SharedString::default(),
+                                                }
+                                            })
+                                            .collect();
+
+                                        let _ = slint::invoke_from_event_loop({
+                                            let window_weak = window_weak.clone();
+                                            move || {
+                                                if let Some(window) = window_weak.upgrade() {
+                                                    let logic = window.global::<AppLogic>();
+                                                    logic.set_chat_messages(ModelRc::new(VecModel::from(ui_messages)));
+                                                    logic.set_chat_peer_typing(false);
+                                                }
+                                            }
+                                        });
+
+                                        // Mark as read since chat is open
+                                        let _ = handler.mark_conversation_read(&peer.endpoint_id);
+                                    } else {
+                                        // Update unread count in peer list
+                                        let unread = chat_store.get_unread_count(&peer.endpoint_id).unwrap_or(0);
+                                        let peer_id = peer.endpoint_id.clone();
+                                        let _ = slint::invoke_from_event_loop({
+                                            let window_weak = window_weak.clone();
+                                            move || {
+                                                if let Some(window) = window_weak.upgrade() {
+                                                    let logic = window.global::<AppLogic>();
+                                                    let model = logic.get_peers();
+                                                    for i in 0..model.row_count() {
+                                                        if let Some(mut item) = model.row_data(i) {
+                                                            if item.endpoint_id.as_str() == peer_id {
+                                                                item.unread_count = unread as i32;
+                                                                model.set_row_data(i, item);
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to handle chat message: {}", e);
+                                }
+                            }
+
+                            let _ = conn.close().await;
+                        }
+                        ControlMessage::ChatDelivered { message_ids } => {
+                            debug!("Received delivery receipt for {} messages from {}", message_ids.len(), peer.name);
+
+                            // Mark messages as delivered
+                            let _ = chat_store.mark_delivered(&message_ids);
+
+                            // Update UI if chat is open
+                            let active = active_chat_peer.read().await;
+                            let is_active = active.as_ref().map(|id| id == &peer.endpoint_id).unwrap_or(false);
+                            drop(active);
+
+                            if is_active {
+                                let peer_id = peer.endpoint_id.clone();
+                                let message_ids_clone = message_ids.clone();
+                                let _ = slint::invoke_from_event_loop({
+                                    let window_weak = window_weak.clone();
+                                    move || {
+                                        if let Some(window) = window_weak.upgrade() {
+                                            let logic = window.global::<AppLogic>();
+                                            let current = logic.get_chat_messages();
+                                            let messages: Vec<ChatMessageItem> = (0..current.row_count())
+                                                .filter_map(|i| {
+                                                    let mut m = current.row_data(i)?;
+                                                    if message_ids_clone.contains(&m.id.to_string()) {
+                                                        m.status = SharedString::from("delivered");
+                                                    }
+                                                    Some(m)
+                                                })
+                                                .collect();
+                                            logic.set_chat_messages(ModelRc::new(VecModel::from(messages)));
+                                        }
+                                    }
+                                });
+                            }
+
+                            let _ = conn.close().await;
+                        }
+                        ControlMessage::ChatRead { message_ids, up_to_sequence: _ } => {
+                            debug!("Received read receipt for {} messages from {}", message_ids.len(), peer.name);
+
+                            // Mark messages as read
+                            let _ = chat_store.mark_read(&message_ids);
+
+                            // Update UI if chat is open
+                            let active = active_chat_peer.read().await;
+                            let is_active = active.as_ref().map(|id| id == &peer.endpoint_id).unwrap_or(false);
+                            drop(active);
+
+                            if is_active {
+                                let message_ids_clone = message_ids.clone();
+                                let _ = slint::invoke_from_event_loop({
+                                    let window_weak = window_weak.clone();
+                                    move || {
+                                        if let Some(window) = window_weak.upgrade() {
+                                            let logic = window.global::<AppLogic>();
+                                            let current = logic.get_chat_messages();
+                                            let messages: Vec<ChatMessageItem> = (0..current.row_count())
+                                                .filter_map(|i| {
+                                                    let mut m = current.row_data(i)?;
+                                                    if message_ids_clone.contains(&m.id.to_string()) {
+                                                        m.status = SharedString::from("read");
+                                                    }
+                                                    Some(m)
+                                                })
+                                                .collect();
+                                            logic.set_chat_messages(ModelRc::new(VecModel::from(messages)));
+                                        }
+                                    }
+                                });
+                            }
+
+                            let _ = conn.close().await;
+                        }
+                        ControlMessage::ChatTyping { is_typing } => {
+                            debug!("Received typing indicator from {}: {}", peer.name, is_typing);
+
+                            // Update UI if chat is open with this peer
+                            let active = active_chat_peer.read().await;
+                            let is_active = active.as_ref().map(|id| id == &peer.endpoint_id).unwrap_or(false);
+                            drop(active);
+
+                            if is_active {
+                                let _ = slint::invoke_from_event_loop({
+                                    let window_weak = window_weak.clone();
+                                    move || {
+                                        if let Some(window) = window_weak.upgrade() {
+                                            window.global::<AppLogic>().set_chat_peer_typing(is_typing);
+                                        }
+                                    }
+                                });
+                            }
+
+                            let _ = conn.close().await;
+                        }
                         other => {
                             warn!("Unexpected message type from {}: {:?}", remote_id, other);
                         }
@@ -1600,6 +1859,9 @@ impl App {
                 // Security settings
                 let security_posture = config_guard.security_posture.to_ui_string().to_string();
 
+                // Network settings
+                let relay_preference = config_guard.relay_preference.to_ui_string().to_string();
+
                 // Device identity
                 let device_nickname = config_guard.device_nickname.clone().unwrap_or_default();
                 let device_hostname = Config::get_hostname();
@@ -1629,6 +1891,7 @@ impl App {
                             show_session_stats,
                             keep_completed_transfers,
                             security_posture: SharedString::from(security_posture),
+                            relay_preference: SharedString::from(relay_preference),
                         };
                         window.global::<AppLogic>().set_settings(settings);
                     }
@@ -2754,6 +3017,7 @@ impl App {
                         let show_session_stats = config_guard.show_session_stats;
                         let keep_completed_transfers = config_guard.keep_completed_transfers;
                         let security_posture = config_guard.security_posture.to_ui_string().to_string();
+                        let relay_preference = config_guard.relay_preference.to_ui_string().to_string();
                         let device_nickname = config_guard.device_nickname.clone().unwrap_or_default();
                         let device_hostname = Config::get_hostname();
                         let (croc_path, croc_found) = match find_croc_executable() {
@@ -2784,6 +3048,7 @@ impl App {
                                     show_session_stats,
                                     keep_completed_transfers,
                                     security_posture: SharedString::from(security_posture),
+                                    relay_preference: SharedString::from(relay_preference),
                                 };
                                 window.global::<AppLogic>().set_settings(settings);
                             }
@@ -3024,6 +3289,51 @@ impl App {
             }
         });
 
+        // Set relay preference callback
+        window.global::<AppLogic>().on_set_relay_preference({
+            let config = config.clone();
+            let window_weak = window_weak.clone();
+
+            move |preference| {
+                let preference_str = preference.to_string();
+                let config = config.clone();
+                let window_weak = window_weak.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Update config with new relay preference
+                        {
+                            let mut config_guard = config.write().await;
+                            config_guard.relay_preference = croh_core::RelayPreference::from_ui_string(&preference_str);
+                            if let Err(e) = config_guard.save() {
+                                error!("Failed to save relay preference: {}", e);
+                            }
+                        }
+
+                        // Update UI
+                        let _ = slint::invoke_from_event_loop({
+                            let window_weak = window_weak.clone();
+                            let preference_str = preference_str.clone();
+                            move || {
+                                if let Some(window) = window_weak.upgrade() {
+                                    let mut settings = window.global::<AppLogic>().get_settings();
+                                    settings.relay_preference = SharedString::from(&preference_str);
+                                    window.global::<AppLogic>().set_settings(settings);
+                                }
+                            }
+                        });
+
+                        info!("Relay preference set to: {}", preference_str);
+                    });
+                });
+            }
+        });
+
         // Set device nickname callback
         window.global::<AppLogic>().on_set_device_nickname({
             let config = config.clone();
@@ -3192,8 +3502,8 @@ impl App {
             let pending_trust = pending_trust.clone();
             let peer_status = peer_status.clone();
 
-            move |guest_mode: bool| {
-                info!("Initiating trust (guest_mode={})...", guest_mode);
+            move |guest_mode: bool, duration_hours: i32| {
+                info!("Initiating trust (guest_mode={}, duration_hours={})...", guest_mode, duration_hours);
                 let window_weak = window_weak.clone();
                 let identity = identity.clone();
                 let shared_endpoint = shared_endpoint.clone();
@@ -3202,6 +3512,7 @@ impl App {
                 let config = config.clone();
                 let peer_store = peer_store.clone();
                 let peer_status = peer_status.clone();
+                let duration_hours = duration_hours as u32;
 
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
@@ -3283,10 +3594,11 @@ impl App {
                         }
 
                         // Create trust bundle with the relay URL
-                        // Use guest mode if requested (duration will use config default)
+                        // Use guest mode if requested with specified duration
                         let bundle = if guest_mode {
-                            info!("Creating guest trust bundle");
-                            TrustBundle::new_guest(&id, relay_url, None) // None = use receiver's default duration
+                            let duration = if duration_hours > 0 { Some(duration_hours) } else { None };
+                            info!("Creating guest trust bundle with duration: {:?} hours", duration);
+                            TrustBundle::new_guest(&id, relay_url, duration)
                         } else {
                             TrustBundle::new_with_relay(&id, relay_url)
                         };
@@ -3572,6 +3884,93 @@ impl App {
                         // Update UI by refreshing the peers list
                         update_peers_ui_with_status(&window_weak, &peer_store, &peer_status).await;
                         update_status(&window_weak, "Peer removed");
+                    });
+                });
+            }
+        });
+
+        // Revoke peer callback - sends TrustRevoke but keeps peer in store
+        window.global::<AppLogic>().on_revoke_peer({
+            let window_weak = window_weak.clone();
+            let peer_store = peer_store.clone();
+            let peer_status = self.peer_status.clone();
+            let revoked_by_us = self.revoked_by_us.clone();
+            let shared_endpoint = self.shared_endpoint.clone();
+
+            move |id| {
+                let id_str = id.to_string();
+                info!("Revoking trust for peer: {}", id_str);
+                let window_weak = window_weak.clone();
+                let peer_store = peer_store.clone();
+                let peer_status = peer_status.clone();
+                let revoked_by_us = revoked_by_us.clone();
+                let shared_endpoint = shared_endpoint.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Get the peer info for TrustRevoke
+                        let peer = {
+                            let store = peer_store.read().await;
+                            store.find_by_id(&id_str).cloned()
+                        };
+
+                        // Send TrustRevoke to notify the peer
+                        if let Some(peer) = &peer {
+                            let endpoint_guard = shared_endpoint.read().await;
+                            if let Some(endpoint) = endpoint_guard.as_ref() {
+                                match endpoint.connect(&peer.endpoint_id).await {
+                                    Ok(mut conn) => {
+                                        let revoke = ControlMessage::TrustRevoke {
+                                            reason: "Trust revoked by user".to_string(),
+                                        };
+                                        if let Err(e) = conn.send(&revoke).await {
+                                            warn!("Failed to send TrustRevoke: {}", e);
+                                        } else {
+                                            info!("Sent TrustRevoke to {}", peer.name);
+                                        }
+                                        // Give time for message to be delivered
+                                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                        let _ = conn.close().await;
+                                    }
+                                    Err(e) => {
+                                        debug!("Could not connect to peer for TrustRevoke: {}", e);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Mark as revoked by us (don't delete from store)
+                        {
+                            let mut revoked = revoked_by_us.write().await;
+                            revoked.insert(id_str.clone());
+                        }
+
+                        // Set the we_revoked flag directly on the UI item
+                        let id_str_clone = id_str.clone();
+                        let window_weak_set = window_weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(window) = window_weak_set.upgrade() {
+                                let logic = window.global::<AppLogic>();
+                                let model = logic.get_peers();
+                                for i in 0..model.row_count() {
+                                    if let Some(mut peer) = model.row_data(i) {
+                                        if peer.id.to_string() == id_str_clone {
+                                            peer.we_revoked = true;
+                                            peer.status = SharedString::from("offline");
+                                            model.set_row_data(i, peer);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        });
+
+                        update_status(&window_weak, "Trust revoked");
                     });
                 });
             }
@@ -4188,6 +4587,7 @@ impl App {
                                             pull: allow_pull,
                                             browse: allow_browse,
                                             status: true, // Always allow status
+                                            chat: true,   // Always allow chat
                                         };
                                         let msg = ControlMessage::PermissionsUpdate { permissions };
                                         if let Err(e) = conn.send(&msg).await {
@@ -5788,6 +6188,411 @@ impl App {
                 });
             }
         });
+
+        // Update network settings callback
+        window.global::<AppLogic>().on_update_network_settings({
+            let window_weak = window_weak.clone();
+            let network_store = network_store.clone();
+            let peer_store = peer_store.clone();
+
+            move |network_id, allow_introductions, auto_accept, share_member_list| {
+                let network_id_str = network_id.to_string();
+                info!(
+                    "Updating network {} settings: allow_intro={}, auto_accept={}, share_members={}",
+                    network_id_str, allow_introductions, auto_accept, share_member_list
+                );
+
+                let window_weak = window_weak.clone();
+                let network_store = network_store.clone();
+                let peer_store = peer_store.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        let mut store = network_store.write().await;
+                        let settings = croh_core::networks::NetworkSettings {
+                            allow_introductions,
+                            auto_accept_introductions: auto_accept,
+                            share_member_list,
+                            max_members: 0, // Keep unlimited
+                        };
+
+                        match store.update_settings(&network_id_str, settings) {
+                            Ok(_) => {
+                                info!("Network settings updated successfully");
+                                drop(store);
+                                update_networks_ui(&window_weak, &network_store, &peer_store).await;
+                            }
+                            Err(e) => {
+                                error!("Failed to update network settings: {}", e);
+                                update_status(&window_weak, &format!("Error: {}", e));
+                            }
+                        }
+                    });
+                });
+            }
+        });
+    }
+
+    /// Set up chat callbacks for peer messaging.
+    fn setup_chat_callbacks(&self, window: &MainWindow) {
+        let window_weak = self.window.clone();
+        let chat_store = self.chat_store.clone();
+        let active_chat_peer = self.active_chat_peer.clone();
+        let peer_store = self.peer_store.clone();
+        let shared_endpoint = self.shared_endpoint.clone();
+        let identity = self.identity.clone();
+        let peer_status = self.peer_status.clone();
+
+        // Open chat callback - opens chat panel for a specific peer
+        window.global::<AppLogic>().on_open_chat({
+            let window_weak = window_weak.clone();
+            let chat_store = chat_store.clone();
+            let active_chat_peer = active_chat_peer.clone();
+            let peer_store = peer_store.clone();
+            let peer_status = peer_status.clone();
+            let identity = identity.clone();
+
+            move |peer_id| {
+                let peer_id_str = peer_id.to_string();
+                info!("Opening chat with peer: {}", peer_id_str);
+
+                let window_weak = window_weak.clone();
+                let chat_store = chat_store.clone();
+                let active_chat_peer = active_chat_peer.clone();
+                let peer_store = peer_store.clone();
+                let peer_status = peer_status.clone();
+                let identity = identity.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Get peer info (peer_id_str is the peer's internal id from Slint)
+                        let peers = peer_store.read().await;
+                        let peer = match peers.find_by_id(&peer_id_str) {
+                            Some(p) => p.clone(),
+                            None => {
+                                error!("Peer not found: {}", peer_id_str);
+                                return;
+                            }
+                        };
+                        drop(peers);
+
+                        // Use the full endpoint_id for chat operations (not the truncated display version)
+                        let peer_endpoint_id = peer.endpoint_id.clone();
+
+                        // Set active chat peer (using endpoint_id for message matching)
+                        {
+                            let mut active = active_chat_peer.write().await;
+                            *active = Some(peer_endpoint_id.clone());
+                        }
+
+                        // Check if peer is online
+                        let status = peer_status.read().await;
+                        let is_online = status.get(&peer_id_str).map(|s| s.online).unwrap_or(false);
+                        drop(status);
+
+                        // Get our endpoint ID
+                        let our_id = {
+                            let id_guard = identity.read().await;
+                            id_guard.as_ref().map(|i| i.endpoint_id.clone()).unwrap_or_default()
+                        };
+
+                        // Load messages from store (keyed by endpoint_id)
+                        let mut messages = chat_store.get_messages(&peer_endpoint_id, 50, None)
+                            .unwrap_or_default();
+
+                        // Reverse to get chronological order (oldest first for display)
+                        messages.reverse();
+
+                        // Mark messages as read
+                        let handler = ChatHandler::new(chat_store.clone(), our_id.clone());
+                        if let Err(e) = handler.mark_conversation_read(&peer_endpoint_id) {
+                            warn!("Failed to mark messages as read: {}", e);
+                        }
+
+                        // Convert to UI format
+                        let ui_messages: Vec<ChatMessageItem> = messages
+                            .iter()
+                            .map(|m| {
+                                let is_mine = m.sender_id == our_id;
+                                ChatMessageItem {
+                                    id: SharedString::from(m.id.as_str()),
+                                    content: SharedString::from(&m.content),
+                                    is_mine,
+                                    timestamp: SharedString::from(format_chat_time(m.sent_at)),
+                                    status: SharedString::from(m.status.as_str()),
+                                    show_date_divider: false,
+                                    date_label: SharedString::default(),
+                                }
+                            })
+                            .collect();
+
+                        // Check if there are more messages
+                        let has_more = messages.len() >= 50;
+
+                        // Update UI
+                        let window_weak = window_weak.clone();
+                        let peer_name = peer.name.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(window) = window_weak.upgrade() {
+                                let logic = window.global::<AppLogic>();
+                                logic.set_chat_panel_open(true);
+                                logic.set_chat_peer_id(SharedString::from(&peer_endpoint_id));
+                                logic.set_chat_peer_name(SharedString::from(&peer_name));
+                                logic.set_chat_peer_online(is_online);
+                                logic.set_chat_peer_typing(false);
+                                logic.set_chat_messages(ModelRc::new(VecModel::from(ui_messages)));
+                                logic.set_chat_loading(false);
+                                logic.set_chat_has_more(has_more);
+                            }
+                        });
+                    });
+                });
+            }
+        });
+
+        // Close chat callback
+        window.global::<AppLogic>().on_close_chat({
+            let window_weak = window_weak.clone();
+            let active_chat_peer = active_chat_peer.clone();
+
+            move || {
+                info!("Closing chat panel");
+
+                let window_weak = window_weak.clone();
+                let active_chat_peer = active_chat_peer.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Clear active chat peer
+                        {
+                            let mut active = active_chat_peer.write().await;
+                            *active = None;
+                        }
+
+                        // Update UI
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(window) = window_weak.upgrade() {
+                                let logic = window.global::<AppLogic>();
+                                logic.set_chat_panel_open(false);
+                                logic.set_chat_peer_id(SharedString::default());
+                                logic.set_chat_peer_name(SharedString::default());
+                                logic.set_chat_messages(ModelRc::new(VecModel::default()));
+                            }
+                        });
+                    });
+                });
+            }
+        });
+
+        // Send chat message callback
+        window.global::<AppLogic>().on_send_chat_message({
+            let window_weak = window_weak.clone();
+            let chat_store = chat_store.clone();
+            let active_chat_peer = active_chat_peer.clone();
+            let shared_endpoint = shared_endpoint.clone();
+            let identity = identity.clone();
+            let peer_store = peer_store.clone();
+
+            move |content| {
+                let content_str = content.to_string().trim().to_string();
+                if content_str.is_empty() {
+                    return;
+                }
+
+                let window_weak = window_weak.clone();
+                let chat_store = chat_store.clone();
+                let active_chat_peer = active_chat_peer.clone();
+                let shared_endpoint = shared_endpoint.clone();
+                let identity = identity.clone();
+                let peer_store = peer_store.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Get active peer
+                        let peer_id = {
+                            let active = active_chat_peer.read().await;
+                            match active.as_ref() {
+                                Some(id) => id.clone(),
+                                None => {
+                                    warn!("No active chat peer");
+                                    return;
+                                }
+                            }
+                        };
+
+                        // Get peer info
+                        let peer_name = {
+                            let peers = peer_store.read().await;
+                            match peers.find_by_id(&peer_id) {
+                                Some(p) => p.name.clone(),
+                                None => "Unknown".to_string(),
+                            }
+                        };
+
+                        // Get our endpoint ID
+                        let our_id = {
+                            let id_guard = identity.read().await;
+                            match id_guard.as_ref() {
+                                Some(i) => i.endpoint_id.clone(),
+                                None => {
+                                    error!("No identity available");
+                                    return;
+                                }
+                            }
+                        };
+
+                        // Try to get a connection to the peer
+                        let mut conn_opt = None;
+                        {
+                            let ep_guard = shared_endpoint.read().await;
+                            if let Some(ref endpoint) = *ep_guard {
+                                if let Ok(conn) = endpoint.connect(&peer_id).await {
+                                    conn_opt = Some(conn);
+                                }
+                            }
+                        }
+
+                        // Send message via handler
+                        let handler = ChatHandler::new(chat_store.clone(), our_id.clone());
+                        let result = handler.send_message(
+                            conn_opt.as_mut(),
+                            &peer_id,
+                            &peer_name,
+                            content_str.clone(),
+                        ).await;
+
+                        // Close connection if we opened one
+                        if let Some(mut conn) = conn_opt {
+                            let _ = conn.close().await;
+                        }
+
+                        match result {
+                            Ok((message, _events)) => {
+                                // Add message to UI
+                                let status = message.status.as_str();
+                                let ui_message = ChatMessageItem {
+                                    id: SharedString::from(message.id.as_str()),
+                                    content: SharedString::from(&message.content),
+                                    is_mine: true,
+                                    timestamp: SharedString::from(format_chat_time(message.sent_at)),
+                                    status: SharedString::from(status),
+                                    show_date_divider: false,
+                                    date_label: SharedString::default(),
+                                };
+
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if let Some(window) = window_weak.upgrade() {
+                                        let logic = window.global::<AppLogic>();
+                                        let current = logic.get_chat_messages();
+                                        let mut messages: Vec<ChatMessageItem> = (0..current.row_count())
+                                            .filter_map(|i| current.row_data(i))
+                                            .collect();
+                                        messages.push(ui_message);
+                                        logic.set_chat_messages(ModelRc::new(VecModel::from(messages)));
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                error!("Failed to send message: {}", e);
+                            }
+                        }
+                    });
+                });
+            }
+        });
+
+        // Chat input changed callback (for typing indicator)
+        window.global::<AppLogic>().on_chat_input_changed({
+            let active_chat_peer = active_chat_peer.clone();
+            let shared_endpoint = shared_endpoint.clone();
+            let typing_debounce = self.typing_debounce.clone();
+
+            move |content| {
+                let content_str = content.to_string();
+                let is_typing = !content_str.trim().is_empty();
+
+                // Debounce typing indicator - only send once per second
+                let active_chat_peer = active_chat_peer.clone();
+                let shared_endpoint = shared_endpoint.clone();
+                let typing_debounce = typing_debounce.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Check debounce (but always send stop-typing immediately)
+                        if is_typing {
+                            let mut debounce = typing_debounce.write().await;
+                            let now = std::time::Instant::now();
+                            if let Some(last) = *debounce {
+                                if now.duration_since(last) < std::time::Duration::from_secs(1) {
+                                    return;
+                                }
+                            }
+                            *debounce = Some(now);
+                        }
+
+                        // Get active peer
+                        let peer_id = {
+                            let active = active_chat_peer.read().await;
+                            match active.as_ref() {
+                                Some(id) => id.clone(),
+                                None => return,
+                            }
+                        };
+
+                        // Send typing indicator
+                        let ep_guard = shared_endpoint.read().await;
+                        if let Some(ref endpoint) = *ep_guard {
+                            if let Ok(mut conn) = endpoint.connect(&peer_id).await {
+                                let msg = ControlMessage::ChatTyping { is_typing };
+                                let _ = conn.send(&msg).await;
+                                let _ = conn.close().await;
+                            }
+                        }
+                    });
+                });
+            }
+        });
+    }
+}
+
+/// Format a timestamp for chat display (e.g., "2:34 PM" or "Yesterday 2:34 PM").
+fn format_chat_time(dt: chrono::DateTime<chrono::Utc>) -> String {
+    let local = dt.with_timezone(&chrono::Local);
+    let now = chrono::Local::now();
+    let today = now.date_naive();
+    let msg_date = local.date_naive();
+
+    if msg_date == today {
+        local.format("%l:%M %p").to_string().trim().to_string()
+    } else if msg_date == today - chrono::Duration::days(1) {
+        format!("Yesterday {}", local.format("%l:%M %p").to_string().trim())
+    } else {
+        local.format("%b %d, %l:%M %p").to_string()
     }
 }
 
@@ -5800,6 +6605,8 @@ struct NetworkData {
     member_count: i32,
     is_owner: bool,
     allow_introductions: bool,
+    auto_accept_introductions: bool,
+    share_member_list: bool,
     created_at: String,
     members: Vec<(String, String)>, // (peer_id, name)
 }
@@ -5833,6 +6640,8 @@ async fn update_networks_ui(
                 member_count: n.member_count() as i32,
                 is_owner: n.is_owner(),
                 allow_introductions: n.can_introduce(),
+                auto_accept_introductions: n.settings.auto_accept_introductions,
+                share_member_list: n.settings.share_member_list,
                 created_at: n.created_at.format("%Y-%m-%d").to_string(),
                 members,
             }
@@ -5861,6 +6670,8 @@ async fn update_networks_ui(
                         member_count: d.member_count,
                         is_owner: d.is_owner,
                         allow_introductions: d.allow_introductions,
+                        auto_accept_introductions: d.auto_accept_introductions,
+                        share_member_list: d.share_member_list,
                         created_at: SharedString::from(&d.created_at),
                         members: ModelRc::new(VecModel::from(members)),
                     }
@@ -6265,6 +7076,7 @@ fn trusted_peer_to_item(p: &TrustedPeer) -> PeerItem {
         // Connection control (starts connected, user can toggle)
         connected: true,
         revoked: false,
+        we_revoked: false,
         // Guest peer fields
         is_guest: p.is_guest,
         expires_at: SharedString::from(
@@ -6275,6 +7087,8 @@ fn trusted_peer_to_item(p: &TrustedPeer) -> PeerItem {
         time_remaining: SharedString::from(format_time_remaining(p)),
         extension_count: p.extension_count as i32,
         promotion_pending: p.promotion_pending,
+        // Chat - unread count is loaded separately from chat store
+        unread_count: 0,
     }
 }
 
@@ -6423,12 +7237,13 @@ async fn update_peers_ui_with_status(
             let logic = window.global::<AppLogic>();
             let current_model = logic.get_peers();
 
-            // Build a map of current UI states by peer ID (expanded, connected, revoked)
+            // Build a map of current UI states by peer ID (expanded, connected, revoked, we_revoked)
             #[derive(Default)]
             struct PeerUiState {
                 expanded: bool,
                 connected: bool,
                 revoked: bool,
+                we_revoked: bool,
             }
             let mut ui_states: std::collections::HashMap<String, PeerUiState> = std::collections::HashMap::new();
             for i in 0..current_model.row_count() {
@@ -6437,6 +7252,7 @@ async fn update_peers_ui_with_status(
                         expanded: peer.expanded,
                         connected: peer.connected,
                         revoked: peer.revoked,
+                        we_revoked: peer.we_revoked,
                     });
                 }
             }
@@ -6447,8 +7263,9 @@ async fn update_peers_ui_with_status(
                     item.expanded = state.expanded;
                     item.connected = state.connected;
                     item.revoked = state.revoked;
-                    // If disconnected by user, show as offline regardless of actual status
-                    if !state.connected {
+                    item.we_revoked = state.we_revoked;
+                    // If disconnected by user or we revoked, show as offline regardless of actual status
+                    if !state.connected || state.we_revoked {
                         item.status = SharedString::from("offline");
                     }
                 }
@@ -6463,7 +7280,7 @@ async fn update_peers_ui_with_status(
             let mut pushable_names: Vec<SharedString> = Vec::new();
             let mut pushable_ids: Vec<SharedString> = Vec::new();
             for item in &items_with_state {
-                if item.can_push && !item.revoked {
+                if item.can_push && !item.revoked && !item.we_revoked {
                     pushable_names.push(item.name.clone());
                     pushable_ids.push(item.id.clone());
                 }

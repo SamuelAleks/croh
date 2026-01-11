@@ -2,6 +2,7 @@
 //!
 //! All messages are JSON, length-prefixed (4-byte big-endian length, then JSON bytes).
 
+use crate::chat::ChatSyncMessage;
 use crate::peers::Permissions;
 use crate::trust::PeerInfo;
 use serde::{Deserialize, Serialize};
@@ -397,6 +398,56 @@ pub enum ControlMessage {
         introduction_id: String,
         /// Reason for failure
         reason: String,
+    },
+
+    // ==================== Chat Messages ====================
+
+    /// Send a chat message to peer.
+    ChatMessage {
+        /// Unique message ID
+        message_id: String,
+        /// Message content (UTF-8 text, max 10KB)
+        content: String,
+        /// Sender-side sequence number for ordering
+        sequence: u64,
+        /// Timestamp when sent (Unix timestamp millis)
+        sent_at: i64,
+    },
+
+    /// Acknowledge receipt of chat messages (delivery receipt).
+    ChatDelivered {
+        /// Message IDs that were delivered
+        message_ids: Vec<String>,
+    },
+
+    /// Mark messages as read (read receipt).
+    ChatRead {
+        /// Message IDs that were read
+        message_ids: Vec<String>,
+        /// Highest sequence number read (for batch acknowledgment)
+        up_to_sequence: u64,
+    },
+
+    /// Typing indicator.
+    ChatTyping {
+        /// Whether user is currently typing
+        is_typing: bool,
+    },
+
+    /// Request message history sync.
+    ChatSyncRequest {
+        /// Request messages after this sequence number
+        after_sequence: u64,
+        /// Maximum number of messages to retrieve
+        limit: u32,
+    },
+
+    /// Response with message history.
+    ChatSyncResponse {
+        /// Messages in chronological order
+        messages: Vec<ChatSyncMessage>,
+        /// Whether there are more messages available
+        has_more: bool,
     },
 }
 

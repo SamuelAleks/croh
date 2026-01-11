@@ -32,6 +32,14 @@ pub struct Permissions {
     pub browse: bool,
     /// Can query status of this peer
     pub status: bool,
+    /// Can send/receive chat messages with this peer
+    #[serde(default = "default_chat_permission")]
+    pub chat: bool,
+}
+
+/// Default value for chat permission (true for backwards compatibility).
+fn default_chat_permission() -> bool {
+    true
 }
 
 impl Permissions {
@@ -42,6 +50,7 @@ impl Permissions {
             pull: true,
             browse: true,
             status: true,
+            chat: true,
         }
     }
 
@@ -50,13 +59,14 @@ impl Permissions {
         Self::all()
     }
 
-    /// Create default guest permissions (push and status only).
+    /// Create default guest permissions (push, status, and chat).
     pub fn guest_default() -> Self {
         Self {
             push: true,
             pull: false,
             browse: false,
             status: true,
+            chat: true,
         }
     }
 
@@ -69,6 +79,7 @@ impl Permissions {
                 Capability::Pull => perms.pull = true,
                 Capability::Browse => perms.browse = true,
                 Capability::Status => perms.status = true,
+                Capability::Chat => perms.chat = true,
             }
         }
         perms
@@ -88,6 +99,9 @@ impl Permissions {
         }
         if self.status {
             caps.push(Capability::Status);
+        }
+        if self.chat {
+            caps.push(Capability::Chat);
         }
         caps
     }

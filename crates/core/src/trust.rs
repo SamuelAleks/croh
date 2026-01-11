@@ -49,6 +49,8 @@ pub enum Capability {
     Browse,
     /// Can query status of this peer
     Status,
+    /// Can send/receive chat messages with this peer
+    Chat,
 }
 
 impl Capability {
@@ -59,6 +61,7 @@ impl Capability {
             Capability::Pull,
             Capability::Browse,
             Capability::Status,
+            Capability::Chat,
         ]
     }
 }
@@ -131,8 +134,8 @@ impl TrustBundle {
             croh_trust: TRUST_BUNDLE_VERSION,
             sender: identity.to_peer_info_with_relay(relay_url),
             capabilities_offered: if guest_mode {
-                // Guests get limited capabilities by default
-                vec![Capability::Push, Capability::Status]
+                // Guests get limited capabilities by default (push, status, and chat)
+                vec![Capability::Push, Capability::Status, Capability::Chat]
             } else {
                 Capability::all()
             },
