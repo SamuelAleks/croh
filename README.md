@@ -1,29 +1,53 @@
 # Croh
 
-A native desktop application for [croc](https://github.com/schollz/croc) file transfers, built with Rust and [Slint](https://slint.dev/).
+A native desktop application for secure file transfers between trusted devices, built with Rust and [Slint](https://slint.dev/).
 
-![Material Dark Theme](https://img.shields.io/badge/Theme-Material%20Dark-6750A4)
+Croh combines two transfer modes:
+- **Ad-hoc transfers** via [croc](https://github.com/schollz/croc) - Share files with anyone using human-readable codes
+- **Trusted peer connections** via [Iroh](https://iroh.computer/) - Persistent, encrypted peer-to-peer networking with NAT traversal
+
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
 ## Features
 
-- **Send files**: Select files and generate a croc code for sharing
-- **Receive files**: Enter a code to receive files from anyone
-- **Settings**: Configure download directory, theme, and relay
-- **Trusted Peers** (coming soon): Direct peer-to-peer connections using [Iroh](https://iroh.computer/)
+### File Transfers
+- **Send files**: Select files and generate a croc code for sharing with anyone
+- **Receive files**: Enter a code to receive files from any croc client
+- **Push to peers**: Send files directly to trusted peers without codes
+- **Pull from peers**: Request files from trusted peers' shared directories
+- **Remote browsing**: Browse a trusted peer's filesystem and select files to pull
+- **Speed testing**: Test connection speed between peers
 
-## Screenshots
+### Trusted Peers
+- **Trust establishment**: Secure handshake using croc for initial key exchange
+- **Persistent connections**: Iroh handles NAT traversal and reconnection automatically
+- **Peer status**: See which peers are online with connection quality indicators
+- **Guest peers**: Temporary access with configurable auto-expiry (24h-1 week)
+- **Peer promotion**: Guests can request permanent trusted status
 
-The application uses a Material Dark theme with:
-- Send tab with drag-and-drop file picker
-- Receive tab with code entry
-- Settings panel for configuration
-- Real-time transfer progress
+### Peer Networks
+- **Network groups**: Organize trusted peers into named networks
+- **Peer introductions**: Introduce peers to each other with three-way consent
+- **Network settings**: Control introductions and member visibility per network
+
+### Peer-to-Peer Chat
+- **Text messaging**: Send messages to trusted peers
+- **Typing indicators**: See when peers are typing
+- **Delivery receipts**: Track message delivery and read status
+- **Offline queuing**: Messages queue when peers are offline
+- **Message sync**: Conversation history syncs when peers reconnect
+
+### Configuration
+- **10+ themes**: Dark, Light, Dracula, Nord, Solarized, Gruvbox, Catppuccin, and more
+- **Security postures**: Relaxed, Balanced, or Cautious presets
+- **Do Not Disturb**: Silent or Busy modes with custom messages
+- **Relay preferences**: Control direct vs relay connections
+- **Browse settings**: Configure which directories peers can access
 
 ## Requirements
 
-- [croc](https://github.com/schollz/croc) installed and available in PATH
+- [croc](https://github.com/schollz/croc) installed and available in PATH (for ad-hoc transfers)
 
 ## Installation
 
@@ -40,10 +64,7 @@ The application uses a Material Dark theme with:
 
 **Option 2: Manual**
 ```powershell
-# Build
 cargo build --release
-
-# Copy binaries to a folder in your PATH
 copy target\release\croh.exe C:\Tools\
 copy target\release\croh-daemon.exe C:\Tools\
 ```
@@ -58,10 +79,7 @@ chmod +x install/linux/install.sh
 
 **Option 2: Manual**
 ```bash
-# Build
 cargo build --release
-
-# Install binaries
 sudo cp target/release/croh /usr/local/bin/
 sudo cp target/release/croh-daemon /usr/local/bin/
 
@@ -75,14 +93,10 @@ systemctl --user start croh@$USER
 ### Building from Source
 
 ```bash
-# Clone the repository
-git clone https://github.com/croh/croh.git
+git clone https://github.com/yourusername/croh.git
 cd croh
 
-# Build all crates (debug)
-cargo build
-
-# Build release binaries
+# Build all crates
 cargo build --release
 
 # Run the GUI
@@ -100,11 +114,12 @@ cargo run --release -p croh-daemon -- --help
 croh
 ```
 
-The GUI provides:
-- **Send Tab**: Select files and share the generated code
-- **Receive Tab**: Enter a code to download files
-- **Peers Tab**: Manage trusted peers (coming soon)
-- **Settings Tab**: Configure download directory, relay, theme
+The GUI provides four main tabs:
+
+- **Send**: Select files, choose destination (croc code or trusted peer), and send
+- **Receive**: Enter a croc code to download files, or accept incoming pushes
+- **Peers**: Manage trusted peers, view status, send messages, browse files
+- **Settings**: Configure download directory, theme, security, and transfer options
 
 ### Daemon (Headless)
 
@@ -121,10 +136,8 @@ croh-daemon status
 # List trusted peers
 croh-daemon peers
 
-# View configuration
+# View/set configuration
 croh-daemon config
-
-# Set configuration
 croh-daemon config download_dir /path/to/downloads
 ```
 
@@ -132,48 +145,47 @@ croh-daemon config download_dir /path/to/downloads
 
 **Linux (systemd)**
 ```bash
-# Start the service
 systemctl --user start croh@$USER
-
-# Enable at login
 systemctl --user enable croh@$USER
-
-# Check status
 systemctl --user status croh@$USER
-
-# View logs
 journalctl --user -u croh@$USER -f
 ```
 
 **Windows (NSSM)**
 ```powershell
-# Install with NSSM (done by install script with -InstallService)
 nssm start croh-daemon
 nssm stop croh-daemon
 ```
 
-## Project Structure
+## Architecture
 
 ```
 croh/
-├── Cargo.toml              # Workspace definition
 ├── crates/
-│   ├── core/               # Shared library
-│   │   └── src/
-│   │       ├── croc/       # Croc subprocess wrapper
-│   │       ├── config.rs   # Configuration management
-│   │       ├── transfer.rs # Transfer state tracking
-│   │       └── ...
-│   ├── gui/                # Native desktop app (Slint)
-│   │   ├── src/
-│   │   └── ui/             # Slint UI files
-│   └── daemon/             # Headless service
-│       └── src/
-│           └── commands/   # CLI commands
+│   ├── core/               # Shared library (croh-core)
+│   │   ├── croc/           # Croc subprocess wrapper
+│   │   ├── iroh/           # Iroh P2P networking
+│   │   │   ├── endpoint.rs # Connection management
+│   │   │   ├── protocol.rs # Control messages
+│   │   │   ├── handshake.rs# Trust establishment
+│   │   │   ├── transfer.rs # Push/pull file transfers
+│   │   │   ├── browse.rs   # Remote directory browsing
+│   │   │   └── speedtest.rs# Connection speed testing
+│   │   ├── chat/           # Peer-to-peer messaging
+│   │   ├── config.rs       # Configuration management
+│   │   ├── peers.rs        # Trusted peer storage
+│   │   ├── networks.rs     # Peer network groups
+│   │   ├── trust.rs        # Trust bundle handling
+│   │   └── transfer.rs     # Transfer state machine
+│   ├── gui/                # Native desktop app (croh)
+│   │   ├── src/app.rs      # Application state & callbacks
+│   │   └── ui/main.slint   # UI definition
+│   └── daemon/             # Headless service (croh-daemon)
+│       └── commands/       # CLI subcommands
 ├── install/
-│   ├── linux/              # Linux install scripts & service
+│   ├── linux/              # Linux install scripts & systemd service
 │   └── windows/            # Windows install scripts
-└── .vscode/                # VS Code/Cursor debug configs
+└── misc/                   # Reference documents (gitignored)
 ```
 
 ## Configuration
@@ -183,16 +195,22 @@ Configuration files are stored in:
 - **Windows**: `%APPDATA%\croh\config.json`
 - **macOS**: `~/Library/Application Support/croh/config.json`
 
-### Config File Format
+### Config Options
 
-```json
-{
-  "download_dir": "/home/user/Downloads",
-  "default_relay": null,
-  "theme": "dark",
-  "croc_path": null
-}
-```
+| Option | Description |
+|--------|-------------|
+| `download_dir` | Directory for received files |
+| `default_relay` | Custom croc relay (null = default) |
+| `theme` | UI theme (dark, light, dracula, nord, etc.) |
+| `croc_path` | Path to croc executable (null = auto-detect) |
+| `device_nickname` | Custom device name for display |
+| `default_hash` | Hash algorithm: md5, xxhash, imohash |
+| `default_curve` | Encryption curve: p256, p384, p521, siec |
+| `throttle` | Bandwidth limit (e.g., "1M", "500K") |
+| `no_local` | Force relay-only transfers |
+| `security_posture` | relaxed, balanced, or cautious |
+| `dnd_mode` | Do Not Disturb: off, silent, busy |
+| `relay_preference` | normal, direct-preferred, relay-only, disabled |
 
 ### Environment Variables
 
@@ -202,17 +220,49 @@ Configuration files are stored in:
 | `CROH_DOWNLOAD_DIR` | Default download directory |
 | `RUST_LOG` | Log level (debug, info, warn, error) |
 
+## Trust Model
+
+### Two-Tier Peer System
+
+| Tier | Duration | Network Access | Can Be Introduced |
+|------|----------|----------------|-------------------|
+| **Trusted** | Permanent | Full | Yes |
+| **Guest** | Temporary (configurable) | Limited | No |
+
+### Security Postures
+
+| Setting | Relaxed | Balanced | Cautious |
+|---------|---------|----------|----------|
+| Guest duration | 1 week | 3 days | 24 hours |
+| Auto-accept pushes | Yes | Yes (trusted only) | No |
+| Network introductions | Auto-accept | Notify | Require approval |
+
+### Trust Establishment Flow
+
+1. Initiator generates a trust bundle and sends it via croc
+2. Receiver gets the bundle and connects via Iroh using the endpoint ID
+3. Both peers exchange TrustConfirm messages with nonce verification
+4. Trust is stored locally with configurable permissions
+
+## Protocol
+
+Croh uses a custom protocol over Iroh's QUIC connections:
+
+- **ALPN**: `croh/control/1` for control messages, `croh/blobs/1` for file data
+- **Format**: Length-prefixed JSON (4-byte big-endian length + JSON payload)
+- **Encryption**: TLS 1.3 via QUIC, verified by Iroh endpoint IDs
+
+### Message Types
+
+- Trust: `TrustConfirm`, `TrustComplete`, `TrustRevoke`
+- Transfer: `PushOffer`, `PullRequest`, `TransferProgress`, `TransferComplete`
+- Browse: `BrowseRequest`, `BrowseResponse`
+- Status: `StatusRequest`, `StatusResponse`, `DndStatus`
+- Chat: `ChatMessage`, `ChatDelivered`, `ChatRead`, `ChatTyping`
+- Guest: `ExtensionRequest`, `PromotionRequest`
+- Network: `IntroductionOffer`, `IntroductionRequest`, `IntroductionComplete`
+
 ## Debugging
-
-### VS Code / Cursor
-
-Debug configurations are provided in `.vscode/launch.json`:
-
-1. Install the **CodeLLDB** extension
-2. Set breakpoints in Rust code
-3. Press `F5` to start debugging
-
-### Command Line
 
 ```bash
 # Enable debug logging
@@ -220,14 +270,38 @@ RUST_LOG=debug cargo run -p croh
 
 # Enable backtrace on panics
 RUST_BACKTRACE=1 cargo run -p croh
+
+# Run tests
+cargo test -p croh-core --lib
+cargo test -p croh-core --test iroh_integration
 ```
 
-## Roadmap
+VS Code/Cursor debug configurations are provided in `.vscode/launch.json`.
 
-- [x] Phase 0.1-0.8: Core functionality (send, receive, settings)
-- [x] Phase 0.9: Service integration
-- [ ] Phase 0.10: Testing & verification
-- [ ] Phase 1+: Iroh integration for trusted peers
+## Current Status
+
+### Complete
+- Croc send/receive with all options
+- Native file picker and transfer progress
+- Iroh endpoint and identity management
+- Trust establishment with NAT traversal
+- Push/pull file transfers between peers
+- Remote directory browsing
+- Peer-to-peer chat with receipts
+- Peer networks with introductions
+- Guest peers with expiry
+- 10+ color themes
+- Security posture presets
+
+### In Progress
+- Connection status indicators
+- Transfer resume after interruption
+- Full permissions enforcement
+
+### Planned
+- Full file manager with dual-pane interface
+- Clipboard sync between peers
+- Watch folders for auto-sync
 
 ## License
 
@@ -235,6 +309,6 @@ MIT
 
 ## Acknowledgments
 
-- [croc](https://github.com/schollz/croc) - The underlying file transfer tool
+- [croc](https://github.com/schollz/croc) - Simple and secure file transfer
 - [Slint](https://slint.dev/) - Native UI framework
-- [Iroh](https://iroh.computer/) - P2P networking (future)
+- [Iroh](https://iroh.computer/) - Peer-to-peer networking
