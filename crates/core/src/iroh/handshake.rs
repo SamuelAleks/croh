@@ -9,9 +9,10 @@
 //! 4. Both sides add each other as trusted peers
 
 use crate::error::{Error, Result};
-use crate::iroh::{ControlConnection, ControlMessage, Identity, IrohEndpoint};
+use crate::iroh::{ControlConnection, ControlMessage, Identity, IrohEndpoint, PeerAddress};
 use crate::peers::{PeerStore, Permissions, TrustedPeer};
 use crate::trust::{PeerInfo, TrustBundle};
+use chrono::Duration as ChronoDuration;
 use iroh::NodeId;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
@@ -92,22 +93,52 @@ pub async fn complete_trust_as_receiver(
     match response {
         ControlMessage::TrustComplete => {
             info!(
-                "Trust handshake completed successfully with {}",
-                bundle.sender.name
+                "Trust handshake completed successfully with {} (guest: {})",
+                bundle.sender.name,
+                bundle.guest_mode
             );
 
-            // Create the trusted peer from the bundle's sender info
-            // Store the relay URL so we can connect later for push/pull
-            let peer = TrustedPeer::new_with_relay(
-                bundle.sender.endpoint_id.clone(),
-                bundle.sender.name.clone(),
-                // We grant permissions based on what they offered
-                Permissions::from_capabilities(&bundle.capabilities_offered),
-                // They get all permissions since we sent all in TrustConfirm
-                Permissions::all(),
-                // Store their relay URL for future connections
-                bundle.sender.relay_url.clone(),
-            );
+            // Create the peer from the bundle's sender info
+            // Use guest or trusted depending on bundle settings
+            let peer = if bundle.guest_mode {
+                // Create a guest peer with time-limited access
+                let duration_hours = bundle.guest_duration_hours.unwrap_or(24);
+                let duration = ChronoDuration::hours(duration_hours as i64);
+
+                // Build address from relay URL
+                let address = PeerAddress::Iroh {
+                    relay_url: bundle.sender.relay_url.clone(),
+                    direct_addrs: vec![],
+                };
+
+                info!(
+                    "Creating guest peer with {} hour duration",
+                    duration_hours
+                );
+
+                TrustedPeer::new_guest(
+                    bundle.sender.endpoint_id.clone(),
+                    bundle.sender.name.clone(),
+                    // We grant permissions based on what they offered (limited for guests)
+                    Permissions::from_capabilities(&bundle.capabilities_offered),
+                    // They get guest-level permissions
+                    Permissions::guest_default(),
+                    address,
+                    duration,
+                )
+            } else {
+                // Create a fully trusted peer
+                TrustedPeer::new_with_relay(
+                    bundle.sender.endpoint_id.clone(),
+                    bundle.sender.name.clone(),
+                    // We grant permissions based on what they offered
+                    Permissions::from_capabilities(&bundle.capabilities_offered),
+                    // They get all permissions since we sent all in TrustConfirm
+                    Permissions::all(),
+                    // Store their relay URL for future connections
+                    bundle.sender.relay_url.clone(),
+                )
+            };
 
             // Close the connection gracefully
             if let Err(e) = conn.close().await {
@@ -135,10 +166,13 @@ pub async fn complete_trust_as_receiver(
 /// Handle an incoming trust confirmation (as the initiator/sender).
 ///
 /// This is called when a receiver connects to confirm the trust bundle we sent.
+/// The `pending_bundle` parameter should be the bundle we sent, so we know if
+/// this is a guest trust relationship.
 pub async fn handle_trust_confirm(
     conn: &mut ControlConnection,
     their_peer_info: &PeerInfo,
     their_permissions: &Permissions,
+    pending_bundle: Option<&TrustBundle>,
 ) -> Result<HandshakeResult> {
     info!(
         "Handling TrustConfirm from {} ({})",
@@ -154,17 +188,51 @@ pub async fn handle_trust_confirm(
     // QUIC may not deliver data if the endpoint closes too quickly
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    // Create the trusted peer, storing their relay URL for future connections
-    let peer = TrustedPeer::new_with_relay(
-        their_peer_info.endpoint_id.clone(),
-        their_peer_info.name.clone(),
-        // We grant all permissions (they get what we offered in the bundle)
-        Permissions::all(),
-        // Their permissions to us (what they offered in TrustConfirm)
-        their_permissions.clone(),
-        // Store their relay URL for future connections
-        their_peer_info.relay_url.clone(),
-    );
+    // Determine if this is a guest trust relationship
+    let is_guest = pending_bundle.map(|b| b.guest_mode).unwrap_or(false);
+
+    // Create the peer, storing their relay URL for future connections
+    let peer = if is_guest {
+        // Create a guest peer with time-limited access
+        let duration_hours = pending_bundle
+            .and_then(|b| b.guest_duration_hours)
+            .unwrap_or(24);
+        let duration = ChronoDuration::hours(duration_hours as i64);
+
+        // Build address from relay URL
+        let address = PeerAddress::Iroh {
+            relay_url: their_peer_info.relay_url.clone(),
+            direct_addrs: vec![],
+        };
+
+        info!(
+            "Creating guest peer {} with {} hour duration",
+            their_peer_info.name, duration_hours
+        );
+
+        TrustedPeer::new_guest(
+            their_peer_info.endpoint_id.clone(),
+            their_peer_info.name.clone(),
+            // Grant guest-level permissions
+            Permissions::guest_default(),
+            // Their permissions to us (what they offered in TrustConfirm)
+            their_permissions.clone(),
+            address,
+            duration,
+        )
+    } else {
+        // Create a fully trusted peer
+        TrustedPeer::new_with_relay(
+            their_peer_info.endpoint_id.clone(),
+            their_peer_info.name.clone(),
+            // We grant all permissions (they get what we offered in the bundle)
+            Permissions::all(),
+            // Their permissions to us (what they offered in TrustConfirm)
+            their_permissions.clone(),
+            // Store their relay URL for future connections
+            their_peer_info.relay_url.clone(),
+        )
+    };
 
     Ok(HandshakeResult {
         peer,
@@ -175,9 +243,11 @@ pub async fn handle_trust_confirm(
 /// Accept incoming connections and handle trust handshakes.
 ///
 /// This runs in a loop accepting connections and processing trust confirmations.
+/// The `pending_bundle` parameter should be the bundle we sent, used to verify
+/// the nonce and determine if this is a guest trust relationship.
 pub async fn accept_trust_connections(
     endpoint: &IrohEndpoint,
-    pending_nonce: Option<String>,
+    pending_bundle: Option<&TrustBundle>,
     peer_store: &mut PeerStore,
 ) -> Result<()> {
     info!("Waiting for incoming trust connections...");
@@ -219,9 +289,9 @@ pub async fn accept_trust_connections(
                 permissions: their_permissions,
             } => {
                 // Verify the nonce if we have a pending trust
-                let nonce_valid = pending_nonce
+                let nonce_valid = pending_bundle
                     .as_ref()
-                    .map(|n| n == &nonce)
+                    .map(|b| b.nonce == nonce)
                     .unwrap_or(false);
 
                 if !nonce_valid {
@@ -239,8 +309,8 @@ pub async fn accept_trust_connections(
                     their_peer_info.name, remote_id
                 );
 
-                // Handle the trust confirmation
-                match handle_trust_confirm(&mut conn, &their_peer_info, &their_permissions).await {
+                // Handle the trust confirmation, passing the bundle so we know if it's a guest
+                match handle_trust_confirm(&mut conn, &their_peer_info, &their_permissions, pending_bundle).await {
                     Ok(result) => {
                         info!("Trust established with {}", result.peer.name);
 

@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Version of the trust bundle format.
-pub const TRUST_BUNDLE_VERSION: u32 = 1;
+/// v2: Added guest_mode and guest_duration_hours fields
+pub const TRUST_BUNDLE_VERSION: u32 = 2;
 
 /// How long a trust bundle is valid (5 minutes).
 const BUNDLE_VALIDITY_MINUTES: i64 = 5;
@@ -82,27 +83,70 @@ pub struct TrustBundle {
 
     /// When this bundle expires
     pub expires_at: DateTime<Utc>,
+
+    /// Whether this is a guest (temporary) trust relationship.
+    /// Guest peers have time-limited access and reduced permissions.
+    #[serde(default)]
+    pub guest_mode: bool,
+
+    /// Duration of guest access in hours (only used when guest_mode is true).
+    /// If None, uses the receiver's default guest duration from their GuestPolicy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_duration_hours: Option<u32>,
 }
 
 impl TrustBundle {
-    /// Create a new trust bundle from an identity.
+    /// Create a new trust bundle from an identity (trusted peer, not guest).
     pub fn new(identity: &crate::iroh::Identity) -> Self {
-        Self::new_with_relay(identity, None)
+        Self::new_with_options(identity, None, false, None)
     }
 
-    /// Create a new trust bundle from an identity with a relay URL.
+    /// Create a new trust bundle from an identity with a relay URL (trusted peer, not guest).
     pub fn new_with_relay(identity: &crate::iroh::Identity, relay_url: Option<String>) -> Self {
+        Self::new_with_options(identity, relay_url, false, None)
+    }
+
+    /// Create a new guest trust bundle.
+    ///
+    /// If `duration_hours` is None, the receiver will use their default guest duration.
+    pub fn new_guest(
+        identity: &crate::iroh::Identity,
+        relay_url: Option<String>,
+        duration_hours: Option<u32>,
+    ) -> Self {
+        Self::new_with_options(identity, relay_url, true, duration_hours)
+    }
+
+    /// Create a new trust bundle with full options.
+    pub fn new_with_options(
+        identity: &crate::iroh::Identity,
+        relay_url: Option<String>,
+        guest_mode: bool,
+        guest_duration_hours: Option<u32>,
+    ) -> Self {
         let now = Utc::now();
         let expires_at = now + Duration::minutes(BUNDLE_VALIDITY_MINUTES);
 
         Self {
             croh_trust: TRUST_BUNDLE_VERSION,
             sender: identity.to_peer_info_with_relay(relay_url),
-            capabilities_offered: Capability::all(),
+            capabilities_offered: if guest_mode {
+                // Guests get limited capabilities by default
+                vec![Capability::Push, Capability::Status]
+            } else {
+                Capability::all()
+            },
             nonce: generate_nonce(),
             created_at: now,
             expires_at,
+            guest_mode,
+            guest_duration_hours,
         }
+    }
+
+    /// Check if this bundle requests guest access.
+    pub fn is_guest(&self) -> bool {
+        self.guest_mode
     }
 
     /// Check if this bundle is still valid (not expired).
@@ -168,6 +212,23 @@ mod tests {
         assert_eq!(bundle.sender.endpoint_id, identity.endpoint_id);
         assert!(!bundle.nonce.is_empty());
         assert!(bundle.is_valid());
+        assert!(!bundle.is_guest());
+        assert!(bundle.guest_duration_hours.is_none());
+    }
+
+    #[test]
+    fn test_guest_trust_bundle_creation() {
+        let identity = Identity::generate("Test Device".to_string()).unwrap();
+        let bundle = TrustBundle::new_guest(&identity, None, Some(48));
+
+        assert_eq!(bundle.croh_trust, TRUST_BUNDLE_VERSION);
+        assert!(bundle.is_guest());
+        assert_eq!(bundle.guest_duration_hours, Some(48));
+        // Guests get limited capabilities
+        assert!(!bundle.capabilities_offered.contains(&Capability::Browse));
+        assert!(!bundle.capabilities_offered.contains(&Capability::Pull));
+        assert!(bundle.capabilities_offered.contains(&Capability::Push));
+        assert!(bundle.capabilities_offered.contains(&Capability::Status));
     }
 
     #[test]

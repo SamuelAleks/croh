@@ -3,7 +3,7 @@
 use croh_core::{
     config::Theme,
     croc::{find_croc_executable, refresh_croc_cache, Curve, CrocEvent, CrocOptions, CrocProcess, HashAlgorithm},
-    files, platform, Config, ControlMessage, FileRequest, Identity, IrohEndpoint, NetworkStore, PeerInfo, PeerStore, Permissions,
+    files, platform, Config, ControlMessage, FileRequest, Identity, IrohEndpoint, NetworkStore, PeerAddress, PeerInfo, PeerStore, Permissions,
     Transfer, TransferId, TransferEvent, TransferHistory, TransferManager, TransferStatus, TransferType,
     TrustedPeer, TrustBundle, push_files, pull_files, handle_incoming_push, handle_incoming_pull, handle_browse_request, browse_remote, default_browsable_paths,
     NodeAddr, NodeId, generate_id, serde_json,
@@ -148,11 +148,11 @@ struct SelectedFileData {
 }
 
 /// State for pending trust handshake.
-/// When initiating trust, we store the nonce here so the background listener
-/// can complete the handshake when the peer connects.
+/// When initiating trust, we store the bundle here so the background listener
+/// can complete the handshake when the peer connects and create the right peer type.
 struct PendingTrust {
-    /// The nonce from the trust bundle we sent.
-    nonce: String,
+    /// The trust bundle we sent (includes nonce, guest_mode, duration).
+    bundle: TrustBundle,
     /// Channel to send the result back to the trust initiation thread.
     result_tx: oneshot::Sender<Result<TrustedPeer, croh_core::Error>>,
 }
@@ -591,8 +591,8 @@ impl App {
                             // Check if we have a pending trust with matching nonce
                             let mut pending_guard = pending_trust.write().await;
                             if let Some(pending) = pending_guard.take() {
-                                if pending.nonce == nonce {
-                                    info!("Valid TrustConfirm from {} ({})", their_peer_info.name, remote_id);
+                                if pending.bundle.nonce == nonce {
+                                    info!("Valid TrustConfirm from {} ({}) - guest_mode={}", their_peer_info.name, remote_id, pending.bundle.guest_mode);
                                     if their_peer_info.relay_url.is_some() {
                                         info!("Peer relay URL: {:?}", their_peer_info.relay_url);
                                     }
@@ -605,14 +605,38 @@ impl App {
                                         continue;
                                     }
 
-                                    // Create the trusted peer with their relay URL for future connections
-                                    let new_peer = TrustedPeer::new_with_relay(
-                                        their_peer_info.endpoint_id.clone(),
-                                        their_peer_info.name.clone(),
-                                        Permissions::all(), // We grant all permissions
-                                        their_permissions,  // Their permissions to us
-                                        their_peer_info.relay_url.clone(), // Store their relay URL
-                                    );
+                                    // Create the peer - guest or trusted based on bundle settings
+                                    let new_peer = if pending.bundle.guest_mode {
+                                        // Create a guest peer with time-limited access
+                                        let duration_hours = pending.bundle.guest_duration_hours.unwrap_or(24);
+                                        let duration = chrono::Duration::hours(duration_hours as i64);
+
+                                        // Build address from relay URL
+                                        let address = PeerAddress::Iroh {
+                                            relay_url: their_peer_info.relay_url.clone(),
+                                            direct_addrs: vec![],
+                                        };
+
+                                        info!("Creating guest peer {} with {} hour duration", their_peer_info.name, duration_hours);
+
+                                        TrustedPeer::new_guest(
+                                            their_peer_info.endpoint_id.clone(),
+                                            their_peer_info.name.clone(),
+                                            Permissions::guest_default(), // Grant guest-level permissions
+                                            their_permissions,  // Their permissions to us
+                                            address,
+                                            duration,
+                                        )
+                                    } else {
+                                        // Create a fully trusted peer
+                                        TrustedPeer::new_with_relay(
+                                            their_peer_info.endpoint_id.clone(),
+                                            their_peer_info.name.clone(),
+                                            Permissions::all(), // We grant all permissions
+                                            their_permissions,  // Their permissions to us
+                                            their_peer_info.relay_url.clone(), // Store their relay URL
+                                        )
+                                    };
 
                                     // Add to peer store
                                     let mut store = peer_store.write().await;
@@ -621,7 +645,7 @@ impl App {
                                             if updated {
                                                 info!("Updated existing peer: {}", new_peer.name);
                                             } else {
-                                                info!("Added new peer: {}", new_peer.name);
+                                                info!("Added new {} peer: {}", if new_peer.is_guest { "guest" } else { "trusted" }, new_peer.name);
                                             }
                                         }
                                         Err(e) => {
@@ -650,7 +674,7 @@ impl App {
                                     update_peers_ui_with_status(&window_weak, &peer_store, &peer_status).await;
                                     continue;
                                 } else {
-                                    warn!("Invalid nonce from {}: expected {}, got {}", remote_id, pending.nonce, nonce);
+                                    warn!("Invalid nonce from {}: expected {}, got {}", remote_id, pending.bundle.nonce, nonce);
                                     // Put the pending trust back since nonce didn't match
                                     *pending_guard = Some(pending);
                                     let response = ControlMessage::TrustRevoke {
@@ -3168,8 +3192,8 @@ impl App {
             let pending_trust = pending_trust.clone();
             let peer_status = peer_status.clone();
 
-            move || {
-                info!("Initiating trust...");
+            move |guest_mode: bool| {
+                info!("Initiating trust (guest_mode={})...", guest_mode);
                 let window_weak = window_weak.clone();
                 let identity = identity.clone();
                 let shared_endpoint = shared_endpoint.clone();
@@ -3259,7 +3283,13 @@ impl App {
                         }
 
                         // Create trust bundle with the relay URL
-                        let bundle = TrustBundle::new_with_relay(&id, relay_url);
+                        // Use guest mode if requested (duration will use config default)
+                        let bundle = if guest_mode {
+                            info!("Creating guest trust bundle");
+                            TrustBundle::new_guest(&id, relay_url, None) // None = use receiver's default duration
+                        } else {
+                            TrustBundle::new_with_relay(&id, relay_url)
+                        };
                         let bundle_path = match bundle.save_to_temp() {
                             Ok(path) => path,
                             Err(e) => {
@@ -3320,18 +3350,17 @@ impl App {
                                             update_status(&window_weak, "Trust bundle sent, waiting for peer to connect...");
 
                                             // Set up pending trust with channel for background listener
-                                            let bundle_nonce = bundle.nonce.clone();
                                             let (result_tx, result_rx) = oneshot::channel();
 
                                             {
                                                 let mut pending_guard = pending_trust.write().await;
                                                 *pending_guard = Some(PendingTrust {
-                                                    nonce: bundle_nonce.clone(),
+                                                    bundle: bundle.clone(),
                                                     result_tx,
                                                 });
                                             }
 
-                                            info!("Set pending trust with nonce, waiting for background listener to handle connection...");
+                                            info!("Set pending trust with bundle (guest_mode={}), waiting for background listener to handle connection...", bundle.guest_mode);
 
                                             // Wait for the background listener to complete the handshake
                                             let handshake_result = tokio::time::timeout(
@@ -4756,6 +4785,7 @@ impl App {
                                         window.global::<AppLogic>().set_browse_current_path(SharedString::from(&path));
                                         window.global::<AppLogic>().set_browse_previous_path(SharedString::from(&previous_path));
                                         window.global::<AppLogic>().set_browse_selected_count(0);
+                                        window.global::<AppLogic>().set_browse_last_selected_index(-1);  // Reset shift-select anchor
                                         window.global::<AppLogic>().set_browse_error(SharedString::from(""));
 
                                         let ui_entries: Vec<BrowseEntry> = browse_entries.iter().map(|e| {
@@ -4813,6 +4843,73 @@ impl App {
                             if idx < state.entries.len() {
                                 state.entries[idx].selected = !state.entries[idx].selected;
                             }
+                            let count = state.entries.iter().filter(|e| e.selected && !e.is_dir).count();
+                            (state.entries.clone(), count as i32)
+                        };
+
+                        // Update UI
+                        let window_weak_ui = window_weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(window) = window_weak_ui.upgrade() {
+                                let ui_entries: Vec<BrowseEntry> = entries.iter().map(|e| {
+                                    BrowseEntry {
+                                        name: SharedString::from(&e.name),
+                                        is_dir: e.is_dir,
+                                        size: SharedString::from(format_size(e.size)),
+                                        modified: SharedString::from(format_timestamp(e.modified)),
+                                        path: SharedString::from(&e.path),
+                                        selected: e.selected,
+                                    }
+                                }).collect();
+                                window.global::<AppLogic>().set_browse_entries(ModelRc::new(VecModel::from(ui_entries)));
+                                window.global::<AppLogic>().set_browse_selected_count(selected_count);
+                            }
+                        });
+                    });
+                });
+            }
+        });
+
+        // Range selection (shift+click) - select all files between last-selected and current index
+        window.global::<AppLogic>().on_browse_range_select({
+            let window_weak = window_weak.clone();
+            let browse_state = browse_state.clone();
+
+            move |target_index| {
+                let target_idx = target_index as usize;
+                let window_weak = window_weak.clone();
+                let browse_state = browse_state.clone();
+
+                // Get the anchor index from the UI
+                let anchor_idx = window_weak.upgrade().map(|w| {
+                    w.global::<AppLogic>().get_browse_last_selected_index() as usize
+                });
+
+                info!("Range select: anchor={:?} target={}", anchor_idx, target_idx);
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Select all files in range
+                        let (entries, selected_count) = {
+                            let mut state = browse_state.write().await;
+
+                            // Determine the range
+                            let anchor = anchor_idx.unwrap_or(target_idx);
+                            let start = anchor.min(target_idx);
+                            let end = anchor.max(target_idx);
+
+                            // Select all non-directory entries in the range
+                            for i in start..=end {
+                                if i < state.entries.len() && !state.entries[i].is_dir {
+                                    state.entries[i].selected = true;
+                                }
+                            }
+
                             let count = state.entries.iter().filter(|e| e.selected && !e.is_dir).count();
                             (state.entries.clone(), count as i32)
                         };
@@ -5069,10 +5166,11 @@ impl App {
                             *state = BrowseState::default();
                         }
 
-                        // Close dialog
+                        // Close dialog and reset selection state
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(window) = window_weak.upgrade() {
                                 window.global::<AppLogic>().set_browse_open(false);
+                                window.global::<AppLogic>().set_browse_last_selected_index(-1);
                             }
                         });
                     });
