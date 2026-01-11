@@ -14,6 +14,7 @@ pub mod croc;
 pub mod error;
 pub mod files;
 pub mod iroh;
+pub mod networks;
 pub mod peers;
 pub mod platform;
 pub mod transfer;
@@ -33,8 +34,17 @@ pub use iroh::{
     run_speed_test, handle_speed_test_request, SpeedTestResult, DEFAULT_TEST_SIZE,
     NodeAddr, NodeId, PeerAddress, RelayUrl,
 };
+pub use networks::{NetworkSettings, NetworkStore, PeerNetwork};
 pub use peers::{PeerStore, Permissions, TrustedPeer};
 pub use transfer::{Transfer, TransferId, TransferManager, TransferStatus, TransferType};
 pub use transfer_history::TransferHistory;
 pub use trust::{Capability, PeerInfo, TrustBundle};
+
+// Re-export serde_json for GUI use
+pub use serde_json;
+
+/// Generate a unique ID (UUID v4).
+pub fn generate_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
 

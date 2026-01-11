@@ -64,6 +64,10 @@ pub enum Error {
     /// Browse error
     #[error("browse error: {0}")]
     Browse(String),
+
+    /// Network error
+    #[error("network error: {0}")]
+    Network(String),
 }
 
 /// Result type alias using our Error type.

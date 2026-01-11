@@ -293,6 +293,8 @@ export struct AppSettings {
     show-session-stats: bool,     // show upload/download totals in header
     // Transfer list settings
     keep-completed-transfers: bool,  // keep completed transfers in list (vs auto-clear)
+    // Security settings
+    security-posture: string,     // "relaxed", "balanced", "cautious"
 }
 
 export struct PeerItem {
@@ -365,6 +367,23 @@ export struct SessionStats {
     session-duration: string,    // "2h 34m"
 }
 
+// Member info for network display
+export struct NetworkMember {
+    peer-id: string,             // peer store ID
+    name: string,                // display name
+}
+
+export struct NetworkItem {
+    id: string,
+    name: string,
+    description: string,
+    member-count: int,
+    is-owner: bool,              // true if we created/own this network
+    allow-introductions: bool,   // whether introductions are enabled
+    created-at: string,          // formatted date
+    members: [NetworkMember],    // list of members in this network
+}
+
 // ============================================================================
 // Application Logic Interface
 // ============================================================================
@@ -392,11 +411,14 @@ export global AppLogic {
     callback save-browse-settings(bool, bool, string);
     // set-dnd-mode: mode ("off", "silent", "busy"), message
     callback set-dnd-mode(string, string);
+    // set-security-posture: posture ("relaxed", "balanced", "cautious")
+    callback set-security-posture(string);
 
     // Trusted peers callbacks
     callback initiate-trust();
     callback cancel-trust();
     callback remove-peer(string);  // peer id
+    callback rename-peer(string, string);  // peer id, new name
     callback disconnect-peer(string);  // peer id - pause connections to/from peer
     callback connect-peer(string);     // peer id - resume connections to/from peer
     callback push-to-peer(string); // peer id - push selected files to peer
@@ -413,6 +435,14 @@ export global AppLogic {
     // Guest peer management callbacks
     callback extend-guest(string);     // peer id - extend guest's access time
     callback promote-guest(string);    // peer id - promote guest to trusted peer
+
+    // Network management callbacks
+    callback create-network(string, string);  // name, description
+    callback delete-network(string);          // network id
+    callback rename-network(string, string);  // network id, new name
+    callback add-peer-to-network(string, string);     // network id, peer id
+    callback remove-peer-from-network(string, string); // network id, peer id
+    callback introduce-peers(string, string, string); // network id, peer1 id, peer2 id
 
     // File browser callbacks (for remote peer browsing)
     callback browse-peer(string);              // peer id - start browsing
@@ -445,6 +475,9 @@ export global AppLogic {
     in property <bool> trust-in-progress: false;
     in property <string> trust-code: "";
     in property <string> endpoint-id: "";
+
+    // Networks state
+    in property <[NetworkItem]> networks: [];
 
     // Push-to-peer helpers (names and IDs of peers that allow push)
     in property <[string]> peer-names-for-push: [];
@@ -1489,6 +1522,8 @@ component StatBox inherits VerticalLayout {
 
 component PeerCard inherits Rectangle {
     in property <PeerItem> peer;
+    in-out property <bool> show-rename: false;
+    in-out property <string> rename-text: peer.name;
     callback remove-clicked();
     callback disconnect-clicked();
     callback connect-clicked();
@@ -1496,6 +1531,7 @@ component PeerCard inherits Rectangle {
     callback browse-clicked();
     callback refresh-clicked();
     callback speed-test-clicked();
+    callback rename-clicked(string);  // new name
     callback permissions-changed(bool, bool, bool); // allow-push, allow-pull, allow-browse
     callback expanded-changed(bool); // notify when expanded state changes
 
@@ -1903,6 +1939,65 @@ component PeerCard inherits Rectangle {
                     }
                 }
 
+                // Rename row
+                HorizontalLayout {
+                    spacing: Theme.spacing-sm;
+                    height: 28px;
+
+                    if !show-rename : HorizontalLayout {
+                        spacing: Theme.spacing-sm;
+
+                        Text {
+                            text: "Name: " + peer.name;
+                            font-size: 11px;
+                            color: Theme.text-dim;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle { horizontal-stretch: 1; }
+
+                        CompactButton {
+                            label: "Rename";
+                            small: true;
+                            clicked => {
+                                rename-text = peer.name;
+                                show-rename = true;
+                            }
+                        }
+                    }
+
+                    if show-rename : HorizontalLayout {
+                        spacing: Theme.spacing-sm;
+
+                        ThemedInput {
+                            input-width: 150px;
+                            text <=> rename-text;
+                            placeholder-text: "New name";
+                            font-size: 11px;
+                        }
+
+                        CompactButton {
+                            label: "Save";
+                            small: true;
+                            primary: true;
+                            enabled: rename-text != "" && rename-text != peer.name;
+                            clicked => {
+                                root.rename-clicked(rename-text);
+                                show-rename = false;
+                            }
+                        }
+
+                        CompactButton {
+                            label: "Cancel";
+                            small: true;
+                            clicked => {
+                                rename-text = peer.name;
+                                show-rename = false;
+                            }
+                        }
+                    }
+                }
+
                 // Permissions section
                 HorizontalLayout {
                     spacing: Theme.spacing-lg;
@@ -2053,6 +2148,475 @@ component PeerCard inherits Rectangle {
     }
 }
 
+// ============================================================================
+// Network Card - Compact display for peer networks
+// ============================================================================
+
+component NetworkCard inherits Rectangle {
+    in property <NetworkItem> network;
+    in property <[PeerItem]> available-peers: [];  // Peers that can be added (not already members)
+    in property <[PeerItem]> introducible-peers: [];  // Non-guest peers not in network (can be introduced)
+    in-out property <bool> expanded: false;
+    in-out property <string> rename-text: network.name;
+    in-out property <bool> show-add-peer: false;   // Shows peer selection dropdown
+    in-out property <bool> show-introduce: false;  // Shows introduction flow
+    in-out property <string> introduce-peer-id: "";  // Selected peer to introduce
+    in-out property <string> introduce-peer-name: "";  // Selected peer name (for display)
+    callback delete-clicked();
+    callback rename-clicked(string);  // new name
+    callback add-peer(string);        // peer id to add
+    callback remove-peer(string);     // peer id to remove
+    callback introduce-peer(string, string);  // peer_to_introduce_id, target_member_id
+
+    background: Theme.bg-card;
+    border-radius: Theme.radius-sm;
+    border-width: 1px;
+    border-color: expanded ? Theme.accent : Theme.border;
+
+    VerticalLayout {
+        // Header row (always visible)
+        HorizontalLayout {
+            height: 52px;
+            padding: Theme.spacing-sm;
+            spacing: Theme.spacing-sm;
+
+            // Network icon
+            Rectangle {
+                width: 32px;
+                height: 32px;
+                border-radius: 16px;
+                background: Theme.accent-glow;
+
+                Text {
+                    text: "N";
+                    font-size: 14px;
+                    font-weight: 600;
+                    color: Theme.accent;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Network info - clickable to expand
+            TouchArea {
+                horizontal-stretch: 1;
+                mouse-cursor: pointer;
+                clicked => { expanded = !expanded; }
+
+                VerticalLayout {
+                    spacing: 2px;
+
+                    HorizontalLayout {
+                        spacing: Theme.spacing-xs;
+
+                        Text {
+                            text: network.name;
+                            font-size: 13px;
+                            font-weight: 500;
+                            color: Theme.text;
+                            overflow: elide;
+                        }
+
+                        if network.is-owner: Rectangle {
+                            width: 45px;
+                            height: 14px;
+                            border-radius: 3px;
+                            background: Theme.accent-glow;
+
+                            Text {
+                                text: "Owner";
+                                font-size: 9px;
+                                color: Theme.accent;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: network.member-count == 1 ? "1 member" : network.member-count + " members";
+                        font-size: 11px;
+                        color: Theme.text-muted;
+                    }
+                }
+            }
+
+            // Expand/collapse chevron
+            ImageIconBtn {
+                icon: expanded ? @image-url("../assets/icons/chevron-up.svg") : @image-url("../assets/icons/chevron-down.svg");
+                icon-color: Theme.text-muted;
+                small: true;
+                clicked => { expanded = !expanded; }
+            }
+        }
+
+        // Expanded content
+        if expanded : Rectangle {
+            background: Theme.bg-hover;
+            border-radius: 0;
+
+            VerticalLayout {
+                padding: Theme.spacing-sm;
+                spacing: Theme.spacing-sm;
+
+                // Description (if any)
+                if network.description != "" : Text {
+                    text: network.description;
+                    font-size: 11px;
+                    color: Theme.text-dim;
+                    wrap: word-wrap;
+                }
+
+                // Network details
+                HorizontalLayout {
+                    spacing: Theme.spacing-md;
+
+                    Text {
+                        text: "Created: " + network.created-at;
+                        font-size: 10px;
+                        color: Theme.text-muted;
+                    }
+
+                    Text {
+                        text: network.allow-introductions ? "Introductions: On" : "Introductions: Off";
+                        font-size: 10px;
+                        color: Theme.text-muted;
+                    }
+                }
+
+                // Members section
+                VerticalLayout {
+                    spacing: Theme.spacing-xs;
+
+                    HorizontalLayout {
+                        spacing: Theme.spacing-sm;
+
+                        Text {
+                            text: "Members";
+                            font-size: 11px;
+                            font-weight: 500;
+                            color: Theme.text-dim;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle { horizontal-stretch: 1; }
+
+                        // Add Peer button (owner only)
+                        if network.is-owner && available-peers.length > 0 : CompactButton {
+                            label: show-add-peer ? "Cancel" : "Add Peer";
+                            small: true;
+                            clicked => { show-add-peer = !show-add-peer; }
+                        }
+                    }
+
+                    // Add peer dropdown when visible
+                    if show-add-peer && available-peers.length > 0 : Rectangle {
+                        background: Theme.bg-card;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: Theme.border;
+
+                        VerticalLayout {
+                            padding: Theme.spacing-xs;
+                            spacing: 2px;
+
+                            for peer[idx] in available-peers : Rectangle {
+                                // Only show non-guest, non-revoked peers
+                                property <bool> show-peer: !peer.is-guest && !peer.revoked;
+                                visible: show-peer;
+                                height: show-peer ? 28px : 0px;
+
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.add-peer(peer.id);
+                                        show-add-peer = false;
+                                    }
+
+                                    Rectangle {
+                                        background: parent.has-hover ? Theme.bg-hover : transparent;
+                                        border-radius: Theme.radius-sm;
+
+                                        HorizontalLayout {
+                                            padding-left: Theme.spacing-sm;
+                                            padding-right: Theme.spacing-sm;
+                                            spacing: Theme.spacing-xs;
+
+                                            Text {
+                                                text: peer.name;
+                                                font-size: 11px;
+                                                color: Theme.text;
+                                                vertical-alignment: center;
+                                                overflow: elide;
+                                            }
+
+                                            Text {
+                                                text: peer.status == "online" ? "(online)" : "(offline)";
+                                                font-size: 10px;
+                                                color: peer.status == "online" ? Theme.success : Theme.text-muted;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Member list
+                    if network.member-count == 0 : Text {
+                        text: "No members yet";
+                        font-size: 10px;
+                        color: Theme.text-muted;
+                    }
+
+                    for member[idx] in network.members : HorizontalLayout {
+                        height: 24px;
+                        spacing: Theme.spacing-xs;
+                        padding-left: Theme.spacing-xs;
+
+                        Rectangle {
+                            width: 6px;
+                            height: 6px;
+                            border-radius: 3px;
+                            background: Theme.text-muted;
+                            y: (parent.height - self.height) / 2;
+                        }
+
+                        Text {
+                            text: member.name;
+                            font-size: 11px;
+                            color: Theme.text;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+
+                        // Remove button (owner only)
+                        if network.is-owner : ImageIconBtn {
+                            icon: @image-url("../assets/icons/x.svg");
+                            icon-color: Theme.text-muted;
+                            small: true;
+                            clicked => { root.remove-peer(member.peer-id); }
+                        }
+                    }
+                }
+
+                // Introduction section (when introductions enabled and we have members + peers to introduce)
+                if network.allow-introductions && network.member-count > 0 && introducible-peers.length > 0 : VerticalLayout {
+                    spacing: Theme.spacing-xs;
+
+                    HorizontalLayout {
+                        spacing: Theme.spacing-sm;
+
+                        Text {
+                            text: "Introduce Peer";
+                            font-size: 11px;
+                            font-weight: 500;
+                            color: Theme.text-dim;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle { horizontal-stretch: 1; }
+
+                        CompactButton {
+                            label: show-introduce ? "Cancel" : "Start";
+                            small: true;
+                            clicked => {
+                                show-introduce = !show-introduce;
+                                introduce-peer-id = "";
+                                introduce-peer-name = "";
+                            }
+                        }
+                    }
+
+                    // Step 1: Select peer to introduce
+                    if show-introduce && introduce-peer-id == "" : VerticalLayout {
+                        spacing: Theme.spacing-xs;
+
+                        Text {
+                            text: "Step 1: Click a peer to introduce:";
+                            font-size: 10px;
+                            color: Theme.text-muted;
+                        }
+
+                        Rectangle {
+                            background: Theme.bg-card;
+                            border-radius: Theme.radius-sm;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            min-height: 32px;
+
+                            VerticalLayout {
+                                padding: Theme.spacing-xs;
+                                spacing: 2px;
+
+                                for peer[idx] in introducible-peers : Rectangle {
+                                    // Only show non-guest, non-revoked peers that aren't already network members
+                                    property <bool> show-peer: !peer.is-guest && !peer.revoked;
+                                    visible: show-peer;
+                                    height: show-peer ? 28px : 0px;
+
+                                    TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            introduce-peer-id = peer.id;
+                                            introduce-peer-name = peer.name;
+                                        }
+
+                                        Rectangle {
+                                            background: parent.has-hover ? Theme.bg-hover : transparent;
+                                            border-radius: Theme.radius-sm;
+
+                                            HorizontalLayout {
+                                                padding-left: Theme.spacing-sm;
+                                                padding-right: Theme.spacing-sm;
+                                                spacing: Theme.spacing-xs;
+
+                                                Text {
+                                                    text: "→";
+                                                    font-size: 11px;
+                                                    color: Theme.accent;
+                                                    vertical-alignment: center;
+                                                }
+
+                                                Text {
+                                                    text: peer.name;
+                                                    font-size: 11px;
+                                                    color: Theme.text;
+                                                    vertical-alignment: center;
+                                                    overflow: elide;
+                                                }
+
+                                                Text {
+                                                    text: peer.status == "online" ? "(online)" : "(offline)";
+                                                    font-size: 10px;
+                                                    color: peer.status == "online" ? Theme.success : Theme.text-muted;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Show message if no eligible peers
+                                Text {
+                                    text: "No trusted peers available to introduce (only trusted, non-revoked peers can be introduced)";
+                                    font-size: 10px;
+                                    color: Theme.text-muted;
+                                    wrap: word-wrap;
+                                    visible: introducible-peers.length == 0;
+                                }
+                            }
+                        }
+                    }
+
+                    // Step 2: Select network member to introduce them to
+                    if show-introduce && introduce-peer-id != "" : VerticalLayout {
+                        spacing: Theme.spacing-xs;
+
+                        Text {
+                            text: "Step 2: Click a member to introduce " + introduce-peer-name + " to:";
+                            font-size: 10px;
+                            color: Theme.text-muted;
+                        }
+
+                        Rectangle {
+                            background: Theme.bg-card;
+                            border-radius: Theme.radius-sm;
+                            border-width: 1px;
+                            border-color: Theme.border;
+
+                            VerticalLayout {
+                                padding: Theme.spacing-xs;
+                                spacing: 2px;
+
+                                for member[idx] in network.members : TouchArea {
+                                    height: 28px;
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.introduce-peer(introduce-peer-id, member.peer-id);
+                                        show-introduce = false;
+                                        introduce-peer-id = "";
+                                        introduce-peer-name = "";
+                                    }
+
+                                    Rectangle {
+                                        background: parent.has-hover ? Theme.bg-hover : transparent;
+                                        border-radius: Theme.radius-sm;
+
+                                        HorizontalLayout {
+                                            padding-left: Theme.spacing-sm;
+                                            padding-right: Theme.spacing-sm;
+                                            spacing: Theme.spacing-xs;
+
+                                            Text {
+                                                text: "→";
+                                                font-size: 11px;
+                                                color: Theme.accent;
+                                                vertical-alignment: center;
+                                            }
+
+                                            Text {
+                                                text: member.name;
+                                                font-size: 11px;
+                                                color: Theme.text;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Rename section (owner only)
+                if network.is-owner : HorizontalLayout {
+                    spacing: Theme.spacing-sm;
+                    height: 28px;
+
+                    Text {
+                        text: "Rename:";
+                        font-size: 11px;
+                        color: Theme.text-dim;
+                        vertical-alignment: center;
+                    }
+
+                    ThemedInput {
+                        input-width: 140px;
+                        text <=> rename-text;
+                        placeholder-text: "Network name";
+                        font-size: 11px;
+                    }
+
+                    CompactButton {
+                        label: "Save";
+                        small: true;
+                        enabled: rename-text != network.name && rename-text != "";
+                        clicked => {
+                            root.rename-clicked(rename-text);
+                        }
+                    }
+                }
+
+                // Action buttons
+                HorizontalLayout {
+                    spacing: Theme.spacing-sm;
+                    height: 28px;
+
+                    Rectangle { horizontal-stretch: 1; }
+
+                    if network.is-owner : CompactButton {
+                        label: "Delete Network";
+                        small: true;
+                        clicked => { root.delete-clicked(); }
+                    }
+                }
+            }
+        }
+    }
+}
+
 component PeersPanel inherits Rectangle {
     background: Theme.bg-dark;
 
@@ -2187,12 +2751,90 @@ component PeersPanel inherits Rectangle {
                         browse-clicked => { AppLogic.browse-peer(peer.id); }
                         refresh-clicked => { AppLogic.refresh-peer-status(peer.id); }
                         speed-test-clicked => { AppLogic.run-speed-test(peer.id); }
+                        rename-clicked(new-name) => { AppLogic.rename-peer(peer.id, new-name); }
                         permissions-changed(push, pull, browse) => {
                             AppLogic.update-peer-permissions(peer.id, push, pull, browse);
                         }
                         expanded-changed(expanded) => {
                             AppLogic.set-peer-expanded(peer.id, expanded);
                         }
+                    }
+                }
+            }
+        }
+
+        // Networks section
+        Section {
+            title: "Networks";
+
+            property <string> new-network-name: "";
+            property <bool> show-create-input: false;
+
+            VerticalBox {
+                spacing: Theme.spacing-xs;
+
+                if AppLogic.networks.length == 0 && !show-create-input : Text {
+                    text: "No networks yet. Create one to organize peers and enable introductions.";
+                    font-size: 11px;
+                    color: Theme.text-muted;
+                    wrap: word-wrap;
+                }
+
+                for network in AppLogic.networks : NetworkCard {
+                    network: network;
+                    // Pass all non-guest peers - backend filters duplicates
+                    available-peers: AppLogic.peers;
+                    // Pass non-guest peers for introduction (same list, backend handles filtering)
+                    introducible-peers: AppLogic.peers;
+                    delete-clicked => { AppLogic.delete-network(network.id); }
+                    rename-clicked(new-name) => { AppLogic.rename-network(network.id, new-name); }
+                    add-peer(peer-id) => { AppLogic.add-peer-to-network(network.id, peer-id); }
+                    remove-peer(peer-id) => { AppLogic.remove-peer-from-network(network.id, peer-id); }
+                    introduce-peer(peer-to-introduce, target-member) => {
+                        AppLogic.introduce-peers(network.id, peer-to-introduce, target-member);
+                    }
+                }
+
+                // Create network input (shown when creating)
+                if show-create-input : HorizontalLayout {
+                    spacing: Theme.spacing-sm;
+                    height: 32px;
+
+                    ThemedInput {
+                        input-width: 160px;
+                        text <=> new-network-name;
+                        placeholder-text: "Network name";
+                        font-size: 12px;
+                    }
+
+                    CompactButton {
+                        label: "Create";
+                        primary: true;
+                        enabled: new-network-name != "";
+                        clicked => {
+                            AppLogic.create-network(new-network-name, "");
+                            new-network-name = "";
+                            show-create-input = false;
+                        }
+                    }
+
+                    CompactButton {
+                        label: "Cancel";
+                        clicked => {
+                            new-network-name = "";
+                            show-create-input = false;
+                        }
+                    }
+                }
+
+                // Create network button (shown when not creating)
+                if !show-create-input : HorizontalLayout {
+                    alignment: center;
+                    height: 32px;
+
+                    CompactButton {
+                        label: "+ Create Network";
+                        clicked => { show-create-input = true; }
                     }
                 }
             }
@@ -2586,6 +3228,46 @@ component SettingsPanel inherits Rectangle {
                             animate x { duration: 150ms; easing: ease-out; }
                         }
                     }
+                }
+            }
+
+            // Security
+            Section {
+                title: "Security";
+
+                SettingRow {
+                    label: "Security Posture";
+                    sublabel: AppLogic.settings.security-posture == "relaxed" ? "Maximum convenience, minimal friction" :
+                              AppLogic.settings.security-posture == "cautious" ? "Tighter security, more confirmations" :
+                              "Balanced - good for most users";
+
+                    ThemedDropdown {
+                        dropdown-width: 110px;
+                        model: ["Relaxed", "Balanced", "Cautious"];
+                        current-index: AppLogic.settings.security-posture == "relaxed" ? 0 :
+                                       AppLogic.settings.security-posture == "cautious" ? 2 : 1;
+                        changed(idx) => {
+                            AppLogic.set-security-posture(
+                                idx == 0 ? "relaxed" : idx == 2 ? "cautious" : "balanced"
+                            );
+                        }
+                    }
+                }
+
+                // Show posture-specific info
+                if AppLogic.settings.security-posture == "relaxed": SettingRow {
+                    label: "Guest Duration";
+                    sublabel: "1 week default, 2 weeks max";
+                }
+
+                if AppLogic.settings.security-posture == "balanced": SettingRow {
+                    label: "Guest Duration";
+                    sublabel: "3 days default, 1 week max";
+                }
+
+                if AppLogic.settings.security-posture == "cautious": SettingRow {
+                    label: "Guest Duration";
+                    sublabel: "24 hours default, 48 hours max";
                 }
             }
 

@@ -2,7 +2,10 @@
 
 use anyhow::Result;
 use croh_core::Config;
-use slint::{ComponentHandle, LogicalSize, WindowSize};
+use slint::{ComponentHandle, LogicalSize, Timer, TimerMode, WindowSize};
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::time::Instant;
 use tracing::{error, info, Level};
 use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::time::FormatTime;
@@ -63,10 +66,71 @@ fn main() -> Result<()> {
     let app = app::App::new(window.as_weak());
     app.setup_callbacks(&window);
 
+    // Set up debounced window size saver
+    // Checks every 5000ms, saves 1 second after resizing stops
+    let window_weak = window.as_weak();
+    let last_size: Rc<RefCell<(u32, u32)>> = Rc::new(RefCell::new((initial_width, initial_height)));
+    let last_change: Rc<RefCell<Option<Instant>>> = Rc::new(RefCell::new(None));
+    let saved_size: Rc<RefCell<(u32, u32)>> = Rc::new(RefCell::new((initial_width, initial_height)));
+
+    let size_check_timer = Timer::default();
+    size_check_timer.start(
+        TimerMode::Repeated,
+        std::time::Duration::from_millis(5000),
+        {
+            let last_size = last_size.clone();
+            let last_change = last_change.clone();
+            let saved_size = saved_size.clone();
+            move || {
+                if let Some(window) = window_weak.upgrade() {
+                    let current = window.window().size();
+                    let current_size = (current.width, current.height);
+
+                    // Check if size changed since last check
+                    let size_changed = {
+                        let last = last_size.borrow();
+                        current_size != *last
+                    };
+
+                    if size_changed {
+                        *last_size.borrow_mut() = current_size;
+                        *last_change.borrow_mut() = Some(Instant::now());
+                    }
+
+                    // Check if we should save (size changed and stable for 1 second)
+                    let should_save = {
+                        let change_time = *last_change.borrow();
+                        let saved = *saved_size.borrow();
+                        if let Some(ct) = change_time {
+                            current_size != saved && ct.elapsed().as_secs() >= 1
+                        } else {
+                            false
+                        }
+                    };
+
+                    if should_save {
+                        // Save the new size
+                        if let Ok(mut config) = Config::load_with_env() {
+                            config.window_size.width = current_size.0;
+                            config.window_size.height = current_size.1;
+                            if config.save().is_ok() {
+                                *saved_size.borrow_mut() = current_size;
+                                *last_change.borrow_mut() = None;
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    );
+
     info!("Croc GUI initialized successfully");
 
     // Run the event loop
     window.run()?;
+
+    // Stop the timer
+    drop(size_check_timer);
 
     // Save window size on exit
     let final_size = window.window().size();

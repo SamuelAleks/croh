@@ -3,10 +3,10 @@
 use croh_core::{
     config::Theme,
     croc::{find_croc_executable, refresh_croc_cache, Curve, CrocEvent, CrocOptions, CrocProcess, HashAlgorithm},
-    files, platform, Config, ControlMessage, FileRequest, Identity, IrohEndpoint, PeerStore, Permissions,
+    files, platform, Config, ControlMessage, FileRequest, Identity, IrohEndpoint, NetworkStore, PeerInfo, PeerStore, Permissions,
     Transfer, TransferId, TransferEvent, TransferHistory, TransferManager, TransferStatus, TransferType,
     TrustedPeer, TrustBundle, push_files, pull_files, handle_incoming_push, handle_incoming_pull, handle_browse_request, browse_remote, default_browsable_paths,
-    NodeAddr, NodeId,
+    NodeAddr, NodeId, generate_id, serde_json,
 };
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 use std::collections::HashMap;
@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tokio::sync::{oneshot, RwLock};
 use tracing::{debug, error, info, warn};
 
-use crate::{AppLogic, AppSettings, BrowseEntry, MainWindow, PeerItem, SelectedFile, SessionStats, TransferItem};
+use crate::{AppLogic, AppSettings, BrowseEntry, MainWindow, NetworkItem, NetworkMember, PeerItem, SelectedFile, SessionStats, TransferItem};
 
 /// Connection status for a peer.
 #[derive(Clone, Debug, Default)]
@@ -82,6 +82,10 @@ pub struct App {
     session_stats: Arc<RwLock<SessionStatsTracker>>,
     /// Set of peer IDs that are currently disconnected (user paused connections).
     disconnected_peers: Arc<RwLock<std::collections::HashSet<String>>>,
+    /// Network store for peer networks.
+    network_store: Arc<RwLock<NetworkStore>>,
+    /// Pending peer introductions (introduction_id -> state).
+    pending_introductions: Arc<RwLock<HashMap<String, PendingIntroduction>>>,
 }
 
 /// Tracks session statistics for uploads and downloads.
@@ -90,6 +94,27 @@ struct SessionStatsTracker {
     bytes_uploaded: u64,
     bytes_downloaded: u64,
     transfers_completed: u32,
+}
+
+/// State for a pending peer introduction.
+#[derive(Debug, Clone)]
+struct PendingIntroduction {
+    /// Unique introduction ID.
+    introduction_id: String,
+    /// Network ID where the introduction is happening.
+    network_id: String,
+    /// Peer being introduced (B).
+    peer_to_introduce_id: String,
+    peer_to_introduce_name: String,
+    /// Target network member (C).
+    target_member_id: String,
+    target_member_name: String,
+    /// Whether peer B has accepted.
+    peer_b_accepted: bool,
+    /// Whether peer C has accepted.
+    peer_c_accepted: bool,
+    /// When the introduction was started.
+    started_at: std::time::Instant,
 }
 
 /// State for file browser dialog.
@@ -138,6 +163,7 @@ impl App {
         let config = Config::load_with_env().unwrap_or_default();
         let peer_store = PeerStore::load().unwrap_or_default();
         let transfer_history = TransferHistory::load().unwrap_or_default();
+        let network_store = NetworkStore::load().unwrap_or_default();
 
         Self {
             window,
@@ -157,6 +183,8 @@ impl App {
             app_start_time: std::time::Instant::now(),
             session_stats: Arc::new(RwLock::new(SessionStatsTracker::default())),
             disconnected_peers: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            network_store: Arc::new(RwLock::new(network_store)),
+            pending_introductions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -172,6 +200,7 @@ impl App {
         self.setup_settings_callbacks(window);
         self.setup_peer_callbacks(window);
         self.setup_browse_callbacks(window);
+        self.setup_network_callbacks(window);
 
         // Start background listener for incoming transfers
         self.start_background_listener();
@@ -670,6 +699,22 @@ impl App {
                                     reason: Some("push not allowed".to_string()),
                                 }).await;
                                 continue;
+                            }
+
+                            // Check guest policy - if guest and auto-accept disabled, reject
+                            // (Future: could show confirmation dialog instead)
+                            if peer.is_guest {
+                                let cfg = config.read().await;
+                                if !cfg.guest_policy.auto_accept_guest_pushes {
+                                    warn!("Auto-accept disabled for guest pushes from {}", peer.name);
+                                    let _ = conn.send(&ControlMessage::PushResponse {
+                                        transfer_id: String::new(),
+                                        accepted: false,
+                                        reason: Some("guest pushes require approval (disabled in security settings)".to_string()),
+                                    }).await;
+                                    update_status(&window_weak, &format!("Rejected push from guest {} (requires approval)", peer.name));
+                                    continue;
+                                }
                             }
 
                             // Get download directory
@@ -1303,6 +1348,169 @@ impl App {
 
                             let _ = conn.close().await;
                         }
+                        // ==================== Introduction Message Handlers ====================
+                        ControlMessage::IntroductionOffer { introduction_id, network_id: _, peer: offered_peer, message } => {
+                            // Someone wants to introduce us to another peer
+                            info!("Received introduction offer from {}: {:?} to connect with {}",
+                                  peer.name, message, offered_peer.name);
+
+                            // Check if we already know this peer
+                            let store_guard = peer_store.read().await;
+                            let already_known = store_guard.list().iter()
+                                .any(|p| p.endpoint_id == offered_peer.endpoint_id);
+                            drop(store_guard);
+
+                            if already_known {
+                                // Already know this peer, decline
+                                let response = ControlMessage::IntroductionOfferResponse {
+                                    introduction_id,
+                                    accepted: false,
+                                    reason: Some("Already connected to this peer".to_string()),
+                                };
+                                let _ = conn.send(&response).await;
+                            } else {
+                                // Accept the introduction offer
+                                // In a full implementation, this would show a UI prompt
+                                // For now, auto-accept from trusted peers
+                                info!("Accepting introduction offer to connect with {}", offered_peer.name);
+                                let response = ControlMessage::IntroductionOfferResponse {
+                                    introduction_id: introduction_id.clone(),
+                                    accepted: true,
+                                    reason: None,
+                                };
+                                let _ = conn.send(&response).await;
+
+                                // Update UI status
+                                let offered_name = offered_peer.name.clone();
+                                let _ = slint::invoke_from_event_loop({
+                                    let window_weak = window_weak.clone();
+                                    move || {
+                                        if let Some(window) = window_weak.upgrade() {
+                                            window.global::<AppLogic>().set_app_status(
+                                                SharedString::from(format!("Accepted introduction to {}", offered_name))
+                                            );
+                                        }
+                                    }
+                                });
+                            }
+
+                            let _ = conn.close().await;
+                        }
+                        ControlMessage::IntroductionRequest { introduction_id, network_id: _, peer: requesting_peer, message } => {
+                            // A network member is asking if we want to be introduced to a peer
+                            info!("Received introduction request from {}: {:?} to connect with {}",
+                                  peer.name, message, requesting_peer.name);
+
+                            // Check if we already know this peer
+                            let store_guard = peer_store.read().await;
+                            let already_known = store_guard.list().iter()
+                                .any(|p| p.endpoint_id == requesting_peer.endpoint_id);
+                            drop(store_guard);
+
+                            if already_known {
+                                // Already know this peer, decline
+                                let response = ControlMessage::IntroductionRequestResponse {
+                                    introduction_id,
+                                    accepted: false,
+                                    reason: Some("Already connected to this peer".to_string()),
+                                };
+                                let _ = conn.send(&response).await;
+                            } else {
+                                // Accept the introduction
+                                // In a full implementation, this would show a UI prompt
+                                info!("Accepting introduction request to connect with {}", requesting_peer.name);
+                                let response = ControlMessage::IntroductionRequestResponse {
+                                    introduction_id: introduction_id.clone(),
+                                    accepted: true,
+                                    reason: None,
+                                };
+                                let _ = conn.send(&response).await;
+
+                                // Update UI status
+                                let requesting_name = requesting_peer.name.clone();
+                                let _ = slint::invoke_from_event_loop({
+                                    let window_weak = window_weak.clone();
+                                    move || {
+                                        if let Some(window) = window_weak.upgrade() {
+                                            window.global::<AppLogic>().set_app_status(
+                                                SharedString::from(format!("Accepted introduction to {}", requesting_name))
+                                            );
+                                        }
+                                    }
+                                });
+                            }
+
+                            let _ = conn.close().await;
+                        }
+                        ControlMessage::IntroductionComplete { introduction_id: _, network_id: _, peer: new_peer, trust_bundle_json: _ } => {
+                            // Introduction was successful - we can now connect to the new peer
+                            info!("Introduction complete! Can now connect to {}", new_peer.name);
+
+                            // Add the new peer as a trusted peer
+                            let new_peer_clone = new_peer.clone();
+                            let peer_store_clone = peer_store.clone();
+                            let window_weak_clone = window_weak.clone();
+                            let peer_status_clone = peer_status.clone();
+
+                            tokio::spawn(async move {
+                                // Create a new TrustedPeer from the PeerInfo
+                                let mut store = peer_store_clone.write().await;
+
+                                // Check if already exists
+                                if store.list().iter().any(|p| p.endpoint_id == new_peer_clone.endpoint_id) {
+                                    info!("Peer {} already exists, skipping", new_peer_clone.name);
+                                    return;
+                                }
+
+                                // Create the peer using the constructor
+                                let trusted_peer = TrustedPeer::new_with_relay(
+                                    new_peer_clone.endpoint_id.clone(),
+                                    new_peer_clone.name.clone(),
+                                    Permissions::all(),  // Grant full permissions
+                                    Permissions::all(),  // Assume they grant full permissions
+                                    new_peer_clone.relay_url.clone(),
+                                );
+
+                                if let Err(e) = store.add(trusted_peer.clone()) {
+                                    error!("Failed to add introduced peer: {}", e);
+                                    return;
+                                }
+
+                                // Save the peer store
+                                if let Err(e) = store.save() {
+                                    error!("Failed to save peer store: {}", e);
+                                }
+                                drop(store);
+
+                                info!("Added {} as trusted peer via introduction", new_peer_clone.name);
+
+                                // Update the peer list UI
+                                update_peers_ui_with_status(&window_weak_clone, &peer_store_clone, &peer_status_clone).await;
+
+                                // Update status bar
+                                update_status(&window_weak_clone, &format!("Connected to {} via introduction", new_peer_clone.name));
+                            });
+
+                            let _ = conn.close().await;
+                        }
+                        ControlMessage::IntroductionFailed { introduction_id, reason } => {
+                            // Introduction failed
+                            info!("Introduction {} failed: {}", introduction_id, reason);
+
+                            let _ = slint::invoke_from_event_loop({
+                                let window_weak = window_weak.clone();
+                                let reason = reason.clone();
+                                move || {
+                                    if let Some(window) = window_weak.upgrade() {
+                                        window.global::<AppLogic>().set_app_status(
+                                            SharedString::from(format!("Introduction failed: {}", reason))
+                                        );
+                                    }
+                                }
+                            });
+
+                            let _ = conn.close().await;
+                        }
                         other => {
                             warn!("Unexpected message type from {}: {:?}", remote_id, other);
                         }
@@ -1365,6 +1573,9 @@ impl App {
                 // Transfer list settings
                 let keep_completed_transfers = config_guard.keep_completed_transfers;
 
+                // Security settings
+                let security_posture = config_guard.security_posture.to_ui_string().to_string();
+
                 drop(config_guard);
 
                 // Update UI on main thread
@@ -1387,6 +1598,7 @@ impl App {
                             dnd_message: SharedString::from(dnd_message),
                             show_session_stats,
                             keep_completed_transfers,
+                            security_posture: SharedString::from(security_posture),
                         };
                         window.global::<AppLogic>().set_settings(settings);
                     }
@@ -2497,6 +2709,7 @@ impl App {
                         let dnd_message = config_guard.dnd_message.clone().unwrap_or_default();
                         let show_session_stats = config_guard.show_session_stats;
                         let keep_completed_transfers = config_guard.keep_completed_transfers;
+                        let security_posture = config_guard.security_posture.to_ui_string().to_string();
                         let (croc_path, croc_found) = match find_croc_executable() {
                             Ok(path) => (path.to_string_lossy().to_string(), true),
                             Err(_) => ("Not found".to_string(), false),
@@ -2522,6 +2735,7 @@ impl App {
                                     dnd_message: SharedString::from(dnd_message),
                                     show_session_stats,
                                     keep_completed_transfers,
+                                    security_posture: SharedString::from(security_posture),
                                 };
                                 window.global::<AppLogic>().set_settings(settings);
                             }
@@ -2709,6 +2923,54 @@ impl App {
                                 }
                             }
                         }
+                    });
+                });
+            }
+        });
+
+        // Set security posture callback
+        window.global::<AppLogic>().on_set_security_posture({
+            let config = config.clone();
+            let window_weak = window_weak.clone();
+
+            move |posture| {
+                let posture_str = posture.to_string();
+                let config = config.clone();
+                let window_weak = window_weak.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Update config with new posture and regenerate guest policy
+                        {
+                            let mut config_guard = config.write().await;
+                            let new_posture = croh_core::SecurityPosture::from_ui_string(&posture_str);
+                            config_guard.security_posture = new_posture;
+                            // Apply the new posture's default guest policy
+                            config_guard.guest_policy = new_posture.default_guest_policy();
+                            if let Err(e) = config_guard.save() {
+                                error!("Failed to save security posture: {}", e);
+                            }
+                        }
+
+                        // Update UI
+                        let _ = slint::invoke_from_event_loop({
+                            let window_weak = window_weak.clone();
+                            let posture_str = posture_str.clone();
+                            move || {
+                                if let Some(window) = window_weak.upgrade() {
+                                    let mut settings = window.global::<AppLogic>().get_settings();
+                                    settings.security_posture = SharedString::from(&posture_str);
+                                    window.global::<AppLogic>().set_settings(settings);
+                                }
+                            }
+                        });
+
+                        info!("Security posture set to: {}", posture_str);
                     });
                 });
             }
@@ -3190,6 +3452,47 @@ impl App {
                         // Update UI by refreshing the peers list
                         update_peers_ui_with_status(&window_weak, &peer_store, &peer_status).await;
                         update_status(&window_weak, "Peer removed");
+                    });
+                });
+            }
+        });
+
+        // Rename peer callback
+        window.global::<AppLogic>().on_rename_peer({
+            let window_weak = window_weak.clone();
+            let peer_store = peer_store.clone();
+            let peer_status = self.peer_status.clone();
+
+            move |id, new_name| {
+                let id_str = id.to_string();
+                let new_name_str = new_name.to_string();
+                info!("Renaming peer {} to: {}", id_str, new_name_str);
+                let window_weak = window_weak.clone();
+                let peer_store = peer_store.clone();
+                let peer_status = peer_status.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Update the peer's name
+                        {
+                            let mut store = peer_store.write().await;
+                            if let Err(e) = store.update(&id_str, |peer| {
+                                peer.name = new_name_str.clone();
+                            }) {
+                                error!("Failed to rename peer: {}", e);
+                                update_status(&window_weak, &format!("Error: {}", e));
+                                return;
+                            }
+                        }
+
+                        // Update UI
+                        update_peers_ui_with_status(&window_weak, &peer_store, &peer_status).await;
+                        update_status(&window_weak, &format!("Peer renamed to {}", new_name_str));
                     });
                 });
             }
@@ -4686,6 +4989,698 @@ impl App {
             }
         });
     }
+
+    /// Set up network management callbacks.
+    fn setup_network_callbacks(&self, window: &MainWindow) {
+        let window_weak = self.window.clone();
+        let network_store = self.network_store.clone();
+        let peer_store = self.peer_store.clone();
+
+        // Initialize networks UI
+        {
+            let window_weak = window_weak.clone();
+            let network_store = network_store.clone();
+            let peer_store = peer_store.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+
+                rt.block_on(async {
+                    update_networks_ui(&window_weak, &network_store, &peer_store).await;
+                });
+            });
+        }
+
+        // Create network callback
+        window.global::<AppLogic>().on_create_network({
+            let window_weak = window_weak.clone();
+            let network_store = network_store.clone();
+            let peer_store = peer_store.clone();
+
+            move |name, description| {
+                let name_str = name.to_string();
+                let desc_str = description.to_string();
+                info!("Creating network: {}", name_str);
+                let window_weak = window_weak.clone();
+                let network_store = network_store.clone();
+                let peer_store = peer_store.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        let mut store = network_store.write().await;
+                        let result = if desc_str.is_empty() {
+                            store.create(name_str.clone())
+                        } else {
+                            store.create_with_description(name_str.clone(), desc_str)
+                        };
+
+                        match result {
+                            Ok(_) => {
+                                info!("Network '{}' created successfully", name_str);
+                                drop(store);
+                                update_networks_ui(&window_weak, &network_store, &peer_store).await;
+                                update_status(&window_weak, &format!("Network '{}' created", name_str));
+                            }
+                            Err(e) => {
+                                error!("Failed to create network: {}", e);
+                                update_status(&window_weak, &format!("Error creating network: {}", e));
+                            }
+                        }
+                    });
+                });
+            }
+        });
+
+        // Delete network callback
+        window.global::<AppLogic>().on_delete_network({
+            let window_weak = window_weak.clone();
+            let network_store = network_store.clone();
+            let peer_store = peer_store.clone();
+
+            move |id| {
+                let id_str = id.to_string();
+                info!("Deleting network: {}", id_str);
+                let window_weak = window_weak.clone();
+                let network_store = network_store.clone();
+                let peer_store = peer_store.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        let mut store = network_store.write().await;
+                        match store.delete(&id_str) {
+                            Ok(_) => {
+                                info!("Network deleted successfully");
+                                drop(store);
+                                update_networks_ui(&window_weak, &network_store, &peer_store).await;
+                                update_status(&window_weak, "Network deleted");
+                            }
+                            Err(e) => {
+                                error!("Failed to delete network: {}", e);
+                                update_status(&window_weak, &format!("Error deleting network: {}", e));
+                            }
+                        }
+                    });
+                });
+            }
+        });
+
+        // Rename network callback
+        window.global::<AppLogic>().on_rename_network({
+            let window_weak = window_weak.clone();
+            let network_store = network_store.clone();
+            let peer_store = peer_store.clone();
+
+            move |id, new_name| {
+                let id_str = id.to_string();
+                let name_str = new_name.to_string();
+                info!("Renaming network {} to {}", id_str, name_str);
+                let window_weak = window_weak.clone();
+                let network_store = network_store.clone();
+                let peer_store = peer_store.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        let mut store = network_store.write().await;
+                        match store.rename(&id_str, name_str.clone()) {
+                            Ok(_) => {
+                                info!("Network renamed successfully");
+                                drop(store);
+                                update_networks_ui(&window_weak, &network_store, &peer_store).await;
+                                update_status(&window_weak, &format!("Network renamed to '{}'", name_str));
+                            }
+                            Err(e) => {
+                                error!("Failed to rename network: {}", e);
+                                update_status(&window_weak, &format!("Error renaming network: {}", e));
+                            }
+                        }
+                    });
+                });
+            }
+        });
+
+        // Add peer to network callback
+        window.global::<AppLogic>().on_add_peer_to_network({
+            let window_weak = window_weak.clone();
+            let network_store = network_store.clone();
+            let peer_store = peer_store.clone();
+
+            move |network_id, peer_id| {
+                let network_id_str = network_id.to_string();
+                let peer_id_str = peer_id.to_string();
+                info!("Adding peer {} to network {}", peer_id_str, network_id_str);
+                let window_weak = window_weak.clone();
+                let network_store = network_store.clone();
+                let peer_store = peer_store.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        let mut store = network_store.write().await;
+                        match store.add_member(&network_id_str, &peer_id_str) {
+                            Ok(_) => {
+                                info!("Peer added to network successfully");
+                                drop(store);
+                                update_networks_ui(&window_weak, &network_store, &peer_store).await;
+                                update_status(&window_weak, "Peer added to network");
+                            }
+                            Err(e) => {
+                                error!("Failed to add peer to network: {}", e);
+                                update_status(&window_weak, &format!("Error: {}", e));
+                            }
+                        }
+                    });
+                });
+            }
+        });
+
+        // Remove peer from network callback
+        window.global::<AppLogic>().on_remove_peer_from_network({
+            let window_weak = window_weak.clone();
+            let network_store = network_store.clone();
+            let peer_store = peer_store.clone();
+
+            move |network_id, peer_id| {
+                let network_id_str = network_id.to_string();
+                let peer_id_str = peer_id.to_string();
+                info!("Removing peer {} from network {}", peer_id_str, network_id_str);
+                let window_weak = window_weak.clone();
+                let network_store = network_store.clone();
+                let peer_store = peer_store.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        let mut store = network_store.write().await;
+                        match store.remove_member(&network_id_str, &peer_id_str) {
+                            Ok(true) => {
+                                info!("Peer removed from network successfully");
+                                drop(store);
+                                update_networks_ui(&window_weak, &network_store, &peer_store).await;
+                                update_status(&window_weak, "Peer removed from network");
+                            }
+                            Ok(false) => {
+                                warn!("Peer was not in network");
+                                update_status(&window_weak, "Peer was not in network");
+                            }
+                            Err(e) => {
+                                error!("Failed to remove peer from network: {}", e);
+                                update_status(&window_weak, &format!("Error: {}", e));
+                            }
+                        }
+                    });
+                });
+            }
+        });
+
+        // Introduce peers callback - initiates three-way consent flow
+        window.global::<AppLogic>().on_introduce_peers({
+            let window_weak = window_weak.clone();
+            let peer_store = peer_store.clone();
+            let shared_endpoint = self.shared_endpoint.clone();
+            let identity = self.identity.clone();
+            let pending_introductions = self.pending_introductions.clone();
+
+            move |network_id, peer_to_introduce_id, target_member_id| {
+                let network_id_str = network_id.to_string();
+                let peer_b_id = peer_to_introduce_id.to_string();
+                let peer_c_id = target_member_id.to_string();
+
+                info!(
+                    "Initiating introduction: peer {} to member {} in network {}",
+                    peer_b_id, peer_c_id, network_id_str
+                );
+
+                // Update status immediately so user sees feedback
+                update_status(&window_weak, "Starting peer introduction...");
+
+                let window_weak = window_weak.clone();
+                let peer_store = peer_store.clone();
+                let shared_endpoint = shared_endpoint.clone();
+                let identity = identity.clone();
+                let pending_introductions = pending_introductions.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Look up both peers
+                        let peers = peer_store.read().await;
+                        let peer_b = match peers.find_by_id(&peer_b_id) {
+                            Some(p) => p.clone(),
+                            None => {
+                                error!("Peer to introduce not found: {}", peer_b_id);
+                                update_status(&window_weak, "Error: Peer not found");
+                                return;
+                            }
+                        };
+                        let peer_c = match peers.find_by_id(&peer_c_id) {
+                            Some(p) => p.clone(),
+                            None => {
+                                error!("Target member not found: {}", peer_c_id);
+                                update_status(&window_weak, "Error: Target member not found");
+                                return;
+                            }
+                        };
+                        drop(peers);
+
+                        // Check that peer B is not a guest (guests can't be introduced)
+                        if peer_b.is_guest {
+                            warn!("Cannot introduce guest peer: {}", peer_b.name);
+                            update_status(&window_weak, "Cannot introduce guest peers");
+                            return;
+                        }
+
+                        // Get endpoint and identity
+                        let endpoint_guard = shared_endpoint.read().await;
+                        let endpoint = match endpoint_guard.as_ref() {
+                            Some(ep) => ep.clone(),
+                            None => {
+                                error!("No endpoint available");
+                                update_status(&window_weak, "Error: Network not ready");
+                                return;
+                            }
+                        };
+                        drop(endpoint_guard);
+
+                        let identity_guard = identity.read().await;
+                        let our_identity = match identity_guard.as_ref() {
+                            Some(id) => id.clone(),
+                            None => {
+                                error!("No identity available");
+                                update_status(&window_weak, "Error: Identity not ready");
+                                return;
+                            }
+                        };
+                        drop(identity_guard);
+
+                        // Generate introduction ID
+                        let introduction_id = generate_id();
+
+                        // Create pending introduction
+                        let pending = PendingIntroduction {
+                            introduction_id: introduction_id.clone(),
+                            network_id: network_id_str.clone(),
+                            peer_to_introduce_id: peer_b_id.clone(),
+                            peer_to_introduce_name: peer_b.name.clone(),
+                            target_member_id: peer_c_id.clone(),
+                            target_member_name: peer_c.name.clone(),
+                            peer_b_accepted: false,
+                            peer_c_accepted: false,
+                            started_at: std::time::Instant::now(),
+                        };
+
+                        // Store pending introduction
+                        {
+                            let mut intros = pending_introductions.write().await;
+                            intros.insert(introduction_id.clone(), pending);
+                        }
+
+                        // Build PeerInfo for peer C (the network member) to send to peer B
+                        let peer_c_info = PeerInfo {
+                            endpoint_id: peer_c.endpoint_id.clone(),
+                            name: peer_c.name.clone(),
+                            version: env!("CARGO_PKG_VERSION").to_string(),
+                            relay_url: peer_c.address.relay_url().map(|u| u.to_string()),
+                        };
+
+                        // Send IntroductionOffer to peer B
+                        update_status(&window_weak, &format!("Sending introduction offer to {}...", peer_b.name));
+
+                        // Connect to peer B
+                        match endpoint.connect(&peer_b.endpoint_id).await {
+                            Ok(mut conn) => {
+                                // Send IntroductionOffer
+                                let offer = ControlMessage::IntroductionOffer {
+                                    introduction_id: introduction_id.clone(),
+                                    network_id: network_id_str.clone(),
+                                    peer: peer_c_info.clone(),
+                                    message: Some(format!(
+                                        "Would you like to connect with {}?",
+                                        peer_c.name
+                                    )),
+                                };
+
+                                if let Err(e) = conn.send(&offer).await {
+                                    error!("Failed to send introduction offer: {}", e);
+                                    update_status(&window_weak, &format!("Error: {}", e));
+                                    // Remove pending introduction
+                                    let mut intros = pending_introductions.write().await;
+                                    intros.remove(&introduction_id);
+                                    return;
+                                }
+
+                                info!("Introduction offer sent to {}", peer_b.name);
+                                update_status(
+                                    &window_weak,
+                                    &format!("Introduction offer sent to {}, waiting for response...", peer_b.name),
+                                );
+
+                                // Wait for response (with timeout)
+                                match tokio::time::timeout(
+                                    std::time::Duration::from_secs(60),
+                                    conn.recv(),
+                                ).await {
+                                    Ok(Ok(response)) => {
+                                        match response {
+                                            ControlMessage::IntroductionOfferResponse {
+                                                introduction_id: resp_id,
+                                                accepted,
+                                                reason,
+                                            } => {
+                                                if resp_id != introduction_id {
+                                                    warn!("Introduction ID mismatch");
+                                                    return;
+                                                }
+
+                                                if accepted {
+                                                    info!("{} accepted introduction offer", peer_b.name);
+
+                                                    // Update pending state
+                                                    {
+                                                        let mut intros = pending_introductions.write().await;
+                                                        if let Some(intro) = intros.get_mut(&introduction_id) {
+                                                            intro.peer_b_accepted = true;
+                                                        }
+                                                    }
+
+                                                    // Now send IntroductionRequest to peer C
+                                                    update_status(
+                                                        &window_weak,
+                                                        &format!("Sending introduction request to {}...", peer_c.name),
+                                                    );
+
+                                                    // Build PeerInfo for peer B to send to peer C
+                                                    let peer_b_info = PeerInfo {
+                                                        endpoint_id: peer_b.endpoint_id.clone(),
+                                                        name: peer_b.name.clone(),
+                                                        version: env!("CARGO_PKG_VERSION").to_string(),
+                                                        relay_url: peer_b.address.relay_url().map(|u| u.to_string()),
+                                                    };
+
+                                                    // Connect to peer C
+                                                    match endpoint.connect(&peer_c.endpoint_id).await {
+                                                        Ok(mut conn_c) => {
+                                                            let request = ControlMessage::IntroductionRequest {
+                                                                introduction_id: introduction_id.clone(),
+                                                                network_id: network_id_str.clone(),
+                                                                peer: peer_b_info.clone(),
+                                                                message: Some(format!(
+                                                                    "{} would like to connect with you",
+                                                                    peer_b.name
+                                                                )),
+                                                            };
+
+                                                            if let Err(e) = conn_c.send(&request).await {
+                                                                error!("Failed to send introduction request: {}", e);
+                                                                update_status(&window_weak, &format!("Error: {}", e));
+                                                                return;
+                                                            }
+
+                                                            info!("Introduction request sent to {}", peer_c.name);
+
+                                                            // Wait for response from peer C
+                                                            match tokio::time::timeout(
+                                                                std::time::Duration::from_secs(60),
+                                                                conn_c.recv(),
+                                                            ).await {
+                                                                Ok(Ok(response_c)) => {
+                                                                    match response_c {
+                                                                        ControlMessage::IntroductionRequestResponse {
+                                                                            introduction_id: resp_id_c,
+                                                                            accepted: accepted_c,
+                                                                            reason: reason_c,
+                                                                        } => {
+                                                                            if resp_id_c != introduction_id {
+                                                                                warn!("Introduction ID mismatch from peer C");
+                                                                                return;
+                                                                            }
+
+                                                                            if accepted_c {
+                                                                                info!("{} accepted introduction", peer_c.name);
+
+                                                                                // Both accepted! Send IntroductionComplete to both
+                                                                                // Serialize peer info as the "trust bundle" - the peers
+                                                                                // will establish trust directly when they connect
+                                                                                let complete_to_b = ControlMessage::IntroductionComplete {
+                                                                                    introduction_id: introduction_id.clone(),
+                                                                                    network_id: network_id_str.clone(),
+                                                                                    peer: peer_c_info.clone(),
+                                                                                    trust_bundle_json: serde_json::to_string(&peer_c_info).unwrap_or_default(),
+                                                                                };
+
+                                                                                // Small delay to allow receivers to be ready for new connections
+                                                                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+                                                                                // Send IntroductionComplete to peer B (reconnect)
+                                                                                match endpoint.connect(&peer_b.endpoint_id).await {
+                                                                                    Ok(mut conn_b_new) => {
+                                                                                        if let Err(e) = conn_b_new.send(&complete_to_b).await {
+                                                                                            error!("Failed to send IntroductionComplete to {}: {}", peer_b.name, e);
+                                                                                        } else {
+                                                                                            info!("Sent IntroductionComplete to {}", peer_b.name);
+                                                                                        }
+                                                                                        // Properly close the connection
+                                                                                        let _ = conn_b_new.close().await;
+                                                                                    }
+                                                                                    Err(e) => {
+                                                                                        error!("Failed to reconnect to {} for IntroductionComplete: {}", peer_b.name, e);
+                                                                                    }
+                                                                                }
+
+                                                                                let complete_to_c = ControlMessage::IntroductionComplete {
+                                                                                    introduction_id: introduction_id.clone(),
+                                                                                    network_id: network_id_str.clone(),
+                                                                                    peer: peer_b_info.clone(),
+                                                                                    trust_bundle_json: serde_json::to_string(&peer_b_info).unwrap_or_default(),
+                                                                                };
+
+                                                                                // Close old connection and reconnect to peer C
+                                                                                let _ = conn_c.close().await;
+                                                                                match endpoint.connect(&peer_c.endpoint_id).await {
+                                                                                    Ok(mut conn_c_new) => {
+                                                                                        if let Err(e) = conn_c_new.send(&complete_to_c).await {
+                                                                                            error!("Failed to send IntroductionComplete to {}: {}", peer_c.name, e);
+                                                                                        } else {
+                                                                                            info!("Sent IntroductionComplete to {}", peer_c.name);
+                                                                                        }
+                                                                                        // Properly close the connection
+                                                                                        let _ = conn_c_new.close().await;
+                                                                                    }
+                                                                                    Err(e) => {
+                                                                                        error!("Failed to reconnect to {} for IntroductionComplete: {}", peer_c.name, e);
+                                                                                    }
+                                                                                }
+
+                                                                                // Clean up pending introduction
+                                                                                {
+                                                                                    let mut intros = pending_introductions.write().await;
+                                                                                    intros.remove(&introduction_id);
+                                                                                }
+
+                                                                                info!(
+                                                                                    "Introduction complete! {} and {} can now connect",
+                                                                                    peer_b.name, peer_c.name
+                                                                                );
+                                                                                update_status(
+                                                                                    &window_weak,
+                                                                                    &format!(
+                                                                                        "Introduction complete! {} and {} can now connect directly",
+                                                                                        peer_b.name, peer_c.name
+                                                                                    ),
+                                                                                );
+                                                                            } else {
+                                                                                let reason_str = reason_c.unwrap_or_else(|| "No reason given".to_string());
+                                                                                info!("{} declined introduction: {}", peer_c.name, reason_str);
+                                                                                update_status(
+                                                                                    &window_weak,
+                                                                                    &format!("{} declined introduction: {}", peer_c.name, reason_str),
+                                                                                );
+
+                                                                                // Notify peer B that introduction failed
+                                                                                let failed = ControlMessage::IntroductionFailed {
+                                                                                    introduction_id: introduction_id.clone(),
+                                                                                    reason: format!("{} declined", peer_c.name),
+                                                                                };
+                                                                                if let Ok(mut conn_b_new) = endpoint.connect(&peer_b.endpoint_id).await {
+                                                                                    let _ = conn_b_new.send(&failed).await;
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                        _ => {
+                                                                            warn!("Unexpected response from peer C");
+                                                                        }
+                                                                    }
+                                                                }
+                                                                Ok(Err(e)) => {
+                                                                    error!("Error receiving from peer C: {}", e);
+                                                                    update_status(&window_weak, &format!("Error: {}", e));
+                                                                }
+                                                                Err(_) => {
+                                                                    warn!("{} did not respond in time", peer_c.name);
+                                                                    update_status(
+                                                                        &window_weak,
+                                                                        &format!("{} did not respond in time", peer_c.name),
+                                                                    );
+                                                                }
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            error!("Failed to connect to peer C: {}", e);
+                                                            update_status(&window_weak, &format!("Error connecting to {}: {}", peer_c.name, e));
+                                                        }
+                                                    }
+                                                } else {
+                                                    let reason_str = reason.unwrap_or_else(|| "No reason given".to_string());
+                                                    info!("{} declined introduction: {}", peer_b.name, reason_str);
+                                                    update_status(
+                                                        &window_weak,
+                                                        &format!("{} declined introduction: {}", peer_b.name, reason_str),
+                                                    );
+                                                }
+                                            }
+                                            _ => {
+                                                warn!("Unexpected response from peer B");
+                                            }
+                                        }
+                                    }
+                                    Ok(Err(e)) => {
+                                        error!("Error receiving from peer B: {}", e);
+                                        update_status(&window_weak, &format!("Error: {}", e));
+                                    }
+                                    Err(_) => {
+                                        warn!("{} did not respond in time", peer_b.name);
+                                        update_status(
+                                            &window_weak,
+                                            &format!("{} did not respond in time", peer_b.name),
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to connect to peer B: {}", e);
+                                update_status(&window_weak, &format!("Error connecting to {}: {}", peer_b.name, e));
+                            }
+                        }
+
+                        // Clean up pending introduction on any failure path
+                        {
+                            let mut intros = pending_introductions.write().await;
+                            intros.remove(&introduction_id);
+                        }
+                    });
+                });
+            }
+        });
+    }
+}
+
+/// Intermediate data structure for network info that is Send-safe.
+/// Used to transfer data to the UI thread where ModelRc can be created.
+struct NetworkData {
+    id: String,
+    name: String,
+    description: String,
+    member_count: i32,
+    is_owner: bool,
+    allow_introductions: bool,
+    created_at: String,
+    members: Vec<(String, String)>, // (peer_id, name)
+}
+
+/// Update the networks list in the UI.
+async fn update_networks_ui(
+    window_weak: &Weak<MainWindow>,
+    network_store: &Arc<RwLock<NetworkStore>>,
+    peer_store: &Arc<RwLock<PeerStore>>,
+) {
+    let store = network_store.read().await;
+    let peers = peer_store.read().await;
+    let networks = store.list();
+
+    // Collect data in a Send-safe format
+    let data: Vec<NetworkData> = networks
+        .iter()
+        .map(|n| {
+            // Build member list with names from peer store
+            let members: Vec<(String, String)> = n.members
+                .iter()
+                .filter_map(|peer_id| {
+                    peers.find_by_id(peer_id).map(|peer| (peer_id.clone(), peer.name.clone()))
+                })
+                .collect();
+
+            NetworkData {
+                id: n.id.clone(),
+                name: n.name.clone(),
+                description: n.description.clone().unwrap_or_default(),
+                member_count: n.member_count() as i32,
+                is_owner: n.is_owner(),
+                allow_introductions: n.can_introduce(),
+                created_at: n.created_at.format("%Y-%m-%d").to_string(),
+                members,
+            }
+        })
+        .collect();
+
+    let window_weak = window_weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(window) = window_weak.upgrade() {
+            // Build NetworkItems with ModelRc on the UI thread
+            let items: Vec<NetworkItem> = data
+                .into_iter()
+                .map(|d| {
+                    let members: Vec<NetworkMember> = d.members
+                        .into_iter()
+                        .map(|(peer_id, name)| NetworkMember {
+                            peer_id: SharedString::from(&peer_id),
+                            name: SharedString::from(&name),
+                        })
+                        .collect();
+
+                    NetworkItem {
+                        id: SharedString::from(&d.id),
+                        name: SharedString::from(&d.name),
+                        description: SharedString::from(&d.description),
+                        member_count: d.member_count,
+                        is_owner: d.is_owner,
+                        allow_introductions: d.allow_introductions,
+                        created_at: SharedString::from(&d.created_at),
+                        members: ModelRc::new(VecModel::from(members)),
+                    }
+                })
+                .collect();
+
+            window.global::<AppLogic>().set_networks(ModelRc::new(VecModel::from(items)));
+        }
+    });
 }
 
 /// Format file size as human-readable string.

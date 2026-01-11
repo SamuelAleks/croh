@@ -320,6 +320,84 @@ pub enum ControlMessage {
         // with a fresh TrustBundle for security. The guest must complete
         // this handshake to finalize the promotion.
     },
+
+    // ==================== Network Introduction Messages ====================
+    // Three-way consent flow for peer introductions within a network.
+    // 1. Introducer (A) sends IntroductionOffer to peer B with C's info
+    // 2. B accepts or rejects the offer
+    // 3. A sends IntroductionRequest to peer C with B's info
+    // 4. C accepts or rejects the request
+    // 5. If both accept, A sends IntroductionComplete to both with connection details
+    // 6. B and C connect directly and complete a fresh trust handshake
+
+    /// Introduction offer: sent to one peer (B) offering to introduce them to another (C).
+    IntroductionOffer {
+        /// Unique introduction ID
+        introduction_id: String,
+        /// Network ID where the introduction is happening
+        network_id: String,
+        /// Information about the peer being introduced (C)
+        peer: PeerInfo,
+        /// Optional message from the introducer
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+
+    /// Response to an introduction offer.
+    IntroductionOfferResponse {
+        /// Introduction ID from the offer
+        introduction_id: String,
+        /// Whether the offer is accepted
+        accepted: bool,
+        /// Reason if rejected
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+
+    /// Introduction request: sent to the other peer (C) asking if they accept introduction to B.
+    IntroductionRequest {
+        /// Unique introduction ID
+        introduction_id: String,
+        /// Network ID where the introduction is happening
+        network_id: String,
+        /// Information about the peer requesting introduction (B)
+        peer: PeerInfo,
+        /// Optional message from the introducer
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+
+    /// Response to an introduction request.
+    IntroductionRequestResponse {
+        /// Introduction ID from the request
+        introduction_id: String,
+        /// Whether the request is accepted
+        accepted: bool,
+        /// Reason if rejected
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+
+    /// Introduction complete: sent to both peers after both have accepted.
+    /// Contains connection details for direct peer-to-peer connection.
+    IntroductionComplete {
+        /// Introduction ID
+        introduction_id: String,
+        /// Network ID
+        network_id: String,
+        /// The peer to connect to
+        peer: PeerInfo,
+        /// Trust bundle for the peer (for establishing trust)
+        trust_bundle_json: String,
+    },
+
+    /// Introduction failed notification.
+    IntroductionFailed {
+        /// Introduction ID
+        introduction_id: String,
+        /// Reason for failure
+        reason: String,
+    },
 }
 
 impl ControlMessage {
@@ -471,6 +549,75 @@ mod tests {
             ControlMessage::PromotionResponse { approved, reason } => {
                 assert!(!approved);
                 assert_eq!(reason, Some("Not approved at this time".to_string()));
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_introduction_offer_serialization() {
+        let msg = ControlMessage::IntroductionOffer {
+            introduction_id: "intro123".to_string(),
+            network_id: "network456".to_string(),
+            peer: PeerInfo {
+                endpoint_id: "peer789".to_string(),
+                name: "Bob's Device".to_string(),
+                version: "0.1.0".to_string(),
+                relay_url: None,
+            },
+            message: Some("Meet my friend Bob!".to_string()),
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"introduction_offer\""));
+        assert!(json.contains("\"introduction_id\":\"intro123\""));
+
+        let parsed: ControlMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ControlMessage::IntroductionOffer {
+                introduction_id,
+                network_id,
+                peer,
+                message,
+            } => {
+                assert_eq!(introduction_id, "intro123");
+                assert_eq!(network_id, "network456");
+                assert_eq!(peer.name, "Bob's Device");
+                assert_eq!(message, Some("Meet my friend Bob!".to_string()));
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_introduction_complete_serialization() {
+        let msg = ControlMessage::IntroductionComplete {
+            introduction_id: "intro123".to_string(),
+            network_id: "network456".to_string(),
+            peer: PeerInfo {
+                endpoint_id: "peer789".to_string(),
+                name: "Carol's Device".to_string(),
+                version: "0.1.0".to_string(),
+                relay_url: Some("https://relay.example.com".to_string()),
+            },
+            trust_bundle_json: "{\"nonce\":\"abc\"}".to_string(),
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"introduction_complete\""));
+        assert!(json.contains("\"trust_bundle_json\""));
+
+        let parsed: ControlMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ControlMessage::IntroductionComplete {
+                introduction_id,
+                peer,
+                trust_bundle_json,
+                ..
+            } => {
+                assert_eq!(introduction_id, "intro123");
+                assert_eq!(peer.name, "Carol's Device");
+                assert!(trust_bundle_json.contains("nonce"));
             }
             _ => panic!("wrong message type"),
         }

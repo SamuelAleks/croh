@@ -60,6 +60,11 @@ pub fn peers_file_path() -> PathBuf {
     data_dir().join("peers.json")
 }
 
+/// Get the path to the networks file.
+pub fn networks_file_path() -> PathBuf {
+    data_dir().join("networks.json")
+}
+
 /// Get the temporary upload directory for files being sent.
 pub fn upload_dir() -> PathBuf {
     data_dir().join("uploads")
