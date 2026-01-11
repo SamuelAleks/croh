@@ -164,6 +164,7 @@ declare -a PIDS
 
 # Launch primary instance (default config)
 echo "Launching ${INSTANCE_NAMES[0]}..."
+CROH_INSTANCE_NAME="${INSTANCE_NAMES[0]}" \
 RUST_LOG=info "$BINARY" &
 PIDS+=($!)
 
@@ -176,6 +177,7 @@ for ((i=1; i<NUM_INSTANCES; i++)); do
     instance_dir="/tmp/croh-$name_lower"
 
     echo "Launching $name..."
+    CROH_INSTANCE_NAME="$name" \
     CROH_CONFIG_DIR="$instance_dir/config" \
     CROH_DATA_DIR="$instance_dir/data" \
     CROH_DOWNLOAD_DIR="$instance_dir/downloads" \

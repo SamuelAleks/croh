@@ -4,17 +4,41 @@ use anyhow::Result;
 use croh_core::Config;
 use slint::{ComponentHandle, LogicalSize, WindowSize};
 use tracing::{error, info, Level};
+use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::time::FormatTime;
 use tracing_subscriber::FmtSubscriber;
 
 slint::include_modules!();
 
 mod app;
 
+/// Custom time format that includes instance name prefix if CROH_INSTANCE_NAME is set.
+#[derive(Clone)]
+struct InstancePrefixTime {
+    instance_name: Option<String>,
+}
+
+impl FormatTime for InstancePrefixTime {
+    fn format_time(&self, w: &mut Writer<'_>) -> std::fmt::Result {
+        if let Some(ref name) = self.instance_name {
+            write!(w, "[{}]", name)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 fn main() -> Result<()> {
-    // Initialize logging
+    // Check for instance name (used by multi-instance test script)
+    let instance_name = std::env::var("CROH_INSTANCE_NAME").ok();
+
+    // Initialize logging with optional instance prefix
     FmtSubscriber::builder()
         .with_max_level(Level::INFO)
         .with_target(false)
+        .with_timer(InstancePrefixTime {
+            instance_name: instance_name.clone(),
+        })
         .init();
 
     info!("Starting Croc GUI...");
