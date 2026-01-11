@@ -197,6 +197,14 @@ pub struct Config {
     /// Show session statistics in header (privacy toggle).
     #[serde(default)]
     pub show_session_stats: bool,
+
+    /// Keep completed transfers in the list (false = auto-clear after completion).
+    #[serde(default = "default_keep_completed_transfers")]
+    pub keep_completed_transfers: bool,
+}
+
+fn default_keep_completed_transfers() -> bool {
+    true // Default to keeping transfers visible
 }
 
 impl Default for Config {
@@ -215,6 +223,7 @@ impl Default for Config {
             dnd_mode: DndMode::default(),
             dnd_message: None,
             show_session_stats: false,
+            keep_completed_transfers: true,
         }
     }
 }

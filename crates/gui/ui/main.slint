@@ -291,6 +291,8 @@ export struct AppSettings {
     dnd-message: string,     // custom status message
     // Privacy settings
     show-session-stats: bool,     // show upload/download totals in header
+    // Transfer list settings
+    keep-completed-transfers: bool,  // keep completed transfers in list (vs auto-clear)
 }
 
 export struct PeerItem {
@@ -337,6 +339,7 @@ export struct PeerItem {
     speed-test-latency: string,   // formatted latency e.g. "45 ms"
     // Connection control
     connected: bool,              // false = user disconnected, skip pings and block connections
+    revoked: bool,                // true = remote peer revoked our trust (grayed out, only remove works)
 }
 
 export struct BrowseEntry {
@@ -462,6 +465,8 @@ export global AppLogic {
 
     // Session stats toggle
     callback toggle-session-stats();
+    // Transfer list setting
+    callback toggle-keep-completed-transfers();
 }
 
 // ============================================================================
@@ -1080,31 +1085,6 @@ component DropZone inherits Rectangle {
 }
 
 // ============================================================================
-// Compact Input with Label
-// ============================================================================
-
-component LabeledInput inherits VerticalLayout {
-    in property <string> label;
-    in property <string> placeholder: "";
-    in-out property <string> value;
-
-    spacing: 4px;
-
-    Text {
-        text: label;
-        font-size: 12px;
-        color: Theme.text;
-    }
-
-    ThemedInput {
-        text <=> value;
-        placeholder-text: placeholder;
-        font-size: 13px;
-        input-width: parent.width;
-    }
-}
-
-// ============================================================================
 // Setting Row (compact)
 // ============================================================================
 
@@ -1384,37 +1364,54 @@ component ReceivePanel inherits Rectangle {
 
     background: Theme.bg-dark;
 
-    VerticalBox {
-        padding: Theme.spacing-md;
-        spacing: Theme.spacing-sm;
+    // Card container with fixed height
+    Rectangle {
+        x: Theme.spacing-md;
+        y: Theme.spacing-md;
+        width: parent.width - Theme.spacing-md * 2;
+        height: 110px;
+        background: Theme.bg-card;
+        border-radius: Theme.radius-sm;
+        border-width: 1px;
+        border-color: Theme.border;
 
-        Section {
-            VerticalBox {
-                spacing: Theme.spacing-sm;
+        // Label
+        Text {
+            x: Theme.spacing-sm;
+            y: Theme.spacing-sm;
+            text: "Transfer Code";
+            font-size: 12px;
+            color: Theme.text;
+        }
 
-                LabeledInput {
-                    label: "Transfer Code";
-                    placeholder: "e.g. 7-alpha-beta-gamma";
-                    value <=> code;
-                }
+        // Input field
+        ThemedInput {
+            x: Theme.spacing-sm;
+            y: Theme.spacing-sm + 18px;
+            text <=> code;
+            placeholder-text: "e.g. 7-alpha-beta-gamma";
+            font-size: 13px;
+            input-width: parent.width - Theme.spacing-sm * 2;
+        }
 
-                HorizontalBox {
-                    Rectangle { horizontal-stretch: 1; }
+        // Receive button - anchored to right
+        HorizontalLayout {
+            x: Theme.spacing-sm;
+            y: Theme.spacing-sm + 18px + 28px + 8px;
+            width: parent.width - Theme.spacing-sm * 2;
 
-                    CompactButton {
-                        label: "Receive";
-                        primary: true;
-                        enabled: code != "";
-                        clicked => {
-                            AppLogic.start-receive(code);
-                            code = "";
-                        }
-                    }
+            Rectangle { horizontal-stretch: 1; }
+
+            CompactButton {
+                label: "Receive";
+                primary: true;
+                enabled: code != "";
+                clicked => {
+                    AppLogic.start-receive(code);
+                    code = "";
                 }
             }
         }
-
-        Rectangle { vertical-stretch: 1; }
     }
 }
 
@@ -1492,10 +1489,11 @@ component PeerCard inherits Rectangle {
     callback permissions-changed(bool, bool, bool); // allow-push, allow-pull, allow-browse
     callback expanded-changed(bool); // notify when expanded state changes
 
-    background: Theme.bg-card;
+    background: peer.revoked ? Theme.bg-hover : Theme.bg-card;
     border-radius: Theme.radius-sm;
     border-width: 1px;
-    border-color: peer.expanded ? Theme.accent : Theme.border;
+    border-color: peer.revoked ? Theme.error : (peer.expanded ? Theme.accent : Theme.border);
+    opacity: peer.revoked ? 0.7 : 1.0;
 
     VerticalLayout {
         // Header row (always visible)
@@ -1510,7 +1508,8 @@ component PeerCard inherits Rectangle {
                 height: 10px;
                 y: (parent.height - self.height) / 2;
                 border-radius: 5px;
-                background: peer.status == "online" ? Theme.success :
+                background: peer.revoked ? Theme.error :
+                           peer.status == "online" ? Theme.success :
                            peer.status == "connecting" ? Theme.warning : Theme.text-muted;
 
                 // Ping indicator ring (shows when we have recent latency)
@@ -1537,12 +1536,28 @@ component PeerCard inherits Rectangle {
                     Text {
                         text: peer.name;
                         font-size: 13px;
-                        color: Theme.text;
+                        color: peer.revoked ? Theme.text-muted : Theme.text;
                         overflow: elide;
                     }
 
-                    // Inline latency badge when online
-                    if peer.status == "online" && peer.latency-ms > 0: Rectangle {
+                    // Revoked badge
+                    if peer.revoked: Rectangle {
+                        width: 60px;
+                        height: 16px;
+                        border-radius: 3px;
+                        background: #ef444430;
+
+                        Text {
+                            text: "Revoked";
+                            font-size: 10px;
+                            color: Theme.error;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    // Inline latency badge when online (not shown when revoked)
+                    if !peer.revoked && peer.status == "online" && peer.latency-ms > 0: Rectangle {
                         width: 45px;
                         height: 16px;
                         border-radius: 3px;
@@ -1607,39 +1622,39 @@ component PeerCard inherits Rectangle {
                 }
             }
 
-            // Browse button (for pulling files from peer)
-            if peer.can-browse && peer.status == "online": CompactButton {
+            // Browse button (for pulling files from peer) - disabled when revoked
+            if !peer.revoked && peer.can-browse && peer.status == "online": CompactButton {
                 label: "Browse";
                 small: true;
                 clicked => { root.browse-clicked(); }
             }
 
-            // Push button (only show if files selected and peer has permission)
-            if peer.can-push && peer.status == "online" && AppLogic.selected-files.length > 0: CompactButton {
+            // Push button (only show if files selected and peer has permission) - disabled when revoked
+            if !peer.revoked && peer.can-push && peer.status == "online" && AppLogic.selected-files.length > 0: CompactButton {
                 label: "Push";
                 small: true;
                 clicked => { root.push-clicked(); }
             }
 
-            // Expand/collapse button
-            ImageIconBtn {
+            // Expand/collapse button - disabled when revoked
+            if !peer.revoked: ImageIconBtn {
                 icon: peer.expanded ? Icons.chevron-up : Icons.chevron-down;
                 icon-color: Theme.text-muted;
                 small: true;
                 clicked => { root.expanded-changed(!peer.expanded); }
             }
 
-            // Remove button (just removes locally, no notification)
+            // Remove button (just removes locally, no notification) - always enabled
             ImageIconBtn {
                 icon: Icons.x;
-                icon-color: Theme.text-muted;
+                icon-color: peer.revoked ? Theme.error : Theme.text-muted;
                 small: true;
                 clicked => { root.remove-clicked(); }
             }
         }
 
-        // Expanded details (only visible when expanded)
-        if peer.expanded: Rectangle {
+        // Expanded details (only visible when expanded and not revoked)
+        if peer.expanded && !peer.revoked: Rectangle {
             background: Theme.bg-hover;
             border-radius: Theme.radius-sm;
 
@@ -2418,6 +2433,43 @@ component SettingsPanel inherits Rectangle {
 
                         Rectangle {
                             x: AppLogic.settings.show-session-stats ? parent.width - self.width - 2px : 2px;
+                            y: 2px;
+                            width: 18px;
+                            height: 18px;
+                            border-radius: 9px;
+                            background: #ffffff;
+
+                            animate x { duration: 150ms; easing: ease-out; }
+                        }
+                    }
+                }
+            }
+
+            // Transfers
+            Section {
+                title: "Transfers";
+
+                SettingRow {
+                    label: "Keep Completed Transfers";
+                    sublabel: "Keep transfers in list after completion";
+
+                    Rectangle {
+                        width: 40px;
+                        height: 22px;
+                        border-radius: 11px;
+                        background: AppLogic.settings.keep-completed-transfers ? Theme.accent : Theme.bg-hover;
+                        border-width: 1px;
+                        border-color: Theme.border;
+
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppLogic.toggle-keep-completed-transfers();
+                            }
+                        }
+
+                        Rectangle {
+                            x: AppLogic.settings.keep-completed-transfers ? parent.width - self.width - 2px : 2px;
                             y: 2px;
                             width: 18px;
                             height: 18px;

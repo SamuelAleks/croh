@@ -75,6 +75,41 @@ pub fn default_browsable_paths() -> Vec<PathBuf> {
         paths.push(home);
     }
 
+    // On Linux, add common mount points
+    #[cfg(target_os = "linux")]
+    {
+        // /mnt is the traditional mount point for temporarily mounted filesystems
+        let mnt = PathBuf::from("/mnt");
+        if mnt.exists() {
+            paths.push(mnt);
+        }
+
+        // /run/media/$USER is where modern Linux (udisks2) auto-mounts removable drives
+        if let Some(username) = std::env::var("USER").ok() {
+            let run_media = PathBuf::from(format!("/run/media/{}", username));
+            if run_media.exists() {
+                paths.push(run_media);
+            }
+        }
+
+        // /media/$USER is another common auto-mount location (older systems)
+        if let Some(username) = std::env::var("USER").ok() {
+            let media = PathBuf::from(format!("/media/{}", username));
+            if media.exists() {
+                paths.push(media);
+            }
+        }
+    }
+
+    // On macOS, add /Volumes for mounted drives
+    #[cfg(target_os = "macos")]
+    {
+        let volumes = PathBuf::from("/Volumes");
+        if volumes.exists() {
+            paths.push(volumes);
+        }
+    }
+
     paths
 }
 

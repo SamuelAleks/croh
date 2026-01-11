@@ -72,8 +72,6 @@ pub struct App {
     browse_state: Arc<RwLock<BrowseState>>,
     /// Pending trust handshake state (nonce + result channel).
     pending_trust: Arc<RwLock<Option<PendingTrust>>>,
-    /// Shared peers model for UI (allows in-place updates).
-    peers_model: std::rc::Rc<VecModel<PeerItem>>,
     /// Connection status for each peer (keyed by peer ID).
     peer_status: Arc<RwLock<HashMap<String, PeerConnectionStatus>>>,
     /// Transfer history for completed transfers.
@@ -141,12 +139,6 @@ impl App {
         let peer_store = PeerStore::load().unwrap_or_default();
         let transfer_history = TransferHistory::load().unwrap_or_default();
 
-        // Create shared peers model and set it on the UI
-        let peers_model = std::rc::Rc::new(VecModel::<PeerItem>::default());
-        if let Some(win) = window.upgrade() {
-            win.global::<AppLogic>().set_peers(peers_model.clone().into());
-        }
-
         Self {
             window,
             selected_files: Arc::new(RwLock::new(Vec::new())),
@@ -160,7 +152,6 @@ impl App {
             listener_shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             browse_state: Arc::new(RwLock::new(BrowseState::default())),
             pending_trust: Arc::new(RwLock::new(None)),
-            peers_model,
             peer_status: Arc::new(RwLock::new(HashMap::new())),
             transfer_history: Arc::new(RwLock::new(transfer_history)),
             app_start_time: std::time::Instant::now(),
@@ -189,35 +180,25 @@ impl App {
         self.start_peer_status_checker();
     }
 
-    /// Refresh the peers model with the given items (clears and repopulates).
+    /// Refresh the peers model with the given items (replaces the model).
     fn refresh_peers_model(&self, items: Vec<PeerItem>) {
-        // Clear existing items
-        while self.peers_model.row_count() > 0 {
-            self.peers_model.remove(0);
-        }
-
         // Collect peers that allow push for the send panel dropdown
         let mut pushable_names: Vec<SharedString> = Vec::new();
         let mut pushable_ids: Vec<SharedString> = Vec::new();
 
-        // Add new items
         for item in &items {
-            // Check if this peer allows us to push (their_permissions.push == true means can_push)
-            if item.can_push {
+            if item.can_push && !item.revoked {
                 pushable_names.push(item.name.clone());
                 pushable_ids.push(item.id.clone());
             }
-            self.peers_model.push(item.clone());
         }
 
-        // Update the push-to-peer dropdown data
+        // Update the model and dropdown data
         if let Some(window) = self.window.upgrade() {
-            window.global::<AppLogic>().set_peer_names_for_push(
-                ModelRc::new(VecModel::from(pushable_names))
-            );
-            window.global::<AppLogic>().set_pushable_peer_ids(
-                ModelRc::new(VecModel::from(pushable_ids))
-            );
+            let logic = window.global::<AppLogic>();
+            logic.set_peers(ModelRc::new(VecModel::from(items)));
+            logic.set_peer_names_for_push(ModelRc::new(VecModel::from(pushable_names)));
+            logic.set_pushable_peer_ids(ModelRc::new(VecModel::from(pushable_ids)));
         }
     }
 
@@ -636,11 +617,13 @@ impl App {
                             let transfer_manager_progress = transfer_manager.clone();
                             let transfer_history_progress = transfer_history.clone();
                             let session_stats_progress = session_stats.clone();
+                            let config_progress = config.clone();
                             let window_weak_progress = window_weak.clone();
                             let transfer_id_progress = transfer_id.clone();
                             let peer_name = peer.name.clone();
                             tokio::spawn(async move {
                                 while let Some(event) = progress_rx.recv().await {
+                                    let keep_completed = config_progress.read().await.keep_completed_transfers;
                                     match event {
                                         TransferEvent::Started { .. } => {
                                             let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
@@ -676,7 +659,7 @@ impl App {
                                             update_session_stats_ui(&window_weak_progress, &session_stats_progress);
                                             update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                             update_status(&window_weak_progress, &format!("Received files from {}", peer_name));
-                                            save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
+                                            save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress, keep_completed).await;
                                             // Refresh UI to clear the completed transfer
                                             update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                         }
@@ -688,7 +671,7 @@ impl App {
                                             }).await;
                                             update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                             update_status(&window_weak_progress, &format!("Receive failed: {}", error));
-                                            save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
+                                            save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress, keep_completed).await;
                                             // Refresh UI to clear the failed transfer
                                             update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                         }
@@ -697,7 +680,7 @@ impl App {
                                                 t.status = TransferStatus::Cancelled;
                                             }).await;
                                             update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
-                                            save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
+                                            save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress, keep_completed).await;
                                         }
                                     }
                                 }
@@ -812,11 +795,13 @@ impl App {
                             let transfer_manager_progress = transfer_manager.clone();
                             let transfer_history_progress = transfer_history.clone();
                             let session_stats_progress = session_stats.clone();
+                            let config_progress = config.clone();
                             let window_weak_progress = window_weak.clone();
                             let transfer_id_progress = transfer_id.clone();
                             let peer_name = peer.name.clone();
                             tokio::spawn(async move {
                                 while let Some(event) = progress_rx.recv().await {
+                                    let keep_completed = config_progress.read().await.keep_completed_transfers;
                                     match event {
                                         TransferEvent::Started { .. } => {
                                             let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
@@ -855,7 +840,7 @@ impl App {
                                             update_session_stats_ui(&window_weak_progress, &session_stats_progress);
                                             update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                             update_status(&window_weak_progress, &format!("Pull completed for {}", peer_name));
-                                            save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
+                                            save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress, keep_completed).await;
                                             // Refresh UI to clear the completed transfer
                                             update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                         }
@@ -867,7 +852,7 @@ impl App {
                                             }).await;
                                             update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                             update_status(&window_weak_progress, &format!("Pull failed: {}", error));
-                                            save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
+                                            save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress, keep_completed).await;
                                             // Refresh UI to clear the failed transfer
                                             update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                         }
@@ -876,7 +861,7 @@ impl App {
                                                 t.status = TransferStatus::Cancelled;
                                             }).await;
                                             update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
-                                            save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
+                                            save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress, keep_completed).await;
                                         }
                                     }
                                 }
@@ -1022,6 +1007,36 @@ impl App {
                             }
                             let _ = conn.close().await;
                         }
+                        ControlMessage::TrustRevoke { reason } => {
+                            info!("Received TrustRevoke from {}: {}", peer.name, reason);
+                            let peer_id = peer.id.clone();
+                            let peer_name = peer.name.clone();
+                            let window_weak_revoke = window_weak.clone();
+
+                            // Update UI to show peer as revoked
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(window) = window_weak_revoke.upgrade() {
+                                    let logic = window.global::<AppLogic>();
+                                    let model = logic.get_peers();
+
+                                    // Find and update the peer in the model
+                                    for i in 0..model.row_count() {
+                                        if let Some(mut peer_item) = model.row_data(i) {
+                                            if peer_item.id.to_string() == peer_id {
+                                                peer_item.revoked = true;
+                                                peer_item.status = SharedString::from("revoked");
+                                                model.set_row_data(i, peer_item);
+                                                break;
+                                            }
+                                        }
+                                    }
+
+                                    // Update status bar
+                                    logic.set_app_status(SharedString::from(format!("{} removed you as a peer", peer_name)));
+                                }
+                            });
+                            let _ = conn.close().await;
+                        }
                         other => {
                             warn!("Unexpected message type from {}: {:?}", remote_id, other);
                         }
@@ -1081,6 +1096,9 @@ impl App {
                 // Privacy settings
                 let show_session_stats = config_guard.show_session_stats;
 
+                // Transfer list settings
+                let keep_completed_transfers = config_guard.keep_completed_transfers;
+
                 drop(config_guard);
 
                 // Update UI on main thread
@@ -1101,7 +1119,8 @@ impl App {
                             browse_exclude_patterns: SharedString::from(browse_exclude_patterns),
                             dnd_mode: SharedString::from(dnd_mode),
                             dnd_message: SharedString::from(dnd_message),
-                            show_session_stats: show_session_stats,
+                            show_session_stats,
+                            keep_completed_transfers,
                         };
                         window.global::<AppLogic>().set_settings(settings);
                     }
@@ -1463,7 +1482,8 @@ impl App {
                                             update_status(&window_weak, "Transfer completed!");
                                             update_transfers_ui(&window_weak, &transfer_manager)
                                                 .await;
-                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id).await;
+                                            let keep_completed = config.read().await.keep_completed_transfers;
+                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id, keep_completed).await;
 
                                             // Clear selected files
                                             let mut files_guard = selected_files.write().await;
@@ -1492,7 +1512,8 @@ impl App {
                                             );
                                             update_transfers_ui(&window_weak, &transfer_manager)
                                                 .await;
-                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id).await;
+                                            let keep_completed = config.read().await.keep_completed_transfers;
+                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id, keep_completed).await;
                                             break;
                                         }
                                         Some(CrocEvent::Output(line)) => {
@@ -1527,7 +1548,8 @@ impl App {
                                                 .await;
                                             update_status(&window_weak, "Transfer completed!");
                                             update_transfers_ui(&window_weak, &transfer_manager).await;
-                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id).await;
+                                            let keep_completed = config.read().await.keep_completed_transfers;
+                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id, keep_completed).await;
 
                                             // Clear selected files
                                             let mut files_guard = selected_files.write().await;
@@ -1554,7 +1576,8 @@ impl App {
                                                 .await;
                                             update_status(&window_weak, "Transfer failed");
                                             update_transfers_ui(&window_weak, &transfer_manager).await;
-                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id).await;
+                                            let keep_completed = config.read().await.keep_completed_transfers;
+                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id, keep_completed).await;
                                         }
                                         Err(e) => {
                                             error!("Failed to get process status: {}", e);
@@ -1736,7 +1759,8 @@ impl App {
                                             update_status(&window_weak, "Receive completed!");
                                             update_transfers_ui(&window_weak, &transfer_manager)
                                                 .await;
-                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id).await;
+                                            let keep_completed = config.read().await.keep_completed_transfers;
+                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id, keep_completed).await;
 
                                             // Check for trust bundles in received files
                                             check_and_handle_trust_bundle(&download_dir, &window_weak, &identity, &shared_endpoint, &peer_store, &peer_status).await;
@@ -1757,7 +1781,8 @@ impl App {
                                             );
                                             update_transfers_ui(&window_weak, &transfer_manager)
                                                 .await;
-                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id).await;
+                                            let keep_completed = config.read().await.keep_completed_transfers;
+                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id, keep_completed).await;
                                             break;
                                         }
                                         Some(CrocEvent::Output(line)) => {
@@ -1788,7 +1813,8 @@ impl App {
                                                 .await;
                                             update_status(&window_weak, "Receive completed!");
                                             update_transfers_ui(&window_weak, &transfer_manager).await;
-                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id).await;
+                                            let keep_completed = config.read().await.keep_completed_transfers;
+                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id, keep_completed).await;
 
                                             // Check for trust bundles in received files
                                             check_and_handle_trust_bundle(&download_dir, &window_weak, &identity, &shared_endpoint, &peer_store, &peer_status).await;
@@ -1804,7 +1830,8 @@ impl App {
                                                 .await;
                                             update_status(&window_weak, "Receive failed");
                                             update_transfers_ui(&window_weak, &transfer_manager).await;
-                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id).await;
+                                            let keep_completed = config.read().await.keep_completed_transfers;
+                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id, keep_completed).await;
                                         }
                                         Err(e) => {
                                             error!("Failed to get process status: {}", e);
@@ -2203,6 +2230,7 @@ impl App {
                         let dnd_mode = config_guard.dnd_mode.to_ui_string().to_string();
                         let dnd_message = config_guard.dnd_message.clone().unwrap_or_default();
                         let show_session_stats = config_guard.show_session_stats;
+                        let keep_completed_transfers = config_guard.keep_completed_transfers;
                         let (croc_path, croc_found) = match find_croc_executable() {
                             Ok(path) => (path.to_string_lossy().to_string(), true),
                             Err(_) => ("Not found".to_string(), false),
@@ -2227,6 +2255,7 @@ impl App {
                                     dnd_mode: SharedString::from(dnd_mode),
                                     dnd_message: SharedString::from(dnd_message),
                                     show_session_stats,
+                                    keep_completed_transfers,
                                 };
                                 window.global::<AppLogic>().set_settings(settings);
                             }
@@ -2450,6 +2479,45 @@ impl App {
                             if let Some(window) = window_weak.upgrade() {
                                 let mut settings = window.global::<AppLogic>().get_settings();
                                 settings.show_session_stats = new_value;
+                                window.global::<AppLogic>().set_settings(settings);
+                            }
+                        });
+                    });
+                });
+            }
+        });
+
+        // Toggle keep completed transfers callback
+        window.global::<AppLogic>().on_toggle_keep_completed_transfers({
+            let config = config.clone();
+            let window_weak = window_weak.clone();
+
+            move || {
+                let config = config.clone();
+                let window_weak = window_weak.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Toggle the setting
+                        let new_value = {
+                            let mut config_guard = config.write().await;
+                            config_guard.keep_completed_transfers = !config_guard.keep_completed_transfers;
+                            if let Err(e) = config_guard.save() {
+                                error!("Failed to save keep_completed_transfers setting: {}", e);
+                            }
+                            config_guard.keep_completed_transfers
+                        };
+
+                        // Update UI
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(window) = window_weak.upgrade() {
+                                let mut settings = window.global::<AppLogic>().get_settings();
+                                settings.keep_completed_transfers = new_value;
                                 window.global::<AppLogic>().set_settings(settings);
                             }
                         });
@@ -2779,26 +2847,20 @@ impl App {
         window.global::<AppLogic>().on_remove_peer({
             let window_weak = window_weak.clone();
             let peer_store = peer_store.clone();
-            let peers_model = self.peers_model.clone();
+            let peer_status = self.peer_status.clone();
+            let disconnected_peers = self.disconnected_peers.clone();
+            let shared_endpoint = self.shared_endpoint.clone();
 
             move |id| {
                 let id_str = id.to_string();
                 info!("Removing peer: {}", id_str);
                 let window_weak = window_weak.clone();
                 let peer_store = peer_store.clone();
+                let peer_status = peer_status.clone();
+                let disconnected_peers = disconnected_peers.clone();
+                let shared_endpoint = shared_endpoint.clone();
 
-                // Remove from UI model immediately
-                let count = peers_model.row_count();
-                for i in 0..count {
-                    if let Some(peer) = peers_model.row_data(i) {
-                        if peer.id.to_string() == id_str {
-                            peers_model.remove(i);
-                            break;
-                        }
-                    }
-                }
-
-                // Remove from persistent store in background
+                // Send TrustRevoke, remove from store, and update UI in background
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
@@ -2806,12 +2868,61 @@ impl App {
                         .unwrap();
 
                     rt.block_on(async {
-                        let mut store = peer_store.write().await;
-                        if let Err(e) = store.remove(&id_str) {
-                            error!("Failed to remove peer from store: {}", e);
-                            update_status(&window_weak, &format!("Error: {}", e));
-                            return;
+                        // Get the peer info before removing (for TrustRevoke)
+                        let peer = {
+                            let store = peer_store.read().await;
+                            store.find_by_id(&id_str).cloned()
+                        };
+
+                        // Send TrustRevoke to notify the peer (best effort)
+                        if let Some(peer) = &peer {
+                            let endpoint_guard = shared_endpoint.read().await;
+                            if let Some(endpoint) = endpoint_guard.as_ref() {
+                                match endpoint.connect(&peer.endpoint_id).await {
+                                    Ok(mut conn) => {
+                                        let revoke = ControlMessage::TrustRevoke {
+                                            reason: "Peer removed".to_string(),
+                                        };
+                                        if let Err(e) = conn.send(&revoke).await {
+                                            warn!("Failed to send TrustRevoke: {}", e);
+                                        } else {
+                                            info!("Sent TrustRevoke to {}", peer.name);
+                                        }
+                                        // Give time for message to be delivered
+                                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                        let _ = conn.close().await;
+                                    }
+                                    Err(e) => {
+                                        debug!("Could not connect to peer for TrustRevoke: {}", e);
+                                    }
+                                }
+                            }
                         }
+
+                        // Remove from persistent store
+                        {
+                            let mut store = peer_store.write().await;
+                            if let Err(e) = store.remove(&id_str) {
+                                error!("Failed to remove peer from store: {}", e);
+                                update_status(&window_weak, &format!("Error: {}", e));
+                                return;
+                            }
+                        }
+
+                        // Remove from status map
+                        {
+                            let mut status_map = peer_status.write().await;
+                            status_map.remove(&id_str);
+                        }
+
+                        // Remove from disconnected set
+                        {
+                            let mut disconnected = disconnected_peers.write().await;
+                            disconnected.remove(&id_str);
+                        }
+
+                        // Update UI by refreshing the peers list
+                        update_peers_ui_with_status(&window_weak, &peer_store, &peer_status).await;
                         update_status(&window_weak, "Peer removed");
                     });
                 });
@@ -2821,7 +2932,6 @@ impl App {
         // Disconnect peer callback - pauses connections to/from peer (does not remove)
         window.global::<AppLogic>().on_disconnect_peer({
             let window_weak = window_weak.clone();
-            let peers_model = self.peers_model.clone();
             let disconnected_peers = self.disconnected_peers.clone();
 
             move |id| {
@@ -2841,15 +2951,17 @@ impl App {
                     });
                 });
 
-                // Update UI model to show disconnected state
-                let count = peers_model.row_count();
-                for i in 0..count {
-                    if let Some(mut peer) = peers_model.row_data(i) {
-                        if peer.id.to_string() == id.to_string() {
-                            peer.connected = false;
-                            peer.status = "offline".into();
-                            peers_model.set_row_data(i, peer);
-                            break;
+                // Update UI model to show disconnected state (get fresh model from window)
+                if let Some(window) = window_weak.upgrade() {
+                    let model = window.global::<AppLogic>().get_peers();
+                    for i in 0..model.row_count() {
+                        if let Some(mut peer) = model.row_data(i) {
+                            if peer.id.to_string() == id.to_string() {
+                                peer.connected = false;
+                                peer.status = "offline".into();
+                                model.set_row_data(i, peer);
+                                break;
+                            }
                         }
                     }
                 }
@@ -2861,7 +2973,6 @@ impl App {
         // Connect peer callback - resumes connections to/from peer
         window.global::<AppLogic>().on_connect_peer({
             let window_weak = window_weak.clone();
-            let peers_model = self.peers_model.clone();
             let disconnected_peers = self.disconnected_peers.clone();
 
             move |id| {
@@ -2881,15 +2992,17 @@ impl App {
                     });
                 });
 
-                // Update UI model to show connecting state
-                let count = peers_model.row_count();
-                for i in 0..count {
-                    if let Some(mut peer) = peers_model.row_data(i) {
-                        if peer.id.to_string() == id.to_string() {
-                            peer.connected = true;
-                            peer.status = "connecting".into();
-                            peers_model.set_row_data(i, peer);
-                            break;
+                // Update UI model to show connecting state (get fresh model from window)
+                if let Some(window) = window_weak.upgrade() {
+                    let model = window.global::<AppLogic>().get_peers();
+                    for i in 0..model.row_count() {
+                        if let Some(mut peer) = model.row_data(i) {
+                            if peer.id.to_string() == id.to_string() {
+                                peer.connected = true;
+                                peer.status = "connecting".into();
+                                model.set_row_data(i, peer);
+                                break;
+                            }
                         }
                     }
                 }
@@ -3294,6 +3407,7 @@ impl App {
             let transfer_history = self.transfer_history.clone();
             let shared_endpoint = self.shared_endpoint.clone();
             let session_stats = self.session_stats.clone();
+            let config = config.clone();
 
             move |peer_id| {
                 let peer_id_str = peer_id.to_string();
@@ -3305,6 +3419,7 @@ impl App {
                 let transfer_history = transfer_history.clone();
                 let shared_endpoint = shared_endpoint.clone();
                 let session_stats = session_stats.clone();
+                let config = config.clone();
 
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
@@ -3379,10 +3494,12 @@ impl App {
                         let transfer_manager_progress = transfer_manager.clone();
                         let transfer_history_progress = transfer_history.clone();
                         let session_stats_progress = session_stats.clone();
+                        let config_progress = config.clone();
                         let window_weak_progress = window_weak.clone();
                         let transfer_id_progress = transfer_id.clone();
                         tokio::spawn(async move {
                             while let Some(event) = progress_rx.recv().await {
+                                let keep_completed = config_progress.read().await.keep_completed_transfers;
                                 match event {
                                     TransferEvent::Started { .. } => {
                                         let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
@@ -3421,7 +3538,7 @@ impl App {
                                         update_session_stats_ui(&window_weak_progress, &session_stats_progress);
                                         update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                         update_status(&window_weak_progress, "Push completed successfully");
-                                        save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
+                                        save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress, keep_completed).await;
                                         // Refresh UI to clear the completed transfer
                                         update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                     }
@@ -3433,7 +3550,7 @@ impl App {
                                         }).await;
                                         update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                         update_status(&window_weak_progress, &format!("Push failed: {}", error));
-                                        save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
+                                        save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress, keep_completed).await;
                                     }
                                     TransferEvent::Cancelled { .. } => {
                                         let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
@@ -3441,7 +3558,7 @@ impl App {
                                         }).await;
                                         update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                         update_status(&window_weak_progress, "Push cancelled");
-                                        save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
+                                        save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress, keep_completed).await;
                                     }
                                 }
                             }
@@ -4011,11 +4128,13 @@ impl App {
                         let transfer_manager_progress = transfer_manager.clone();
                         let transfer_history_progress = transfer_history.clone();
                         let session_stats_progress = session_stats.clone();
+                        let config_progress = config.clone();
                         let window_weak_progress = window_weak.clone();
                         let transfer_id_progress = transfer_id.clone();
                         let peer_name = peer.name.clone();
                         tokio::spawn(async move {
                             while let Some(event) = progress_rx.recv().await {
+                                let keep_completed = config_progress.read().await.keep_completed_transfers;
                                 match event {
                                     TransferEvent::Started { .. } => {
                                         let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
@@ -4054,7 +4173,7 @@ impl App {
                                         update_session_stats_ui(&window_weak_progress, &session_stats_progress);
                                         update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                         update_status(&window_weak_progress, &format!("Pull from {} completed", peer_name));
-                                        save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
+                                        save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress, keep_completed).await;
                                         // Refresh UI to clear the completed transfer
                                         update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                     }
@@ -4066,14 +4185,14 @@ impl App {
                                         }).await;
                                         update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
                                         update_status(&window_weak_progress, &format!("Pull failed: {}", error));
-                                        save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
+                                        save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress, keep_completed).await;
                                     }
                                     TransferEvent::Cancelled { .. } => {
                                         let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
                                             t.status = TransferStatus::Cancelled;
                                         }).await;
                                         update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
-                                        save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress).await;
+                                        save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress, keep_completed).await;
                                     }
                                 }
                             }
@@ -4318,31 +4437,6 @@ async fn ping_peer(endpoint: &IrohEndpoint, peer: &TrustedPeer) -> bool {
     }
 }
 
-/// Set peers and push-to-peer dropdown data on the window.
-fn set_peers_with_push_data(window: &MainWindow, items: Vec<PeerItem>) {
-    // Collect peers that allow push for the send panel dropdown
-    let mut pushable_names: Vec<SharedString> = Vec::new();
-    let mut pushable_ids: Vec<SharedString> = Vec::new();
-
-    for item in &items {
-        if item.can_push {
-            pushable_names.push(item.name.clone());
-            pushable_ids.push(item.id.clone());
-        }
-    }
-
-    // Update the peers list
-    window.global::<AppLogic>().set_peers(ModelRc::new(VecModel::from(items)));
-
-    // Update the push-to-peer dropdown data
-    window.global::<AppLogic>().set_peer_names_for_push(
-        ModelRc::new(VecModel::from(pushable_names))
-    );
-    window.global::<AppLogic>().set_pushable_peer_ids(
-        ModelRc::new(VecModel::from(pushable_ids))
-    );
-}
-
 /// Check for trust bundles in a directory and handle them.
 async fn check_and_handle_trust_bundle(
     download_dir: &PathBuf,
@@ -4552,6 +4646,7 @@ fn trusted_peer_to_item(p: &TrustedPeer) -> PeerItem {
         speed_test_latency: SharedString::from(""),
         // Connection control (starts connected, user can toggle)
         connected: true,
+        revoked: false,
     }
 }
 
@@ -4675,24 +4770,53 @@ async fn update_peers_ui_with_status(
             let logic = window.global::<AppLogic>();
             let current_model = logic.get_peers();
 
-            // Build a map of current expanded states by peer ID
-            let mut expanded_states: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+            // Build a map of current UI states by peer ID (expanded, connected, revoked)
+            #[derive(Default)]
+            struct PeerUiState {
+                expanded: bool,
+                connected: bool,
+                revoked: bool,
+            }
+            let mut ui_states: std::collections::HashMap<String, PeerUiState> = std::collections::HashMap::new();
             for i in 0..current_model.row_count() {
                 if let Some(peer) = current_model.row_data(i) {
-                    expanded_states.insert(peer.id.to_string(), peer.expanded);
+                    ui_states.insert(peer.id.to_string(), PeerUiState {
+                        expanded: peer.expanded,
+                        connected: peer.connected,
+                        revoked: peer.revoked,
+                    });
                 }
             }
 
-            // Apply preserved expanded states to new items
+            // Apply preserved UI states to new items
             let items_with_state: Vec<PeerItem> = new_items.into_iter().map(|mut item| {
-                if let Some(&expanded) = expanded_states.get(&item.id.to_string()) {
-                    item.expanded = expanded;
+                if let Some(state) = ui_states.get(&item.id.to_string()) {
+                    item.expanded = state.expanded;
+                    item.connected = state.connected;
+                    item.revoked = state.revoked;
+                    // If disconnected by user, show as offline regardless of actual status
+                    if !state.connected {
+                        item.status = SharedString::from("offline");
+                    }
                 }
                 item
             }).collect();
 
-            // Use the helper to set peers and push data
-            set_peers_with_push_data(&window, items_with_state);
+            // Update the peers model by replacing it
+            // Note: This creates a fresh model, but preserves all UI states from above
+            logic.set_peers(ModelRc::new(VecModel::from(items_with_state.clone())));
+
+            // Update push-to-peer dropdown data
+            let mut pushable_names: Vec<SharedString> = Vec::new();
+            let mut pushable_ids: Vec<SharedString> = Vec::new();
+            for item in &items_with_state {
+                if item.can_push && !item.revoked {
+                    pushable_names.push(item.name.clone());
+                    pushable_ids.push(item.id.clone());
+                }
+            }
+            logic.set_peer_names_for_push(ModelRc::new(VecModel::from(pushable_names)));
+            logic.set_pushable_peer_ids(ModelRc::new(VecModel::from(pushable_ids)));
 
             // Update peer counts in header
             logic.set_online_peer_count(online_count);
@@ -4797,10 +4921,13 @@ async fn wait_for_trust_handshake(
 }
 
 /// Save a completed transfer to history.
+/// If `keep_completed` is false, the transfer is removed from the manager after saving.
+/// If `keep_completed` is true, the transfer remains visible in the active transfer list.
 async fn save_to_history(
     transfer_history: &Arc<RwLock<TransferHistory>>,
     transfer_manager: &TransferManager,
     transfer_id: &TransferId,
+    keep_completed: bool,
 ) {
     if let Some(transfer) = transfer_manager.get(transfer_id).await {
         if transfer.status.is_terminal() {
@@ -4808,8 +4935,10 @@ async fn save_to_history(
             if let Err(e) = history.add_and_save(transfer) {
                 warn!("Failed to save transfer to history: {}", e);
             }
-            // Remove from active transfers after saving to history
-            let _ = transfer_manager.remove(transfer_id).await;
+            // Only remove from active transfers if keep_completed is false
+            if !keep_completed {
+                let _ = transfer_manager.remove(transfer_id).await;
+            }
         }
     }
 }
