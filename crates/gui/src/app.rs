@@ -178,6 +178,9 @@ impl App {
 
         // Start peer status checker (pings peers periodically)
         self.start_peer_status_checker();
+
+        // Start guest peer cleanup task (removes expired guests)
+        self.start_guest_cleanup_task();
     }
 
     /// Refresh the peers model with the given items (replaces the model).
@@ -267,7 +270,7 @@ impl App {
                         let endpoint = endpoint.clone();
                         let peer_status = peer_status.clone();
                         let peer_id = peer.id.clone();
-                        let has_relay = peer.relay_url.is_some();
+                        let has_relay = peer.relay_url().is_some();
 
                         ping_tasks.push(tokio::spawn(async move {
                             let start = std::time::Instant::now();
@@ -342,6 +345,84 @@ impl App {
 
                     // Wait 30 seconds before next ping cycle
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
+            });
+        });
+    }
+
+    /// Start a background task that periodically cleans up expired guest peers.
+    fn start_guest_cleanup_task(&self) {
+        let peer_store = self.peer_store.clone();
+        let window_weak = self.window.clone();
+        let shutdown = self.listener_shutdown.clone();
+        let peer_status = self.peer_status.clone();
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            rt.block_on(async {
+                // Check every 5 minutes for expired guests
+                loop {
+                    if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+
+                    // Wait 5 minutes between cleanup checks
+                    tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+
+                    if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+
+                    // Get list of expired peers before cleanup (for UI update)
+                    let expired_ids: Vec<String> = {
+                        let store = peer_store.read().await;
+                        store.list_expired().iter().map(|p| p.id.clone()).collect()
+                    };
+
+                    if expired_ids.is_empty() {
+                        continue;
+                    }
+
+                    // Cleanup expired guests
+                    let removed = {
+                        let mut store = peer_store.write().await;
+                        match store.cleanup_expired() {
+                            Ok(count) => count,
+                            Err(e) => {
+                                warn!("Failed to cleanup expired guests: {}", e);
+                                0
+                            }
+                        }
+                    };
+
+                    if removed > 0 {
+                        info!("Cleaned up {} expired guest peer(s)", removed);
+
+                        // Remove status entries for expired peers
+                        {
+                            let mut status_map = peer_status.write().await;
+                            for id in &expired_ids {
+                                status_map.remove(id);
+                            }
+                        }
+
+                        // Refresh the peers list in the UI
+                        let store = peer_store.read().await;
+                        let peer_items: Vec<PeerItem> = store.list().iter().map(trusted_peer_to_item).collect();
+                        drop(store);
+
+                        let window_weak_ui = window_weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(window) = window_weak_ui.upgrade() {
+                                let logic = window.global::<AppLogic>();
+                                logic.set_peers(ModelRc::new(VecModel::from(peer_items)));
+                            }
+                        });
+                    }
                 }
             });
         });
@@ -1035,6 +1116,191 @@ impl App {
                                     logic.set_app_status(SharedString::from(format!("{} removed you as a peer", peer_name)));
                                 }
                             });
+                            let _ = conn.close().await;
+                        }
+                        ControlMessage::ExtensionRequest { requested_hours, reason } => {
+                            info!("Received extension request from {}: {} hours, reason: {:?}", peer.name, requested_hours, reason);
+
+                            // Check if this peer is a guest and if we allow extensions
+                            let config_guard = config.read().await;
+                            let guest_policy = config_guard.guest_policy.clone();
+                            drop(config_guard);
+
+                            let peer_id = peer.id.clone();
+                            let peer_name = peer.name.clone();
+                            let endpoint_id = peer.endpoint_id.clone();
+
+                            // Calculate if extension is allowed
+                            let can_extend = peer.is_guest
+                                && guest_policy.allow_extensions
+                                && peer.extension_count < guest_policy.max_extensions;
+
+                            let requested_duration = chrono::Duration::hours(requested_hours as i64);
+                            let max_duration = chrono::Duration::hours(guest_policy.max_duration_hours as i64);
+                            let actual_duration = if requested_duration > max_duration {
+                                max_duration
+                            } else {
+                                requested_duration
+                            };
+
+                            if can_extend {
+                                // Apply the extension
+                                let mut store_guard = peer_store.write().await;
+                                match store_guard.extend_guest(&peer_id, actual_duration) {
+                                    Ok(Some(new_expiry)) => {
+                                        drop(store_guard);
+                                        info!("Extended guest {} until {}", peer_name, new_expiry);
+
+                                        // Send approval response
+                                        let response = ControlMessage::ExtensionResponse {
+                                            approved: true,
+                                            new_expires_at: Some(new_expiry.timestamp()),
+                                            reason: None,
+                                        };
+                                        let _ = conn.send(&response).await;
+
+                                        // Update UI
+                                        let new_expiry_str = new_expiry.format("%Y-%m-%d %H:%M").to_string();
+                                        let time_remaining = {
+                                            let now = chrono::Utc::now();
+                                            if new_expiry > now {
+                                                let duration = new_expiry - now;
+                                                let total_secs = duration.num_seconds();
+                                                if total_secs < 3600 {
+                                                    format!("{}m", total_secs / 60)
+                                                } else if total_secs < 86400 {
+                                                    format!("{}h {}m", total_secs / 3600, (total_secs % 3600) / 60)
+                                                } else {
+                                                    format!("{}d {}h", total_secs / 86400, (total_secs % 86400) / 3600)
+                                                }
+                                            } else {
+                                                "Expired".to_string()
+                                            }
+                                        };
+                                        let _ = slint::invoke_from_event_loop({
+                                            let window_weak = window_weak.clone();
+                                            move || {
+                                                if let Some(window) = window_weak.upgrade() {
+                                                    let model = window.global::<AppLogic>().get_peers();
+                                                    for i in 0..model.row_count() {
+                                                        if let Some(mut item) = model.row_data(i) {
+                                                            if item.id.as_str() == peer_id {
+                                                                item.expires_at = SharedString::from(&new_expiry_str);
+                                                                item.time_remaining = SharedString::from(&time_remaining);
+                                                                item.extension_count += 1;
+                                                                model.set_row_data(i, item);
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+                                                    window.global::<AppLogic>().set_app_status(
+                                                        SharedString::from(format!("Extended {} access", peer_name))
+                                                    );
+                                                }
+                                            }
+                                        });
+                                    }
+                                    Ok(None) => {
+                                        // Not a guest peer
+                                        let response = ControlMessage::ExtensionResponse {
+                                            approved: false,
+                                            new_expires_at: None,
+                                            reason: Some("Not a guest peer".to_string()),
+                                        };
+                                        let _ = conn.send(&response).await;
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to extend guest {}: {}", endpoint_id, e);
+                                        let response = ControlMessage::ExtensionResponse {
+                                            approved: false,
+                                            new_expires_at: None,
+                                            reason: Some(format!("Internal error: {}", e)),
+                                        };
+                                        let _ = conn.send(&response).await;
+                                    }
+                                }
+                            } else {
+                                // Extension not allowed
+                                let reason_msg = if !peer.is_guest {
+                                    "Not a guest peer".to_string()
+                                } else if peer.extension_count >= guest_policy.max_extensions {
+                                    "Maximum extensions reached".to_string()
+                                } else {
+                                    "Extensions not allowed".to_string()
+                                };
+
+                                let response = ControlMessage::ExtensionResponse {
+                                    approved: false,
+                                    new_expires_at: None,
+                                    reason: Some(reason_msg),
+                                };
+                                let _ = conn.send(&response).await;
+                            }
+
+                            let _ = conn.close().await;
+                        }
+                        ControlMessage::PromotionRequest { reason } => {
+                            info!("Received promotion request from {}: {:?}", peer.name, reason);
+
+                            // Check if this peer is a guest and if we allow promotion requests
+                            let config_guard = config.read().await;
+                            let allow_requests = config_guard.guest_policy.allow_promotion_requests;
+                            drop(config_guard);
+
+                            let peer_id = peer.id.clone();
+                            let peer_name = peer.name.clone();
+
+                            if peer.is_guest && allow_requests {
+                                // Mark promotion as pending - owner will need to approve manually
+                                let mut store_guard = peer_store.write().await;
+                                if let Err(e) = store_guard.set_promotion_pending(&peer_id, true) {
+                                    error!("Failed to set promotion pending for {}: {}", peer_name, e);
+                                }
+                                drop(store_guard);
+
+                                info!("Marked {} as pending promotion", peer_name);
+
+                                // Update UI to show promotion pending badge
+                                let _ = slint::invoke_from_event_loop({
+                                    let window_weak = window_weak.clone();
+                                    let peer_id = peer_id.clone();
+                                    let peer_name = peer_name.clone();
+                                    move || {
+                                        if let Some(window) = window_weak.upgrade() {
+                                            let model = window.global::<AppLogic>().get_peers();
+                                            for i in 0..model.row_count() {
+                                                if let Some(mut item) = model.row_data(i) {
+                                                    if item.id.as_str() == peer_id {
+                                                        item.promotion_pending = true;
+                                                        model.set_row_data(i, item);
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            window.global::<AppLogic>().set_app_status(
+                                                SharedString::from(format!("{} requested trusted status", peer_name))
+                                            );
+                                        }
+                                    }
+                                });
+
+                                // Response will be sent later when owner approves/denies
+                                // For now, just acknowledge receipt (no response needed per protocol)
+                            } else {
+                                // Send rejection immediately
+                                let reason_msg = if !peer.is_guest {
+                                    "Already a trusted peer".to_string()
+                                } else {
+                                    "Promotion requests not allowed".to_string()
+                                };
+
+                                let response = ControlMessage::PromotionResponse {
+                                    approved: false,
+                                    reason: Some(reason_msg),
+                                };
+                                let _ = conn.send(&response).await;
+                            }
+
                             let _ = conn.close().await;
                         }
                         other => {
@@ -3086,7 +3352,7 @@ impl App {
                                     status.avg_latency_ms = Some(sum / status.latency_history.len() as u32);
                                 }
 
-                                status.connection_type = if peer.relay_url.is_some() {
+                                status.connection_type = if peer.relay_url().is_some() {
                                     "relay".to_string()
                                 } else {
                                     "direct".to_string()
@@ -3271,6 +3537,174 @@ impl App {
 
                         if let Some(msg) = status_msg {
                             update_status(&window_weak, &msg);
+                        }
+                    });
+                });
+            }
+        });
+
+        // Extend guest access callback
+        window.global::<AppLogic>().on_extend_guest({
+            let window_weak = window_weak.clone();
+            let peer_store = peer_store.clone();
+            let config = config.clone();
+
+            move |id| {
+                let id_str = id.to_string();
+                info!("Extending guest access for peer: {}", id_str);
+                let window_weak = window_weak.clone();
+                let peer_store = peer_store.clone();
+                let config = config.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Get the extension duration from config
+                        let config_guard = config.read().await;
+                        let extension_hours = config_guard.guest_policy.default_duration_hours;
+                        drop(config_guard);
+
+                        let extension_duration = chrono::Duration::hours(extension_hours as i64);
+
+                        // Extend the guest
+                        let mut store = peer_store.write().await;
+                        match store.extend_guest(&id_str, extension_duration) {
+                            Ok(Some(new_expiry)) => {
+                                info!("Extended guest {} until {}", id_str, new_expiry);
+
+                                // Update UI
+                                let new_expiry_str = new_expiry.format("%Y-%m-%d %H:%M").to_string();
+                                let time_remaining = {
+                                    let now = chrono::Utc::now();
+                                    if new_expiry > now {
+                                        let duration = new_expiry - now;
+                                        let total_secs = duration.num_seconds();
+                                        if total_secs < 3600 {
+                                            format!("{}m", total_secs / 60)
+                                        } else if total_secs < 86400 {
+                                            format!("{}h {}m", total_secs / 3600, (total_secs % 3600) / 60)
+                                        } else {
+                                            format!("{}d {}h", total_secs / 86400, (total_secs % 86400) / 3600)
+                                        }
+                                    } else {
+                                        "Expired".to_string()
+                                    }
+                                };
+
+                                // Get the new extension count
+                                let new_ext_count = store.find_by_id(&id_str)
+                                    .map(|p| p.extension_count as i32)
+                                    .unwrap_or(0);
+                                drop(store);
+
+                                let _ = slint::invoke_from_event_loop({
+                                    let window_weak = window_weak.clone();
+                                    let id_str = id_str.clone();
+                                    move || {
+                                        if let Some(window) = window_weak.upgrade() {
+                                            let model = window.global::<AppLogic>().get_peers();
+                                            for i in 0..model.row_count() {
+                                                if let Some(mut item) = model.row_data(i) {
+                                                    if item.id.as_str() == id_str {
+                                                        item.expires_at = SharedString::from(&new_expiry_str);
+                                                        item.time_remaining = SharedString::from(&time_remaining);
+                                                        item.extension_count = new_ext_count;
+                                                        model.set_row_data(i, item);
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            window.global::<AppLogic>().set_app_status(
+                                                SharedString::from("Guest access extended")
+                                            );
+                                        }
+                                    }
+                                });
+                            }
+                            Ok(None) => {
+                                warn!("Tried to extend non-guest peer: {}", id_str);
+                                update_status(&window_weak, "Cannot extend: not a guest peer");
+                            }
+                            Err(e) => {
+                                error!("Failed to extend guest {}: {}", id_str, e);
+                                update_status(&window_weak, &format!("Error extending guest: {}", e));
+                            }
+                        }
+                    });
+                });
+            }
+        });
+
+        // Promote guest to trusted callback
+        window.global::<AppLogic>().on_promote_guest({
+            let window_weak = window_weak.clone();
+            let peer_store = peer_store.clone();
+
+            move |id| {
+                let id_str = id.to_string();
+                info!("Promoting guest to trusted peer: {}", id_str);
+                let window_weak = window_weak.clone();
+                let peer_store = peer_store.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Promote the guest
+                        let mut store = peer_store.write().await;
+                        match store.promote_guest(&id_str) {
+                            Ok(true) => {
+                                info!("Promoted guest {} to trusted peer", id_str);
+
+                                // Get peer name for status message
+                                let peer_name = store.find_by_id(&id_str)
+                                    .map(|p| p.name.clone())
+                                    .unwrap_or_else(|| "Peer".to_string());
+                                drop(store);
+
+                                // Update UI - clear guest fields
+                                let _ = slint::invoke_from_event_loop({
+                                    let window_weak = window_weak.clone();
+                                    let id_str = id_str.clone();
+                                    let peer_name = peer_name.clone();
+                                    move || {
+                                        if let Some(window) = window_weak.upgrade() {
+                                            let model = window.global::<AppLogic>().get_peers();
+                                            for i in 0..model.row_count() {
+                                                if let Some(mut item) = model.row_data(i) {
+                                                    if item.id.as_str() == id_str {
+                                                        item.is_guest = false;
+                                                        item.expires_at = SharedString::new();
+                                                        item.time_remaining = SharedString::new();
+                                                        item.extension_count = 0;
+                                                        item.promotion_pending = false;
+                                                        model.set_row_data(i, item);
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            window.global::<AppLogic>().set_app_status(
+                                                SharedString::from(format!("{} is now a trusted peer", peer_name))
+                                            );
+                                        }
+                                    }
+                                });
+                            }
+                            Ok(false) => {
+                                warn!("Tried to promote non-guest peer: {}", id_str);
+                                update_status(&window_weak, "Cannot promote: not a guest peer");
+                            }
+                            Err(e) => {
+                                error!("Failed to promote guest {}: {}", id_str, e);
+                                update_status(&window_weak, &format!("Error promoting guest: {}", e));
+                            }
                         }
                     });
                 });
@@ -4393,8 +4827,8 @@ async fn ping_peer(endpoint: &IrohEndpoint, peer: &TrustedPeer) -> bool {
 
     // Add peer's address info before connecting (if relay URL is known)
     let mut node_addr = NodeAddr::new(node_id);
-    if let Some(relay_url) = &peer.relay_url {
-        if let Ok(url) = relay_url.parse() {
+    if let Some(relay_url) = peer.relay_url() {
+        if let Ok(url) = relay_url.parse::<croh_core::iroh::RelayUrl>() {
             node_addr = node_addr.with_relay_url(url);
         }
     }
@@ -4609,7 +5043,7 @@ fn trusted_peer_to_item(p: &TrustedPeer) -> PeerItem {
         endpoint_id: SharedString::from(endpoint_display),
         status: SharedString::from("offline"),
         last_seen: SharedString::from(last_seen),
-        relay_url: SharedString::from(p.relay_url.clone().unwrap_or_default()),
+        relay_url: SharedString::from(p.relay_url().unwrap_or_default().to_string()),
         added_at: SharedString::from(added_at),
         expanded: false,
         // What they allow us to do
@@ -4647,6 +5081,41 @@ fn trusted_peer_to_item(p: &TrustedPeer) -> PeerItem {
         // Connection control (starts connected, user can toggle)
         connected: true,
         revoked: false,
+        // Guest peer fields
+        is_guest: p.is_guest,
+        expires_at: SharedString::from(
+            p.expires_at
+                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_default()
+        ),
+        time_remaining: SharedString::from(format_time_remaining(p)),
+        extension_count: p.extension_count as i32,
+        promotion_pending: p.promotion_pending,
+    }
+}
+
+/// Format the time remaining for a guest peer.
+fn format_time_remaining(p: &TrustedPeer) -> String {
+    match p.time_remaining() {
+        Some(duration) => {
+            let total_secs = duration.num_seconds();
+            if total_secs <= 0 {
+                "Expired".to_string()
+            } else if total_secs < 60 {
+                format!("{}s", total_secs)
+            } else if total_secs < 3600 {
+                format!("{}m", total_secs / 60)
+            } else if total_secs < 86400 {
+                let hours = total_secs / 3600;
+                let mins = (total_secs % 3600) / 60;
+                format!("{}h {}m", hours, mins)
+            } else {
+                let days = total_secs / 86400;
+                let hours = (total_secs % 86400) / 3600;
+                format!("{}d {}h", days, hours)
+            }
+        }
+        None => String::new(),
     }
 }
 

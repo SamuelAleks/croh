@@ -21,7 +21,7 @@ pub mod transfer_history;
 pub mod trust;
 
 // Re-export commonly used types
-pub use config::{BrowseSettings, Config, DndMode, WindowSize};
+pub use config::{BrowseSettings, Config, DndMode, GuestPolicy, SecurityPosture, WindowSize};
 pub use croc::{CrocOptions, CrocProcess, CrocProcessHandle, find_croc_executable, refresh_croc_cache};
 pub use error::{Error, Result};
 pub use files::{format_size, format_duration, format_uptime, format_eta, get_disk_space};
@@ -31,7 +31,7 @@ pub use iroh::{
     push_files, pull_files, handle_incoming_push, handle_incoming_pull, handle_browse_request, browse_remote, TransferEvent,
     browse_directory, default_browsable_paths, get_browsable_roots,
     run_speed_test, handle_speed_test_request, SpeedTestResult, DEFAULT_TEST_SIZE,
-    NodeAddr, NodeId,
+    NodeAddr, NodeId, PeerAddress, RelayUrl,
 };
 pub use peers::{PeerStore, Permissions, TrustedPeer};
 pub use transfer::{Transfer, TransferId, TransferManager, TransferStatus, TransferType};

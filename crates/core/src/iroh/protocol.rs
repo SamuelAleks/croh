@@ -278,6 +278,48 @@ pub enum ControlMessage {
         /// Duration in milliseconds
         duration_ms: u64,
     },
+
+    // ==================== Guest Peer Messages ====================
+
+    /// Guest requests time extension.
+    ExtensionRequest {
+        /// Requested additional hours
+        requested_hours: u32,
+        /// Optional reason for the request
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+
+    /// Response to extension request.
+    ExtensionResponse {
+        /// Whether the extension was approved
+        approved: bool,
+        /// New expiry time if approved (Unix timestamp)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        new_expires_at: Option<i64>,
+        /// Reason if denied
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+
+    /// Guest requests promotion to trusted peer.
+    PromotionRequest {
+        /// Optional reason for the request
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+
+    /// Response to promotion request.
+    PromotionResponse {
+        /// Whether the promotion was approved
+        approved: bool,
+        /// Reason if denied
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        // Note: If approved, the owner will initiate a new trust handshake
+        // with a fresh TrustBundle for security. The guest must complete
+        // this handshake to finalize the promotion.
+    },
 }
 
 impl ControlMessage {
@@ -340,6 +382,95 @@ mod tests {
             ControlMessage::TrustConfirm { peer, nonce, .. } => {
                 assert_eq!(peer.endpoint_id, "abc123");
                 assert_eq!(nonce, "nonce123");
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_extension_request_serialization() {
+        let msg = ControlMessage::ExtensionRequest {
+            requested_hours: 24,
+            reason: Some("Need more time".to_string()),
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"extension_request\""));
+        assert!(json.contains("\"requested_hours\":24"));
+
+        let parsed: ControlMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ControlMessage::ExtensionRequest {
+                requested_hours,
+                reason,
+            } => {
+                assert_eq!(requested_hours, 24);
+                assert_eq!(reason, Some("Need more time".to_string()));
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_extension_response_serialization() {
+        let msg = ControlMessage::ExtensionResponse {
+            approved: true,
+            new_expires_at: Some(1704067200), // Example Unix timestamp
+            reason: None,
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"extension_response\""));
+        assert!(json.contains("\"approved\":true"));
+
+        let parsed: ControlMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ControlMessage::ExtensionResponse {
+                approved,
+                new_expires_at,
+                ..
+            } => {
+                assert!(approved);
+                assert_eq!(new_expires_at, Some(1704067200));
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_promotion_request_serialization() {
+        let msg = ControlMessage::PromotionRequest {
+            reason: Some("Would like permanent access".to_string()),
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"promotion_request\""));
+
+        let parsed: ControlMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ControlMessage::PromotionRequest { reason } => {
+                assert_eq!(reason, Some("Would like permanent access".to_string()));
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_promotion_response_serialization() {
+        let msg = ControlMessage::PromotionResponse {
+            approved: false,
+            reason: Some("Not approved at this time".to_string()),
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"promotion_response\""));
+        assert!(json.contains("\"approved\":false"));
+
+        let parsed: ControlMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ControlMessage::PromotionResponse { approved, reason } => {
+                assert!(!approved);
+                assert_eq!(reason, Some("Not approved at this time".to_string()));
             }
             _ => panic!("wrong message type"),
         }

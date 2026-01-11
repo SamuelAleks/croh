@@ -340,6 +340,12 @@ export struct PeerItem {
     // Connection control
     connected: bool,              // false = user disconnected, skip pings and block connections
     revoked: bool,                // true = remote peer revoked our trust (grayed out, only remove works)
+    // Guest peer fields
+    is-guest: bool,               // true = temporary guest peer
+    expires-at: string,           // formatted expiry time (empty if not a guest)
+    time-remaining: string,       // formatted countdown "2h 30m" or "Expired"
+    extension-count: int,         // how many times guest was extended
+    promotion-pending: bool,      // guest has requested promotion
 }
 
 export struct BrowseEntry {
@@ -403,6 +409,10 @@ export global AppLogic {
     callback refresh-peer-status(string);  // peer id
     // Run speed test with peer
     callback run-speed-test(string);  // peer id
+
+    // Guest peer management callbacks
+    callback extend-guest(string);     // peer id - extend guest's access time
+    callback promote-guest(string);    // peer id - promote guest to trusted peer
 
     // File browser callbacks (for remote peer browsing)
     callback browse-peer(string);              // peer id - start browsing
@@ -1556,6 +1566,50 @@ component PeerCard inherits Rectangle {
                         }
                     }
 
+                    // Guest badge with time remaining
+                    if !peer.revoked && peer.is-guest: Rectangle {
+                        width: peer.time-remaining != "" ? 80px : 50px;
+                        height: 16px;
+                        border-radius: 3px;
+                        background: #a855f720;
+
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            spacing: 4px;
+
+                            Text {
+                                text: "Guest";
+                                font-size: 10px;
+                                color: #a855f7;
+                                vertical-alignment: center;
+                            }
+
+                            if peer.time-remaining != "": Text {
+                                text: peer.time-remaining;
+                                font-size: 10px;
+                                color: peer.time-remaining == "Expired" ? Theme.error : #a855f7;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // Promotion pending badge
+                    if !peer.revoked && peer.is-guest && peer.promotion-pending: Rectangle {
+                        width: 70px;
+                        height: 16px;
+                        border-radius: 3px;
+                        background: #eab30820;
+
+                        Text {
+                            text: "Upgrade?";
+                            font-size: 10px;
+                            color: Theme.warning;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
                     // Inline latency badge when online (not shown when revoked)
                     if !peer.revoked && peer.status == "online" && peer.latency-ms > 0: Rectangle {
                         width: 45px;
@@ -1770,6 +1824,59 @@ component PeerCard inherits Rectangle {
                         percent: peer.peer-storage-percent;
                         free-text: peer.peer-free-space;
                         total-text: peer.peer-total-space;
+                    }
+                }
+
+                // Guest info row (only for guest peers)
+                if peer.is-guest: HorizontalLayout {
+                    spacing: Theme.spacing-md;
+                    height: 28px;
+                    padding-top: 4px;
+                    padding-bottom: 4px;
+
+                    Rectangle {
+                        width: 16px;
+                        height: 16px;
+                        border-radius: 3px;
+                        background: #a855f720;
+                        y: (parent.height - self.height) / 2;
+
+                        Text {
+                            text: "⏱";
+                            font-size: 10px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 2px;
+
+                        Text {
+                            text: peer.time-remaining == "Expired" ?
+                                  "Guest access has expired" :
+                                  "Guest access expires: " + peer.expires-at;
+                            font-size: 10px;
+                            color: peer.time-remaining == "Expired" ? Theme.error : #a855f7;
+                        }
+
+                        if peer.extension-count > 0: Text {
+                            text: "Extended " + peer.extension-count + " time" + (peer.extension-count > 1 ? "s" : "");
+                            font-size: 9px;
+                            color: Theme.text-dim;
+                        }
+                    }
+
+                    Rectangle { horizontal-stretch: 1; }
+
+                    if peer.time-remaining != "Expired": CompactButton {
+                        label: "Extend";
+                        clicked => { AppLogic.extend-guest(peer.id); }
+                    }
+
+                    CompactButton {
+                        label: "Make Trusted";
+                        clicked => { AppLogic.promote-guest(peer.id); }
                     }
                 }
 

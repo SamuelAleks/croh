@@ -140,8 +140,8 @@ pub async fn push_files(
     // Add peer's address information so we can connect
     // This includes the relay URL for NAT traversal
     let mut node_addr = iroh::NodeAddr::new(node_id);
-    if let Some(ref relay_url) = peer.relay_url {
-        if let Ok(url) = relay_url.parse() {
+    if let Some(relay_url) = peer.relay_url() {
+        if let Ok(url) = relay_url.parse::<iroh::RelayUrl>() {
             node_addr = node_addr.with_relay_url(url);
             info!("Using relay URL for push: {}", relay_url);
         }
@@ -348,8 +348,8 @@ pub async fn pull_files(
     // Add peer's address information so we can connect
     // This includes the relay URL for NAT traversal
     let mut node_addr = iroh::NodeAddr::new(node_id);
-    if let Some(ref relay_url) = peer.relay_url {
-        if let Ok(url) = relay_url.parse() {
+    if let Some(relay_url) = peer.relay_url() {
+        if let Ok(url) = relay_url.parse::<iroh::RelayUrl>() {
             node_addr = node_addr.with_relay_url(url);
             info!("Using relay URL for pull: {}", relay_url);
         }
@@ -1000,8 +1000,8 @@ pub async fn browse_remote(
 
     // Add peer's address information
     let mut node_addr = iroh::NodeAddr::new(node_id);
-    if let Some(ref relay_url) = peer.relay_url {
-        if let Ok(url) = relay_url.parse() {
+    if let Some(relay_url) = peer.relay_url() {
+        if let Ok(url) = relay_url.parse::<iroh::RelayUrl>() {
             node_addr = node_addr.with_relay_url(url);
         }
     }

@@ -147,6 +147,116 @@ impl DndMode {
     }
 }
 
+/// Security posture for the application.
+///
+/// This controls default settings for guest peers, auto-accept behavior,
+/// and other security-related options.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SecurityPosture {
+    /// Maximum convenience, minimal friction.
+    /// Best for trusted home networks.
+    Relaxed,
+    /// Good balance for most users (default).
+    #[default]
+    Balanced,
+    /// Tighter security for sensitive situations.
+    /// Shorter guest durations, requires approval for pushes.
+    Cautious,
+}
+
+impl SecurityPosture {
+    /// Convert to UI string.
+    pub fn to_ui_string(&self) -> &'static str {
+        match self {
+            SecurityPosture::Relaxed => "relaxed",
+            SecurityPosture::Balanced => "balanced",
+            SecurityPosture::Cautious => "cautious",
+        }
+    }
+
+    /// Parse from UI string.
+    pub fn from_ui_string(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "relaxed" => SecurityPosture::Relaxed,
+            "cautious" => SecurityPosture::Cautious,
+            _ => SecurityPosture::Balanced,
+        }
+    }
+
+    /// Get the default guest policy for this posture.
+    pub fn default_guest_policy(&self) -> GuestPolicy {
+        match self {
+            SecurityPosture::Relaxed => GuestPolicy {
+                default_duration_hours: 168,  // 1 week
+                max_duration_hours: 336,      // 2 weeks
+                allow_extensions: true,
+                max_extensions: u32::MAX,     // Unlimited
+                allow_promotion_requests: true,
+                auto_accept_guest_pushes: true,
+            },
+            SecurityPosture::Balanced => GuestPolicy {
+                default_duration_hours: 72,   // 3 days
+                max_duration_hours: 168,      // 1 week
+                allow_extensions: true,
+                max_extensions: 3,
+                allow_promotion_requests: true,
+                auto_accept_guest_pushes: true,
+            },
+            SecurityPosture::Cautious => GuestPolicy {
+                default_duration_hours: 24,   // 1 day
+                max_duration_hours: 48,       // 2 days
+                allow_extensions: true,
+                max_extensions: 1,
+                allow_promotion_requests: false,
+                auto_accept_guest_pushes: false,
+            },
+        }
+    }
+}
+
+/// Guest peer policy settings.
+///
+/// These settings control how temporary guest peers are handled.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GuestPolicy {
+    /// Default duration for guest access (hours).
+    pub default_duration_hours: u32,
+
+    /// Maximum duration for a single guest session (hours).
+    pub max_duration_hours: u32,
+
+    /// Whether guests can request extensions.
+    pub allow_extensions: bool,
+
+    /// Maximum number of extensions allowed (u32::MAX = unlimited).
+    pub max_extensions: u32,
+
+    /// Whether guests can request promotion to trusted.
+    pub allow_promotion_requests: bool,
+
+    /// Auto-accept pushes from guests (vs require approval).
+    pub auto_accept_guest_pushes: bool,
+}
+
+impl Default for GuestPolicy {
+    fn default() -> Self {
+        SecurityPosture::Balanced.default_guest_policy()
+    }
+}
+
+impl GuestPolicy {
+    /// Get the default duration as a chrono Duration.
+    pub fn default_duration(&self) -> chrono::Duration {
+        chrono::Duration::hours(self.default_duration_hours as i64)
+    }
+
+    /// Check if an extension is allowed given the current extension count.
+    pub fn can_extend(&self, current_count: u32) -> bool {
+        self.allow_extensions && current_count < self.max_extensions
+    }
+}
+
 /// Main configuration struct.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -201,6 +311,14 @@ pub struct Config {
     /// Keep completed transfers in the list (false = auto-clear after completion).
     #[serde(default = "default_keep_completed_transfers")]
     pub keep_completed_transfers: bool,
+
+    /// Security posture (Easy-Secure toggle).
+    #[serde(default)]
+    pub security_posture: SecurityPosture,
+
+    /// Guest peer policy (derived from security_posture by default).
+    #[serde(default)]
+    pub guest_policy: GuestPolicy,
 }
 
 fn default_keep_completed_transfers() -> bool {
@@ -224,6 +342,8 @@ impl Default for Config {
             dnd_message: None,
             show_session_stats: false,
             keep_completed_transfers: true,
+            security_posture: SecurityPosture::default(),
+            guest_policy: GuestPolicy::default(),
         }
     }
 }

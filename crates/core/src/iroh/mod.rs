@@ -7,6 +7,7 @@
 //! - Handshake protocol implementation
 //! - Blob-based file transfer
 //! - File browsing for remote peers
+//! - Address abstraction for multi-transport support
 //!
 //! # Testing
 //!
@@ -14,6 +15,7 @@
 //! utilities for testing peer-to-peer functionality without external relay servers.
 //! See the module documentation for usage examples.
 
+pub mod address;
 pub mod blobs;
 pub mod browse;
 pub mod endpoint;
@@ -26,6 +28,7 @@ pub mod transfer;
 #[cfg(test)]
 pub mod test_support;
 
+pub use address::PeerAddress;
 pub use blobs::{hash_file, verify_file_hash, BlobStore};
 pub use browse::{browse_directory, default_browsable_paths, get_browsable_roots, resolve_browse_path, validate_path};
 pub use endpoint::{ControlConnection, IrohEndpoint};
@@ -36,4 +39,4 @@ pub use speedtest::{handle_speed_test_request, run_speed_test, SpeedTestResult, 
 pub use transfer::{browse_remote, handle_browse_request, handle_incoming_pull, handle_incoming_push, pull_files, push_files, TransferEvent};
 
 // Re-export iroh types used by the GUI
-pub use iroh::{NodeAddr, NodeId};
+pub use iroh::{NodeAddr, NodeId, RelayUrl};
