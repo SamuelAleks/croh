@@ -1576,6 +1576,10 @@ impl App {
                 // Security settings
                 let security_posture = config_guard.security_posture.to_ui_string().to_string();
 
+                // Device identity
+                let device_nickname = config_guard.device_nickname.clone().unwrap_or_default();
+                let device_hostname = Config::get_hostname();
+
                 drop(config_guard);
 
                 // Update UI on main thread
@@ -1587,6 +1591,8 @@ impl App {
                             theme: SharedString::from(theme),
                             croc_path: SharedString::from(croc_path),
                             croc_found,
+                            device_nickname: SharedString::from(device_nickname),
+                            device_hostname: SharedString::from(device_hostname),
                             hash_algorithm: SharedString::from(hash_algorithm),
                             curve: SharedString::from(curve),
                             throttle: SharedString::from(throttle),
@@ -1622,6 +1628,7 @@ impl App {
         // Load identity in background thread
         let identity_arc = self.identity.clone();
         let window_weak = self.window.clone();
+        let config = self.config.clone();
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -1632,7 +1639,7 @@ impl App {
             rt.block_on(async {
                 // Load or create identity
                 match Identity::load_or_create() {
-                    Ok(id) => {
+                    Ok(mut id) => {
                         let endpoint_id = id.endpoint_id.clone();
                         // Truncate for display
                         let display_id = if endpoint_id.len() > 12 {
@@ -1640,6 +1647,19 @@ impl App {
                         } else {
                             endpoint_id
                         };
+
+                        // Sync identity name with configured nickname if set
+                        let config_guard = config.read().await;
+                        let display_name = config_guard.get_device_display_name();
+                        drop(config_guard);
+
+                        if id.name != display_name {
+                            if let Err(e) = id.set_name(display_name.clone()) {
+                                error!("Failed to sync identity name with config: {}", e);
+                            } else {
+                                info!("Synced identity name to: {}", display_name);
+                            }
+                        }
 
                         *identity_arc.write().await = Some(id);
                         info!("Identity loaded");
@@ -2710,6 +2730,8 @@ impl App {
                         let show_session_stats = config_guard.show_session_stats;
                         let keep_completed_transfers = config_guard.keep_completed_transfers;
                         let security_posture = config_guard.security_posture.to_ui_string().to_string();
+                        let device_nickname = config_guard.device_nickname.clone().unwrap_or_default();
+                        let device_hostname = Config::get_hostname();
                         let (croc_path, croc_found) = match find_croc_executable() {
                             Ok(path) => (path.to_string_lossy().to_string(), true),
                             Err(_) => ("Not found".to_string(), false),
@@ -2724,6 +2746,8 @@ impl App {
                                     theme: SharedString::from(theme),
                                     croc_path: SharedString::from(croc_path),
                                     croc_found,
+                                    device_nickname: SharedString::from(device_nickname),
+                                    device_hostname: SharedString::from(device_hostname),
                                     hash_algorithm: SharedString::from(hash_algorithm),
                                     curve: SharedString::from(curve),
                                     throttle: SharedString::from(throttle),
@@ -2971,6 +2995,73 @@ impl App {
                         });
 
                         info!("Security posture set to: {}", posture_str);
+                    });
+                });
+            }
+        });
+
+        // Set device nickname callback
+        window.global::<AppLogic>().on_set_device_nickname({
+            let config = config.clone();
+            let window_weak = window_weak.clone();
+            let identity = self.identity.clone();
+
+            move |nickname| {
+                let nickname_str = nickname.to_string();
+                info!("Setting device nickname to: '{}'", nickname_str);
+                let config = config.clone();
+                let window_weak = window_weak.clone();
+                let identity = identity.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Update config
+                        let display_name = {
+                            let mut config_guard = config.write().await;
+                            config_guard.device_nickname = if nickname_str.trim().is_empty() {
+                                None
+                            } else {
+                                Some(nickname_str.clone())
+                            };
+                            let display_name = config_guard.get_device_display_name();
+                            info!("Saving device nickname, display_name will be: {}", display_name);
+                            if let Err(e) = config_guard.save() {
+                                error!("Failed to save device nickname: {}", e);
+                            } else {
+                                info!("Device nickname saved successfully");
+                            }
+                            display_name
+                        };
+
+                        // Update identity name to match
+                        {
+                            let mut id_guard = identity.write().await;
+                            if let Some(ref mut id) = *id_guard {
+                                if let Err(e) = id.set_name(display_name.clone()) {
+                                    error!("Failed to update identity name: {}", e);
+                                }
+                            }
+                        }
+
+                        // Update UI
+                        let _ = slint::invoke_from_event_loop({
+                            let window_weak = window_weak.clone();
+                            let nickname_str = nickname_str.clone();
+                            move || {
+                                if let Some(window) = window_weak.upgrade() {
+                                    let mut settings = window.global::<AppLogic>().get_settings();
+                                    settings.device_nickname = SharedString::from(&nickname_str);
+                                    window.global::<AppLogic>().set_settings(settings);
+                                }
+                            }
+                        });
+
+                        info!("Device nickname set to: {}", if nickname_str.is_empty() { "(hostname)" } else { &nickname_str });
                     });
                 });
             }

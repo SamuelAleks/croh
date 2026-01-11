@@ -272,6 +272,10 @@ pub struct Config {
     /// Path to croc executable (None = auto-detect).
     pub croc_path: Option<PathBuf>,
 
+    /// Device nickname for display in UI (None = use hostname).
+    #[serde(default)]
+    pub device_nickname: Option<String>,
+
     /// Default hash algorithm for file verification.
     #[serde(default)]
     pub default_hash: Option<HashAlgorithm>,
@@ -332,6 +336,7 @@ impl Default for Config {
             default_relay: None,
             theme: Theme::default(),
             croc_path: None,
+            device_nickname: None,
             default_hash: None,
             default_curve: None,
             throttle: None,
@@ -406,6 +411,28 @@ impl Config {
         }
 
         Ok(config)
+    }
+
+    /// Get the device display name (nickname if set, otherwise hostname).
+    pub fn get_device_display_name(&self) -> String {
+        if let Some(ref nickname) = self.device_nickname {
+            if !nickname.trim().is_empty() {
+                return nickname.clone();
+            }
+        }
+        // Fall back to hostname
+        hostname::get()
+            .ok()
+            .and_then(|h| h.into_string().ok())
+            .unwrap_or_else(|| "Unknown Device".to_string())
+    }
+
+    /// Get just the hostname (for technical displays).
+    pub fn get_hostname() -> String {
+        hostname::get()
+            .ok()
+            .and_then(|h| h.into_string().ok())
+            .unwrap_or_else(|| "Unknown".to_string())
     }
 }
 

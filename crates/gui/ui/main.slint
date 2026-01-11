@@ -277,6 +277,9 @@ export struct AppSettings {
     theme: string,
     croc-path: string,
     croc-found: bool,
+    // Device identity
+    device-nickname: string,      // user-configurable display name (empty = use hostname)
+    device-hostname: string,      // actual hostname (read-only, for display)
     // Transfer options
     hash-algorithm: string,  // "xxhash", "imohash", "md5", or "" for default
     curve: string,           // "siec", "p256", "p384", "p521", or "" for default
@@ -413,6 +416,8 @@ export global AppLogic {
     callback set-dnd-mode(string, string);
     // set-security-posture: posture ("relaxed", "balanced", "cautious")
     callback set-security-posture(string);
+    // set-device-nickname: nickname (empty = use hostname)
+    callback set-device-nickname(string);
 
     // Trusted peers callbacks
     callback initiate-trust();
@@ -821,11 +826,14 @@ component ThemedInput inherits Rectangle {
     background: Theme.bg-card;
 
     // Track focus changes to detect blur
+    property <bool> currently-focused: input.has-focus;
     property <bool> was-focused: false;
-    changed was-focused => {
-        if was-focused && !input.has-focus {
+    changed currently-focused => {
+        if was-focused && !currently-focused {
+            // Lost focus - trigger edited callback
             root.edited();
         }
+        was-focused = currently-focused;
     }
 
     // Scroll offset for the text input (negative = scrolled left)
@@ -873,10 +881,6 @@ component ThemedInput inherits Rectangle {
         }
     }
 
-    // Update focus tracking
-    states [
-        focused when input.has-focus: { was-focused: true; }
-    ]
 
     // Placeholder text
     if root.text == "": Text {
@@ -2904,6 +2908,28 @@ component SettingsPanel inherits Rectangle {
         VerticalBox {
             padding: Theme.spacing-md;
             spacing: Theme.spacing-sm;
+
+            // Device Identity
+            Section {
+                title: "Device Identity";
+
+                SettingRow {
+                    label: "Nickname";
+                    sublabel: AppLogic.settings.device-nickname == "" ?
+                        "Using hostname: " + AppLogic.settings.device-hostname :
+                        "Hostname: " + AppLogic.settings.device-hostname;
+
+                    ThemedInput {
+                        input-width: 160px;
+                        text: AppLogic.settings.device-nickname;
+                        placeholder-text: AppLogic.settings.device-hostname;
+                        font-size: 12px;
+                        edited => {
+                            AppLogic.set-device-nickname(self.text);
+                        }
+                    }
+                }
+            }
 
             // Downloads
             Section {
