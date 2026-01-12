@@ -3,14 +3,14 @@
 //! This module handles incoming screen streaming requests from peers,
 //! including permission checks, session management, and input injection.
 
+#![allow(dead_code)] // WIP: Screen streaming handlers not yet integrated
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use croh_core::config::ScreenStreamSettings;
 use croh_core::error::{Error, Result};
-use croh_core::iroh::protocol::{
-    ControlMessage, DisplayInfo, ScreenCompression, ScreenQuality,
-};
+use croh_core::iroh::protocol::{ControlMessage, DisplayInfo, ScreenCompression, ScreenQuality};
 use croh_core::peers::TrustedPeer;
 use croh_core::screen::{
     Display, RemoteInputEvent, ScreenStreamManager, StreamCommandSender, StreamEventSender,
@@ -132,10 +132,7 @@ impl ScreenHandler {
 
         // Determine which display to capture
         let target_display = if let Some(ref id) = display_id {
-            displays
-                .iter()
-                .find(|d| d.id == *id)
-                .map(|d| d.id.clone())
+            displays.iter().find(|d| d.id == *id).map(|d| d.id.clone())
         } else {
             // Default to primary or first display
             displays

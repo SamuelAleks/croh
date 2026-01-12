@@ -3,8 +3,8 @@
 //! This module provides detection of available hardware video encoders
 //! and configuration helpers for each backend.
 
-use ffmpeg_the_third as ffmpeg;
 use ffmpeg::codec::Id;
+use ffmpeg_the_third as ffmpeg;
 use tracing::{debug, info};
 
 /// Available hardware acceleration backends.

@@ -15,8 +15,8 @@ use tracing::{debug, error, info, warn};
 
 use super::encoder::create_encoder;
 use super::events::{
-    FrameDropReason, RemoteInputEvent, SessionEndReason, StreamCommand, StreamCommandReceiver,
-    StreamCommandSender, StreamEvent, StreamEventSender, stream_command_channel,
+    stream_command_channel, FrameDropReason, RemoteInputEvent, SessionEndReason, StreamCommand,
+    StreamCommandReceiver, StreamCommandSender, StreamEvent, StreamEventSender,
 };
 use super::input::{create_input_injector, InputSecuritySettings, SecureInputHandler};
 use super::session::{SessionId, StreamSession, StreamState, StreamStats};
@@ -42,7 +42,8 @@ pub struct StreamHandle {
     pub session_id: SessionId,
     /// Command sender to control the session
     command_tx: StreamCommandSender,
-    /// Task join handle
+    /// Task join handle (kept for future abort/join support)
+    #[allow(dead_code)]
     task_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -245,7 +246,10 @@ impl ScreenStreamManager {
             handles.insert(session_id.clone(), handle);
         }
 
-        info!("Started streaming session {} for display {}", session_id, display_id);
+        info!(
+            "Started streaming session {} for display {}",
+            session_id, display_id
+        );
 
         Ok(())
     }
@@ -317,7 +321,10 @@ impl ScreenStreamManager {
             let mut session = session.lock().await;
 
             // Calculate RTT if we have timing info
-            let rtt_ms = session.stats.last_capture_time.map(|t| t.elapsed().as_millis() as u32);
+            let rtt_ms = session
+                .stats
+                .last_capture_time
+                .map(|t| t.elapsed().as_millis() as u32);
 
             session.stats.record_ack(sequence, 0);
             if let Some(rtt) = rtt_ms {
@@ -374,7 +381,11 @@ async fn run_capture_loop(
     // Create encoder (use Zstd by default for good compression/speed balance)
     // TODO: Make compression configurable via settings or stream request
     let mut encoder = create_encoder(ScreenCompression::Raw, ScreenQuality::Balanced);
-    info!("Using {} encoder for session {}", encoder.name(), session_id);
+    info!(
+        "Using {} encoder for session {}",
+        encoder.name(),
+        session_id
+    );
 
     // Initialize input injector if input is allowed
     let allow_input = {
@@ -389,17 +400,27 @@ async fn run_capture_loop(
                 let mut handler = SecureInputHandler::new(injector, security_settings);
                 match handler.init() {
                     Ok(()) => {
-                        info!("Input injection enabled for session {} using {}", session_id, handler.name());
+                        info!(
+                            "Input injection enabled for session {} using {}",
+                            session_id,
+                            handler.name()
+                        );
                         Some(handler)
                     }
                     Err(e) => {
-                        warn!("Failed to initialize input injector for session {}: {}", session_id, e);
+                        warn!(
+                            "Failed to initialize input injector for session {}: {}",
+                            session_id, e
+                        );
                         None
                     }
                 }
             }
             Err(e) => {
-                warn!("Input injection not available for session {}: {}", session_id, e);
+                warn!(
+                    "Input injection not available for session {}: {}",
+                    session_id, e
+                );
                 None
             }
         }
@@ -467,7 +488,11 @@ async fn run_capture_loop(
                         _force_keyframe = true;
                         encoder.force_keyframe();
                     }
-                    StreamCommand::AdjustQuality { fps, quality, bitrate_kbps } => {
+                    StreamCommand::AdjustQuality {
+                        fps,
+                        quality,
+                        bitrate_kbps,
+                    } => {
                         let mut s = session.lock().await;
                         if let Some(new_fps) = fps {
                             s.set_target_fps(new_fps);
@@ -493,7 +518,10 @@ async fn run_capture_loop(
                         if let Some(ref mut handler) = input_handler {
                             match handler.handle_input(&event) {
                                 Ok(()) => {
-                                    debug!("Injected input event for session {}: {:?}", session_id, event);
+                                    debug!(
+                                        "Injected input event for session {}: {:?}",
+                                        session_id, event
+                                    );
                                     let _ = event_tx
                                         .send(StreamEvent::InputReceived {
                                             session_id: session_id.clone(),
@@ -502,7 +530,10 @@ async fn run_capture_loop(
                                         .await;
                                 }
                                 Err(e) => {
-                                    warn!("Failed to inject input for session {}: {}", session_id, e);
+                                    warn!(
+                                        "Failed to inject input for session {}: {}",
+                                        session_id, e
+                                    );
                                     let _ = event_tx
                                         .send(StreamEvent::Error {
                                             session_id: session_id.clone(),
@@ -631,7 +662,8 @@ async fn run_capture_loop(
                         } else {
                             // No sender configured, just track stats
                             let mut s = session.lock().await;
-                            s.stats.record_send(encoded.data.len() as u64, encode_time_us);
+                            s.stats
+                                .record_send(encoded.data.len() as u64, encode_time_us);
                         }
                     }
                     Err(e) => {
@@ -693,7 +725,10 @@ async fn run_capture_loop(
     // Shutdown input handler
     if let Some(ref mut handler) = input_handler {
         if let Err(e) = handler.shutdown() {
-            warn!("Error shutting down input handler for session {}: {}", session_id, e);
+            warn!(
+                "Error shutting down input handler for session {}: {}",
+                session_id, e
+            );
         }
     }
 

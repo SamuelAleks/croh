@@ -101,7 +101,11 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Direct3D",
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Storage_FileSystem",
 ] }
+winapi = { version = "0.3", features = ["fileapi", "minwindef"] }
 
 [dev-dependencies]
 tempfile = "3.14"

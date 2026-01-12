@@ -161,20 +161,23 @@ impl X11Capture {
 
     /// Enumerate displays using RandR extension.
     fn enumerate_displays(&mut self) -> Result<()> {
-        let conn = self.conn.as_ref().ok_or_else(|| {
-            Error::Screen("Not connected to X server".into())
-        })?;
-        let root = self.root.ok_or_else(|| {
-            Error::Screen("No root window".into())
-        })?;
-        let screen = self.screen.as_ref().ok_or_else(|| {
-            Error::Screen("No screen info".into())
-        })?;
+        let conn = self
+            .conn
+            .as_ref()
+            .ok_or_else(|| Error::Screen("Not connected to X server".into()))?;
+        let root = self
+            .root
+            .ok_or_else(|| Error::Screen("No root window".into()))?;
+        let screen = self
+            .screen
+            .as_ref()
+            .ok_or_else(|| Error::Screen("No screen info".into()))?;
 
         self.displays.clear();
 
         // Check if RandR is available
-        let randr_info = conn.extension_information(randr::X11_EXTENSION_NAME)
+        let randr_info = conn
+            .extension_information(randr::X11_EXTENSION_NAME)
             .map_err(|e| Error::Screen(format!("Failed to query RandR: {:?}", e)))?;
 
         if randr_info.is_none() {
@@ -221,9 +224,7 @@ impl X11Capture {
             let output_name = if let Some(output) = crtc_info.outputs.first() {
                 match conn.randr_get_output_info(*output, resources.config_timestamp) {
                     Ok(cookie) => match cookie.reply() {
-                        Ok(info) => {
-                            String::from_utf8_lossy(&info.name).to_string()
-                        }
+                        Ok(info) => String::from_utf8_lossy(&info.name).to_string(),
                         Err(_) => format!("CRTC-{}", crtc),
                     },
                     Err(_) => format!("CRTC-{}", crtc),
@@ -234,15 +235,19 @@ impl X11Capture {
 
             // Get refresh rate from current mode
             let refresh_rate = if crtc_info.mode != 0 {
-                resources.modes.iter().find(|m| m.id == crtc_info.mode).map(|mode| {
-                    if mode.htotal > 0 && mode.vtotal > 0 {
-                        let rate = (mode.dot_clock as f64)
-                            / (mode.htotal as f64 * mode.vtotal as f64);
-                        rate.round() as u32
-                    } else {
-                        60 // Default
-                    }
-                })
+                resources
+                    .modes
+                    .iter()
+                    .find(|m| m.id == crtc_info.mode)
+                    .map(|mode| {
+                        if mode.htotal > 0 && mode.vtotal > 0 {
+                            let rate =
+                                (mode.dot_clock as f64) / (mode.htotal as f64 * mode.vtotal as f64);
+                            rate.round() as u32
+                        } else {
+                            60 // Default
+                        }
+                    })
             } else {
                 None
             };
@@ -312,13 +317,7 @@ impl X11Capture {
         let size = (width * height * bytes_per_pixel) as usize;
 
         // Create System V shared memory segment
-        let shm_id = unsafe {
-            libc::shmget(
-                libc::IPC_PRIVATE,
-                size,
-                libc::IPC_CREAT | 0o600,
-            )
-        };
+        let shm_id = unsafe { libc::shmget(libc::IPC_PRIVATE, size, libc::IPC_CREAT | 0o600) };
 
         if shm_id < 0 {
             return Err(Error::Screen(format!(
@@ -387,18 +386,19 @@ impl X11Capture {
 
     /// Capture a frame using SHM.
     fn capture_shm(&self) -> Result<CapturedFrame> {
-        let conn = self.conn.as_ref().ok_or_else(|| {
-            Error::Screen("Not connected to X server".into())
-        })?;
-        let root = self.root.ok_or_else(|| {
-            Error::Screen("No root window".into())
-        })?;
-        let shm_seg = self.shm_seg.ok_or_else(|| {
-            Error::Screen("SHM not initialized".into())
-        })?;
-        let shm_ptr = self.shm_ptr.ok_or_else(|| {
-            Error::Screen("SHM pointer not set".into())
-        })?;
+        let conn = self
+            .conn
+            .as_ref()
+            .ok_or_else(|| Error::Screen("Not connected to X server".into()))?;
+        let root = self
+            .root
+            .ok_or_else(|| Error::Screen("No root window".into()))?;
+        let shm_seg = self
+            .shm_seg
+            .ok_or_else(|| Error::Screen("SHM not initialized".into()))?;
+        let shm_ptr = self
+            .shm_ptr
+            .ok_or_else(|| Error::Screen("SHM pointer not set".into()))?;
 
         // Use shm_get_image to capture the screen
         let reply = conn
@@ -427,9 +427,7 @@ impl X11Capture {
         let row_bytes = self.capture_width as usize * bytes_per_pixel;
         let total_bytes = row_bytes * self.capture_height as usize;
 
-        let data = unsafe {
-            std::slice::from_raw_parts(shm_ptr, total_bytes).to_vec()
-        };
+        let data = unsafe { std::slice::from_raw_parts(shm_ptr, total_bytes).to_vec() };
 
         // X11 typically uses BGRA format
         Ok(CapturedFrame {
@@ -469,9 +467,12 @@ impl ScreenCapture for X11Capture {
         }
 
         // Find the requested display
-        let display = self.displays.iter().find(|d| d.id == display_id).ok_or_else(|| {
-            Error::Screen(format!("Display not found: {}", display_id))
-        })?.clone();
+        let display = self
+            .displays
+            .iter()
+            .find(|d| d.id == display_id)
+            .ok_or_else(|| Error::Screen(format!("Display not found: {}", display_id)))?
+            .clone();
 
         // Setup SHM for the display size
         self.setup_shm(display.width, display.height)?;

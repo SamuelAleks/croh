@@ -5,11 +5,11 @@
 
 use std::time::Instant;
 
-use ffmpeg_the_third as ffmpeg;
 use ffmpeg::codec::decoder::video::Video as VideoDecoder;
 use ffmpeg::software::scaling::{Context as ScalingContext, Flags};
 use ffmpeg::util::format::Pixel;
 use ffmpeg::util::frame::video::Video as VideoFrame;
+use ffmpeg_the_third as ffmpeg;
 use libc::EAGAIN;
 use tracing::debug;
 
@@ -71,9 +71,7 @@ impl FfmpegDecoder {
     /// Ensure scaler is configured for current frame dimensions and format.
     fn ensure_scaler(&mut self, width: u32, height: u32, format: Pixel) -> Result<()> {
         // Check if we need to recreate the scaler
-        let needs_recreate = self.scaler.is_none()
-            || self.width != width
-            || self.height != height;
+        let needs_recreate = self.scaler.is_none() || self.width != width || self.height != height;
 
         if needs_recreate {
             debug!(
@@ -254,7 +252,10 @@ mod tests {
                 assert_eq!(decoder.frames_decoded(), 0);
             }
             Err(e) => {
-                println!("Decoder creation failed (expected if no H.264 support): {}", e);
+                println!(
+                    "Decoder creation failed (expected if no H.264 support): {}",
+                    e
+                );
             }
         }
     }

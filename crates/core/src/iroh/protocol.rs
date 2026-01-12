@@ -221,7 +221,6 @@ pub enum ControlMessage {
     },
 
     // ==================== File Transfer Messages ====================
-
     /// Push offer: sender wants to push files to receiver.
     PushOffer {
         /// Unique transfer ID
@@ -301,7 +300,6 @@ pub enum ControlMessage {
     },
 
     // ==================== File Browsing Messages ====================
-
     /// Browse request: list files in a directory.
     BrowseRequest {
         /// Path to browse (None for root/allowed paths)
@@ -321,7 +319,6 @@ pub enum ControlMessage {
     },
 
     // ==================== Status Messages ====================
-
     /// Do Not Disturb status update.
     /// Sent when a peer's DND status changes.
     DndStatus {
@@ -338,7 +335,6 @@ pub enum ControlMessage {
     },
 
     // ==================== Speed Test Messages ====================
-
     /// Request to start a speed test.
     SpeedTestRequest {
         /// Unique test ID
@@ -388,7 +384,6 @@ pub enum ControlMessage {
     },
 
     // ==================== Guest Peer Messages ====================
-
     /// Guest requests time extension.
     ExtensionRequest {
         /// Requested additional hours
@@ -437,7 +432,6 @@ pub enum ControlMessage {
     // 4. C accepts or rejects the request
     // 5. If both accept, A sends IntroductionComplete to both with connection details
     // 6. B and C connect directly and complete a fresh trust handshake
-
     /// Introduction offer: sent to one peer (B) offering to introduce them to another (C).
     IntroductionOffer {
         /// Unique introduction ID
@@ -508,7 +502,6 @@ pub enum ControlMessage {
     },
 
     // ==================== Chat Messages ====================
-
     /// Send a chat message to peer.
     ChatMessage {
         /// Unique message ID
@@ -558,7 +551,6 @@ pub enum ControlMessage {
     },
 
     // ==================== Screen Streaming Messages ====================
-
     /// Request to start screen streaming.
     ScreenStreamRequest {
         /// Unique stream ID
@@ -921,16 +913,14 @@ mod tests {
             stream_id: "stream123".to_string(),
             accepted: true,
             reason: None,
-            displays: vec![
-                DisplayInfo {
-                    id: "0".to_string(),
-                    name: "Primary Display".to_string(),
-                    width: 1920,
-                    height: 1080,
-                    refresh_rate: Some(60),
-                    is_primary: true,
-                },
-            ],
+            displays: vec![DisplayInfo {
+                id: "0".to_string(),
+                name: "Primary Display".to_string(),
+                width: 1920,
+                height: 1080,
+                refresh_rate: Some(60),
+                is_primary: true,
+            }],
             compression: Some(ScreenCompression::H264),
         };
 
@@ -979,7 +969,10 @@ mod tests {
 
         let parsed: ControlMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            ControlMessage::ScreenFrame { stream_id, metadata } => {
+            ControlMessage::ScreenFrame {
+                stream_id,
+                metadata,
+            } => {
                 assert_eq!(stream_id, "stream123");
                 assert_eq!(metadata.sequence, 42);
                 assert!(metadata.is_keyframe);
@@ -995,8 +988,15 @@ mod tests {
             stream_id: "stream123".to_string(),
             events: vec![
                 InputEvent::MouseMove { x: 1000, y: 500 },
-                InputEvent::MouseButton { button: 0, pressed: true },
-                InputEvent::Key { code: 0x04, pressed: true, modifiers: 0 },
+                InputEvent::MouseButton {
+                    button: 0,
+                    pressed: true,
+                },
+                InputEvent::Key {
+                    code: 0x04,
+                    pressed: true,
+                    modifiers: 0,
+                },
             ],
         };
 

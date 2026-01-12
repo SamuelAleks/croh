@@ -231,24 +231,24 @@ impl SecurityPosture {
     pub fn default_guest_policy(&self) -> GuestPolicy {
         match self {
             SecurityPosture::Relaxed => GuestPolicy {
-                default_duration_hours: 168,  // 1 week
-                max_duration_hours: 336,      // 2 weeks
+                default_duration_hours: 168, // 1 week
+                max_duration_hours: 336,     // 2 weeks
                 allow_extensions: true,
-                max_extensions: u32::MAX,     // Unlimited
+                max_extensions: u32::MAX, // Unlimited
                 allow_promotion_requests: true,
                 auto_accept_guest_pushes: true,
             },
             SecurityPosture::Balanced => GuestPolicy {
-                default_duration_hours: 72,   // 3 days
-                max_duration_hours: 168,      // 1 week
+                default_duration_hours: 72, // 3 days
+                max_duration_hours: 168,    // 1 week
                 allow_extensions: true,
                 max_extensions: 3,
                 allow_promotion_requests: true,
                 auto_accept_guest_pushes: true,
             },
             SecurityPosture::Cautious => GuestPolicy {
-                default_duration_hours: 24,   // 1 day
-                max_duration_hours: 48,       // 2 days
+                default_duration_hours: 24, // 1 day
+                max_duration_hours: 48,     // 2 days
                 allow_extensions: true,
                 max_extensions: 1,
                 allow_promotion_requests: false,
@@ -632,4 +632,3 @@ impl Config {
             .unwrap_or_else(|| "Unknown".to_string())
     }
 }
-

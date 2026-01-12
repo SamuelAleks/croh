@@ -261,9 +261,9 @@ impl ZstdEncoder {
     /// Update compression level based on quality setting.
     fn update_compression_level(&mut self) {
         self.compression_level = match self.quality {
-            ScreenQuality::Fast => 1,      // Fastest
-            ScreenQuality::Balanced => 3,  // Good balance
-            ScreenQuality::Quality => 9,   // High compression
+            ScreenQuality::Fast => 1,     // Fastest
+            ScreenQuality::Balanced => 3, // Good balance
+            ScreenQuality::Quality => 9,  // High compression
             ScreenQuality::Auto => 3,
         };
     }
@@ -331,7 +331,10 @@ impl FrameEncoder for ZstdEncoder {
 /// When the `ffmpeg` feature is enabled and H.264 is requested, this will
 /// attempt to create an FFmpeg encoder with hardware acceleration. Falls
 /// back to Zstd if FFmpeg is unavailable or fails.
-pub fn create_encoder(compression: ScreenCompression, quality: ScreenQuality) -> Box<dyn FrameEncoder> {
+pub fn create_encoder(
+    compression: ScreenCompression,
+    quality: ScreenQuality,
+) -> Box<dyn FrameEncoder> {
     create_encoder_with_size(compression, quality, 1920, 1080)
 }
 
@@ -396,7 +399,11 @@ pub fn auto_select_encoder(quality: ScreenQuality) -> Box<dyn FrameEncoder> {
 
 /// Select the best available encoder with specific frame dimensions.
 #[allow(unused_variables)]
-pub fn auto_select_encoder_with_size(quality: ScreenQuality, width: u32, height: u32) -> Box<dyn FrameEncoder> {
+pub fn auto_select_encoder_with_size(
+    quality: ScreenQuality,
+    width: u32,
+    height: u32,
+) -> Box<dyn FrameEncoder> {
     #[cfg(feature = "ffmpeg")]
     {
         // Try H.264 first for best compression
@@ -436,10 +443,10 @@ mod tests {
         for y in 0..height {
             for x in 0..width {
                 let offset = ((y * stride) + (x * bytes_per_pixel)) as usize;
-                data[offset] = (x % 256) as u8;     // R
+                data[offset] = (x % 256) as u8; // R
                 data[offset + 1] = (y % 256) as u8; // G
-                data[offset + 2] = 128;              // B
-                data[offset + 3] = 255;              // A
+                data[offset + 2] = 128; // B
+                data[offset + 3] = 255; // A
             }
         }
 

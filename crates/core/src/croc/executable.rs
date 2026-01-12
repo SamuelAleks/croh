@@ -101,7 +101,13 @@ fn find_in_common_locations() -> Option<PathBuf> {
     if let Some(home) = dirs::home_dir() {
         // Scoop
         locations.push(home.join("scoop").join("shims").join("croc.exe"));
-        locations.push(home.join("scoop").join("apps").join("croc").join("current").join("croc.exe"));
+        locations.push(
+            home.join("scoop")
+                .join("apps")
+                .join("croc")
+                .join("current")
+                .join("croc.exe"),
+        );
 
         // Go bin (if installed via go install)
         locations.push(home.join("go").join("bin").join("croc.exe"));
@@ -121,9 +127,7 @@ fn find_in_common_locations() -> Option<PathBuf> {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.is_dir() {
-                        let dir_name = path.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("");
+                        let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                         // Look for croc package (schollz.croc or similar)
                         if dir_name.to_lowercase().contains("croc") {
                             // Search for croc.exe in this package
@@ -229,6 +233,7 @@ fn find_in_common_locations() -> Option<PathBuf> {
 
 /// Clear the cached croc path (useful for testing).
 #[cfg(test)]
+#[allow(dead_code)]
 pub fn clear_cache() {
     let mut cache = CROC_PATH.write().unwrap();
     *cache = None;
@@ -246,4 +251,3 @@ mod tests {
         println!("croc found: {:?}", result);
     }
 }
-

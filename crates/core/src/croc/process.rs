@@ -113,8 +113,7 @@ impl CrocProcess {
     /// Spawn the croc process and set up output monitoring.
     async fn spawn(mut cmd: Command) -> Result<(Self, CrocProcessHandle)> {
         // Configure process stdio
-        cmd.stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         // On Windows, we need special handling to prevent croc from waiting on stdin.
         // We use DETACHED_PROCESS to create a new process group, which helps with
@@ -174,10 +173,7 @@ impl CrocProcess {
             });
         }
 
-        let process = Self {
-            child,
-            event_rx,
-        };
+        let process = Self { child, event_rx };
 
         let handle = CrocProcessHandle { events: handle_rx };
 
@@ -192,23 +188,25 @@ impl CrocProcess {
     /// Kill the process.
     pub async fn kill(&mut self) -> Result<()> {
         warn!("Killing croc process");
-        self.child.kill().await.map_err(|e| {
-            Error::CrocProcess(format!("Failed to kill process: {}", e))
-        })
+        self.child
+            .kill()
+            .await
+            .map_err(|e| Error::CrocProcess(format!("Failed to kill process: {}", e)))
     }
 
     /// Wait for the process to exit.
     pub async fn wait(&mut self) -> Result<std::process::ExitStatus> {
-        self.child.wait().await.map_err(|e| {
-            Error::CrocProcess(format!("Failed to wait for process: {}", e))
-        })
+        self.child
+            .wait()
+            .await
+            .map_err(|e| Error::CrocProcess(format!("Failed to wait for process: {}", e)))
     }
 
     /// Check if the process is still running.
     pub fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>> {
-        self.child.try_wait().map_err(|e| {
-            Error::CrocProcess(format!("Failed to check process status: {}", e))
-        })
+        self.child
+            .try_wait()
+            .map_err(|e| Error::CrocProcess(format!("Failed to check process status: {}", e)))
     }
 }
 
@@ -240,13 +238,19 @@ async fn read_lines_cr_lf<R: AsyncReadExt + Unpin>(
         debug!("{}: Waiting for read...", stream_name);
         match reader.read(&mut read_buf).await {
             Ok(0) => {
-                info!("{}: EOF after {} bytes in {} reads", stream_name, total_bytes_read, read_count);
+                info!(
+                    "{}: EOF after {} bytes in {} reads",
+                    stream_name, total_bytes_read, read_count
+                );
                 break;
             }
             Ok(n) => {
                 total_bytes_read += n as u64;
                 read_count += 1;
-                debug!("{}: Read {} bytes (total: {})", stream_name, n, total_bytes_read);
+                debug!(
+                    "{}: Read {} bytes (total: {})",
+                    stream_name, n, total_bytes_read
+                );
 
                 // Process the bytes we read, filtering out non-printable chars except newlines
                 for &byte in &read_buf[..n] {
@@ -257,7 +261,7 @@ async fn read_lines_cr_lf<R: AsyncReadExt + Unpin>(
                             process_line(line, &tx, &handle_tx, is_stderr).await;
                         }
                         line_buffer.clear();
-                    } else if byte >= 32 && byte < 127 {
+                    } else if (32..127).contains(&byte) {
                         // Only keep printable ASCII characters
                         line_buffer.push(ch);
                     }
@@ -329,4 +333,3 @@ async fn process_line(
         let _ = handle_tx.send(CrocEvent::Failed(error)).await;
     }
 }
-

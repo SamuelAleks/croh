@@ -68,10 +68,7 @@ pub fn generate_test_id() -> String {
 /// 3. Sends test data (upload test)
 /// 4. Receives test data back (download test)
 /// 5. Returns the results
-pub async fn run_speed_test(
-    conn: &mut ControlConnection,
-    size: u64,
-) -> Result<SpeedTestResult> {
+pub async fn run_speed_test(conn: &mut ControlConnection, size: u64) -> Result<SpeedTestResult> {
     let test_id = generate_test_id();
     let overall_start = Instant::now();
 
@@ -96,7 +93,9 @@ pub async fn run_speed_test(
             return Err(Error::Iroh(format!("Speed test rejected: {}", reason)));
         }
         _ => {
-            return Err(Error::Iroh("Unexpected message during speed test".to_string()));
+            return Err(Error::Iroh(
+                "Unexpected message during speed test".to_string(),
+            ));
         }
     }
 
@@ -156,7 +155,12 @@ pub async fn run_speed_test(
     } else {
         bytes_sent
     };
-    debug!("Upload: {} bytes in {:?} = {}", bytes_sent, upload_duration, format_speed(upload_speed));
+    debug!(
+        "Upload: {} bytes in {:?} = {}",
+        bytes_sent,
+        upload_duration,
+        format_speed(upload_speed)
+    );
 
     // Step 5: Download test - receive data back from responder
     let download_start = Instant::now();
@@ -165,16 +169,22 @@ pub async fn run_speed_test(
     while bytes_received < size {
         let msg = conn.recv().await?;
         match msg {
-            ControlMessage::SpeedTestData { test_id: tid, data, .. } => {
+            ControlMessage::SpeedTestData {
+                test_id: tid, data, ..
+            } => {
                 if tid != test_id {
                     warn!("Received data with wrong test_id");
                     continue;
                 }
-                let decoded = BASE64.decode(&data).map_err(|e| Error::Iroh(format!("Invalid base64: {}", e)))?;
+                let decoded = BASE64
+                    .decode(&data)
+                    .map_err(|e| Error::Iroh(format!("Invalid base64: {}", e)))?;
                 bytes_received += decoded.len() as u64;
             }
             _ => {
-                return Err(Error::Iroh("Unexpected message during download".to_string()));
+                return Err(Error::Iroh(
+                    "Unexpected message during download".to_string(),
+                ));
             }
         }
     }
@@ -185,7 +195,12 @@ pub async fn run_speed_test(
     } else {
         bytes_received
     };
-    debug!("Download: {} bytes in {:?} = {}", bytes_received, download_duration, format_speed(download_speed));
+    debug!(
+        "Download: {} bytes in {:?} = {}",
+        bytes_received,
+        download_duration,
+        format_speed(download_speed)
+    );
 
     // Step 6: Send/receive completion
     let total_duration = overall_start.elapsed();
@@ -231,7 +246,10 @@ pub async fn handle_speed_test_request(
     test_id: String,
     size: u64,
 ) -> Result<SpeedTestResult> {
-    info!("Handling speed test request {} with {} bytes", test_id, size);
+    info!(
+        "Handling speed test request {} with {} bytes",
+        test_id, size
+    );
 
     // Step 1: Accept the test
     conn.send(&ControlMessage::SpeedTestAccept {
@@ -256,16 +274,22 @@ pub async fn handle_speed_test_request(
     while bytes_received < size {
         let msg = conn.recv().await?;
         match msg {
-            ControlMessage::SpeedTestData { test_id: tid, data, .. } => {
+            ControlMessage::SpeedTestData {
+                test_id: tid, data, ..
+            } => {
                 if tid != test_id {
                     warn!("Received data with wrong test_id");
                     continue;
                 }
-                let decoded = BASE64.decode(&data).map_err(|e| Error::Iroh(format!("Invalid base64: {}", e)))?;
+                let decoded = BASE64
+                    .decode(&data)
+                    .map_err(|e| Error::Iroh(format!("Invalid base64: {}", e)))?;
                 bytes_received += decoded.len() as u64;
             }
             _ => {
-                return Err(Error::Iroh("Unexpected message during upload receive".to_string()));
+                return Err(Error::Iroh(
+                    "Unexpected message during upload receive".to_string(),
+                ));
             }
         }
     }
@@ -333,7 +357,9 @@ pub async fn handle_speed_test_request(
 
             Ok(result)
         }
-        _ => Err(Error::Iroh("Expected SpeedTestComplete message".to_string())),
+        _ => Err(Error::Iroh(
+            "Expected SpeedTestComplete message".to_string(),
+        )),
     }
 }
 

@@ -48,10 +48,7 @@ impl IrohEndpoint {
                 addr.direct_addresses().collect::<Vec<_>>()
             );
         } else {
-            info!(
-                "Iroh endpoint created with node_id: {}",
-                endpoint.node_id()
-            );
+            info!("Iroh endpoint created with node_id: {}", endpoint.node_id());
         }
 
         Ok(Self {
@@ -108,10 +105,13 @@ impl IrohEndpoint {
     pub async fn connect_to_node(&self, node_id: NodeId) -> Result<ControlConnection> {
         debug!("Connecting to node: {}", node_id);
 
-        let conn = tokio::time::timeout(CONNECT_TIMEOUT, self.endpoint.connect(node_id, ALPN_CONTROL))
-            .await
-            .map_err(|_| Error::Iroh("connection timeout".to_string()))?
-            .map_err(|e| Error::Iroh(format!("connection failed: {}", e)))?;
+        let conn = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            self.endpoint.connect(node_id, ALPN_CONTROL),
+        )
+        .await
+        .map_err(|_| Error::Iroh("connection timeout".to_string()))?
+        .map_err(|e| Error::Iroh(format!("connection failed: {}", e)))?;
 
         info!("Connected to node: {}", node_id);
 
@@ -324,7 +324,9 @@ mod tests {
             let msg = conn.recv().await.unwrap();
             match msg {
                 ControlMessage::Ping { timestamp } => {
-                    conn.send(&ControlMessage::Pong { timestamp }).await.unwrap();
+                    conn.send(&ControlMessage::Pong { timestamp })
+                        .await
+                        .unwrap();
                 }
                 _ => panic!("unexpected message"),
             }

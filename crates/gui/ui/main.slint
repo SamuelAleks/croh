@@ -600,6 +600,7 @@ export global AppLogic {
     callback screen-viewer-adjust-quality(string);  // "fast", "balanced", "quality"
     callback screen-viewer-send-input(int, int, int, int);  // type, x, y, data (mouse/key events)
     callback screen-viewer-switch-display(int);   // switch to display by index
+    callback screen-viewer-release-capture();     // release cursor capture (Escape key)
 
     // Screen viewer state
     in property <bool> screen-viewer-open: false;
@@ -614,6 +615,7 @@ export global AppLogic {
     in property <int> screen-viewer-bitrate-kbps: 0;
     in property <int> screen-viewer-latency-ms: 0;
     in property <bool> screen-viewer-input-enabled: false;
+    in property <bool> screen-viewer-cursor-captured: false;  // true when cursor is captured for input
     in property <string> screen-viewer-error: "";
     in property <string> screen-viewer-encoder: "";  // encoder name (e.g. "H.264 (NVENC)")
     in property <[string]> screen-viewer-displays: [];  // available displays
@@ -4258,6 +4260,20 @@ component ScreenViewerPanel inherits Rectangle {
     property <bool> streaming: AppLogic.screen-viewer-status == "streaming";
     // Display selector popup
     property <bool> show-display-selector: false;
+    // Whether cursor is currently captured (input mode active and capturing)
+    property <bool> cursor-captured: AppLogic.screen-viewer-cursor-captured;
+
+    // Handle Escape key to release capture
+    focus-scope := FocusScope {
+        key-pressed(e) => {
+            if e.text == Key.Escape && cursor-captured {
+                AppLogic.screen-viewer-release-capture();
+                accept
+            } else {
+                reject
+            }
+        }
+    }
 
     // Frame display area (below status bar)
     Rectangle {
@@ -4268,19 +4284,29 @@ component ScreenViewerPanel inherits Rectangle {
 
         // Touch area for input capture - only covers frame area, not status bar
         TouchArea {
-            mouse-cursor: streaming && AppLogic.screen-viewer-input-enabled ? none : default;
+            // Hide cursor when captured, show pointer when input enabled but not captured
+            mouse-cursor: cursor-captured ? none :
+                         (streaming && AppLogic.screen-viewer-input-enabled ? pointer : default);
 
-            // Capture mouse events for input forwarding
+            // Click to capture when input is enabled
+            clicked => {
+                if streaming && AppLogic.screen-viewer-input-enabled && !cursor-captured {
+                    // Enter capture mode
+                    AppLogic.screen-viewer-toggle-input();  // This will set cursor-captured
+                    focus-scope.focus();  // Ensure we receive key events
+                }
+            }
+
+            // Capture mouse events for input forwarding (only when captured)
             moved => {
-                if streaming && AppLogic.screen-viewer-input-enabled {
+                if streaming && cursor-captured {
                     // type=0 for mouse move, x, y, data=0
-                    // Offset y by status bar height for correct coordinates
                     AppLogic.screen-viewer-send-input(0, self.mouse-x / 1px, self.mouse-y / 1px, 0);
                 }
             }
 
             pointer-event(e) => {
-                if streaming && AppLogic.screen-viewer-input-enabled {
+                if streaming && cursor-captured {
                     if e.kind == PointerEventKind.down {
                         // type=1 for mouse down
                         AppLogic.screen-viewer-send-input(1, self.mouse-x / 1px, self.mouse-y / 1px,
@@ -4296,7 +4322,7 @@ component ScreenViewerPanel inherits Rectangle {
             }
 
             scroll-event(e) => {
-                if streaming && AppLogic.screen-viewer-input-enabled {
+                if streaming && cursor-captured {
                     // type=3 for scroll, data = delta
                     AppLogic.screen-viewer-send-input(3, e.delta-x / 1px, e.delta-y / 1px, 0);
                 }
@@ -4476,18 +4502,44 @@ component ScreenViewerPanel inherits Rectangle {
                 }
             }
 
-            // Input toggle
+            // Input toggle - shows capture state
             if streaming: CompactButton {
-                label: AppLogic.screen-viewer-input-enabled ? "Input: ON" : "Input: OFF";
+                label: cursor-captured ? "Captured (Esc)" :
+                       AppLogic.screen-viewer-input-enabled ? "Click to control" : "Input: OFF";
                 small: true;
-                clicked => { AppLogic.screen-viewer-toggle-input(); }
+                clicked => {
+                    if cursor-captured {
+                        // Release capture
+                        AppLogic.screen-viewer-release-capture();
+                    } else {
+                        // Toggle input mode
+                        AppLogic.screen-viewer-toggle-input();
+                    }
+                }
             }
 
-            // Fullscreen toggle
-            ImageIconBtn {
-                icon: Icons.zap;
-                icon-color: Theme.text;
-                clicked => { AppLogic.screen-viewer-toggle-fullscreen(); }
+            // Latency indicator (lightning bolt with color based on latency)
+            if streaming: HorizontalLayout {
+                spacing: 4px;
+                alignment: center;
+
+                Image {
+                    width: 16px;
+                    height: 16px;
+                    source: Icons.zap;
+                    colorize: AppLogic.screen-viewer-latency-ms < 50 ? Theme.success :
+                              AppLogic.screen-viewer-latency-ms < 150 ? Theme.warning :
+                              Theme.error;
+                }
+
+                Text {
+                    vertical-alignment: center;
+                    text: AppLogic.screen-viewer-latency-ms + "ms";
+                    font-size: 11px;
+                    color: AppLogic.screen-viewer-latency-ms < 50 ? Theme.success :
+                           AppLogic.screen-viewer-latency-ms < 150 ? Theme.warning :
+                           Theme.error;
+                }
             }
 
             // Disconnect button
@@ -4496,6 +4548,47 @@ component ScreenViewerPanel inherits Rectangle {
                 small: true;
                 clicked => { AppLogic.screen-viewer-disconnect(); }
             }
+        }
+    }
+
+    // Capture mode indicator overlay (shown when cursor is captured)
+    if cursor-captured: Rectangle {
+        x: 0;
+        y: parent.height - 40px;
+        width: parent.width;
+        height: 40px;
+        background: #000000CC;
+
+        HorizontalLayout {
+            alignment: center;
+            spacing: Theme.spacing-sm;
+
+            Text {
+                vertical-alignment: center;
+                text: "Cursor captured - Press Escape to release";
+                font-size: 14px;
+                color: Theme.accent;
+            }
+        }
+    }
+
+    // Click to capture hint (shown when input enabled but not captured)
+    if streaming && AppLogic.screen-viewer-input-enabled && !cursor-captured: Rectangle {
+        x: (parent.width - 250px) / 2;
+        y: status-bar-height + 20px;
+        width: 250px;
+        height: 36px;
+        background: #000000CC;
+        border-radius: Theme.radius-md;
+
+        Text {
+            width: parent.width;
+            height: parent.height;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            text: "Click to capture cursor";
+            font-size: 14px;
+            color: Theme.text;
         }
     }
 }

@@ -212,8 +212,10 @@ impl InputInjector for WindowsInputInjector {
         unsafe {
             // Get screen dimensions
             // SM_CXSCREEN = 0, SM_CYSCREEN = 1
-            self.screen_width = GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN);
-            self.screen_height = GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CYSCREEN);
+            self.screen_width =
+                GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN);
+            self.screen_height =
+                GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CYSCREEN);
             info!(
                 "Screen dimensions: {}x{}",
                 self.screen_width, self.screen_height
@@ -274,8 +276,12 @@ impl InputInjector for WindowsInputInjector {
                         (MouseButton::Right, false) => MOUSEEVENTF_RIGHTUP,
                         (MouseButton::Middle, true) => MOUSEEVENTF_MIDDLEDOWN,
                         (MouseButton::Middle, false) => MOUSEEVENTF_MIDDLEUP,
-                        (MouseButton::Back, true) | (MouseButton::Forward, true) => MOUSEEVENTF_XDOWN,
-                        (MouseButton::Back, false) | (MouseButton::Forward, false) => MOUSEEVENTF_XUP,
+                        (MouseButton::Back, true) | (MouseButton::Forward, true) => {
+                            MOUSEEVENTF_XDOWN
+                        }
+                        (MouseButton::Back, false) | (MouseButton::Forward, false) => {
+                            MOUSEEVENTF_XUP
+                        }
                         (MouseButton::Other(_), true) => MOUSEEVENTF_XDOWN,
                         (MouseButton::Other(_), false) => MOUSEEVENTF_XUP,
                     };
@@ -366,7 +372,9 @@ impl InputInjector for WindowsInputInjector {
         #[cfg(not(target_os = "windows"))]
         {
             let _ = event;
-            Err(Error::Screen("Windows input only available on Windows".into()))
+            Err(Error::Screen(
+                "Windows input only available on Windows".into(),
+            ))
         }
     }
 

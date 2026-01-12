@@ -5,7 +5,9 @@
 
 use crate::error::{Error, Result};
 use crate::iroh::blobs::{hash_file, verify_file_hash};
-use crate::iroh::browse::{browse_directory, get_browsable_roots, resolve_browse_path, validate_path};
+use crate::iroh::browse::{
+    browse_directory, get_browsable_roots, resolve_browse_path, validate_path,
+};
 use crate::iroh::endpoint::IrohEndpoint;
 use crate::iroh::protocol::{ControlMessage, DirectoryEntry, FileInfo, FileRequest, InputEvent};
 use crate::peers::TrustedPeer;
@@ -24,9 +26,7 @@ const CHUNK_SIZE: usize = 64 * 1024;
 #[derive(Debug, Clone)]
 pub enum TransferEvent {
     /// Transfer has started.
-    Started {
-        transfer_id: TransferId,
-    },
+    Started { transfer_id: TransferId },
     /// Progress update.
     Progress {
         transfer_id: TransferId,
@@ -40,18 +40,14 @@ pub enum TransferEvent {
         file: String,
     },
     /// Transfer completed successfully.
-    Complete {
-        transfer_id: TransferId,
-    },
+    Complete { transfer_id: TransferId },
     /// Transfer failed.
     Failed {
         transfer_id: TransferId,
         error: String,
     },
     /// Transfer was cancelled.
-    Cancelled {
-        transfer_id: TransferId,
-    },
+    Cancelled { transfer_id: TransferId },
 }
 
 /// Format bytes per second as human-readable speed.
@@ -129,7 +125,11 @@ pub async fn push_files(
         });
         total_size += metadata.len();
     }
-    info!("Files hashed: {} files, {} bytes total", files.len(), total_size);
+    info!(
+        "Files hashed: {} files, {} bytes total",
+        files.len(),
+        total_size
+    );
 
     // Parse peer node ID
     let node_id: NodeId = peer
@@ -159,14 +159,16 @@ pub async fn push_files(
         total_size,
     };
     conn.send(&offer).await?;
-    info!("Sent push offer with {} files, {} bytes", files.len(), total_size);
+    info!(
+        "Sent push offer with {} files, {} bytes",
+        files.len(),
+        total_size
+    );
 
     // Wait for response
     let response = conn.recv().await?;
     match response {
-        ControlMessage::PushResponse {
-            accepted: true, ..
-        } => {
+        ControlMessage::PushResponse { accepted: true, .. } => {
             info!("Push accepted by peer");
         }
         ControlMessage::PushResponse {
@@ -748,7 +750,8 @@ pub async fn handle_browse_request(
     };
 
     // Browse the directory with settings
-    let (path, entries) = match browse_directory(resolved_path.as_deref(), &roots, browse_settings) {
+    let (path, entries) = match browse_directory(resolved_path.as_deref(), &roots, browse_settings)
+    {
         Ok(result) => result,
         Err(e) => {
             // Send error response
@@ -788,18 +791,12 @@ pub async fn handle_incoming_pull(
 ) -> Result<TransferId> {
     // Extract pull request details
     let (transfer_id_str, file_requests) = match request {
-        ControlMessage::PullRequest {
-            transfer_id,
-            files,
-        } => (transfer_id, files),
+        ControlMessage::PullRequest { transfer_id, files } => (transfer_id, files),
         _ => return Err(Error::Iroh("expected PullRequest message".to_string())),
     };
 
     let transfer_id = TransferId(transfer_id_str.clone());
-    info!(
-        "Received pull request for {} files",
-        file_requests.len()
-    );
+    info!("Received pull request for {} files", file_requests.len());
 
     // Validate paths and prepare file info
     let roots = get_browsable_roots(allowed_paths);
@@ -818,8 +815,9 @@ pub async fn handle_incoming_pull(
                     // Hash the file
                     match hash_file(&canonical).await {
                         Ok(hash) => {
-                            let metadata = tokio::fs::metadata(&canonical).await
-                                .map_err(|e| Error::Io(format!("failed to read file metadata: {}", e)))?;
+                            let metadata = tokio::fs::metadata(&canonical).await.map_err(|e| {
+                                Error::Io(format!("failed to read file metadata: {}", e))
+                            })?;
 
                             let name = canonical
                                 .file_name()
@@ -867,10 +865,18 @@ pub async fn handle_incoming_pull(
         transfer_id: transfer_id_str.clone(),
         files: file_infos.clone(),
         granted: true,
-        reason: if errors.is_empty() { None } else { Some(format!("some files skipped: {}", errors.join("; "))) },
+        reason: if errors.is_empty() {
+            None
+        } else {
+            Some(format!("some files skipped: {}", errors.join("; ")))
+        },
     };
     conn.send(&response).await?;
-    info!("Pull granted for {} files, {} bytes", file_infos.len(), total_size);
+    info!(
+        "Pull granted for {} files, {} bytes",
+        file_infos.len(),
+        total_size
+    );
 
     // Notify start
     let _ = progress_tx
@@ -1021,18 +1027,26 @@ pub async fn browse_remote(
     // Wait for response
     let response = conn.recv().await?;
     match response {
-        ControlMessage::BrowseResponse { path, entries, error: None } => {
+        ControlMessage::BrowseResponse {
+            path,
+            entries,
+            error: None,
+        } => {
             info!("Browse succeeded: {} entries", entries.len());
             let _ = conn.close().await;
             Ok((path, entries))
         }
-        ControlMessage::BrowseResponse { error: Some(err), .. } => {
+        ControlMessage::BrowseResponse {
+            error: Some(err), ..
+        } => {
             let _ = conn.close().await;
             Err(Error::Browse(err))
         }
         _ => {
             let _ = conn.close().await;
-            Err(Error::Iroh("unexpected response to browse request".to_string()))
+            Err(Error::Iroh(
+                "unexpected response to browse request".to_string(),
+            ))
         }
     }
 }
@@ -1053,10 +1067,7 @@ pub enum ScreenStreamEvent {
         displays: Vec<protocol::DisplayInfo>,
     },
     /// Stream was rejected.
-    Rejected {
-        stream_id: String,
-        reason: String,
-    },
+    Rejected { stream_id: String, reason: String },
     /// A frame was received.
     FrameReceived {
         stream_id: String,
@@ -1064,10 +1075,7 @@ pub enum ScreenStreamEvent {
         data: Vec<u8>,
     },
     /// Stream ended.
-    Ended {
-        stream_id: String,
-        reason: String,
-    },
+    Ended { stream_id: String, reason: String },
     /// Error occurred.
     Error(String),
 }
@@ -1101,7 +1109,9 @@ pub async fn stream_screen_from_peer(
 ) -> Result<String> {
     // Check permissions
     if !peer.their_permissions.screen_view {
-        return Err(Error::Trust("peer does not allow screen viewing".to_string()));
+        return Err(Error::Trust(
+            "peer does not allow screen viewing".to_string(),
+        ));
     }
 
     // Parse peer node ID
@@ -1183,7 +1193,7 @@ pub async fn stream_screen_from_peer(
     }
 
     // Frame reception loop
-    let mut last_ack_sequence = 0u64;
+    let mut last_ack_sequence;
     let mut frames_since_ack = 0u32;
     const ACK_EVERY_N_FRAMES: u32 = 10;
 
@@ -1288,6 +1298,7 @@ pub async fn stream_screen_from_peer(
 /// This function is called by the background listener when a ScreenStreamRequest
 /// is received. It validates permissions, starts the screen capture, and sends
 /// frames to the remote peer.
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_screen_stream_request(
     conn: &mut crate::iroh::ControlConnection,
     stream_id: String,
@@ -1298,9 +1309,7 @@ pub async fn handle_screen_stream_request(
     peer: &TrustedPeer,
     screen_settings: &crate::config::ScreenStreamSettings,
 ) -> Result<()> {
-    use crate::screen::{
-        create_capture_backend, ZstdEncoder, FrameEncoder,
-    };
+    use crate::screen::{create_capture_backend, FrameEncoder, ZstdEncoder};
 
     // Check if streaming is enabled
     if !screen_settings.enabled {
@@ -1398,10 +1407,13 @@ pub async fn handle_screen_stream_request(
         accepted: true,
         reason: None,
         displays: display_infos,
-        compression: Some(actual_compression.clone()),
+        compression: Some(actual_compression),
     };
     conn.send(&response).await?;
-    info!("Screen stream {} accepted, starting capture on {}", stream_id, target_display);
+    info!(
+        "Screen stream {} accepted, starting capture on {}",
+        stream_id, target_display
+    );
 
     // Create encoder - use Zstd for good compression with reasonable speed
     // ~160KB per frame at 2560x1440 = ~40 Mbps at 30fps
@@ -1415,6 +1427,10 @@ pub async fn handle_screen_stream_request(
 
     // Create input injector if peer has control permission
     let mut input_handler: Option<Box<dyn crate::screen::InputInjector>> = None;
+    debug!(
+        "Peer {} permissions_granted: screen_view={}, screen_control={}",
+        peer.name, peer.permissions_granted.screen_view, peer.permissions_granted.screen_control
+    );
     if peer.permissions_granted.screen_control {
         match crate::screen::create_input_injector() {
             Ok(mut handler) => {
@@ -1429,6 +1445,8 @@ pub async fn handle_screen_stream_request(
                 warn!("Failed to create input backend: {}", e);
             }
         }
+    } else {
+        info!("Input injection disabled - peer does not have screen_control permission");
     }
 
     // Frame sending and message handling loop
@@ -1475,7 +1493,7 @@ pub async fn handle_screen_stream_request(
                     width: encoded.width,
                     height: encoded.height,
                     captured_at: capture_timestamp,
-                    compression: actual_compression.clone(),
+                    compression: actual_compression,
                     is_keyframe: true, // All frames are keyframes for now
                     size: encoded.data.len() as u32,
                 };
@@ -1554,16 +1572,14 @@ fn inject_input_event(
     handler: &mut dyn crate::screen::InputInjector,
     event: &InputEvent,
 ) -> crate::error::Result<()> {
-    use crate::screen::{RemoteInputEvent, MouseButton, KeyCode, KeyModifiers};
+    use crate::screen::{KeyCode, KeyModifiers, MouseButton, RemoteInputEvent};
 
     let remote_event = match event {
-        InputEvent::MouseMove { x, y } => {
-            RemoteInputEvent::MouseMove {
-                x: *x,
-                y: *y,
-                absolute: true,
-            }
-        }
+        InputEvent::MouseMove { x, y } => RemoteInputEvent::MouseMove {
+            x: *x,
+            y: *y,
+            absolute: true,
+        },
         InputEvent::MouseButton { button, pressed } => {
             let btn = match button {
                 0 => MouseButton::Left,
@@ -1571,12 +1587,20 @@ fn inject_input_event(
                 2 => MouseButton::Middle,
                 n => MouseButton::Other(*n),
             };
-            RemoteInputEvent::MouseButton { button: btn, pressed: *pressed }
+            RemoteInputEvent::MouseButton {
+                button: btn,
+                pressed: *pressed,
+            }
         }
-        InputEvent::MouseScroll { delta_x, delta_y } => {
-            RemoteInputEvent::MouseScroll { dx: *delta_x, dy: *delta_y }
-        }
-        InputEvent::Key { code, pressed, modifiers } => {
+        InputEvent::MouseScroll { delta_x, delta_y } => RemoteInputEvent::MouseScroll {
+            dx: *delta_x,
+            dy: *delta_y,
+        },
+        InputEvent::Key {
+            code,
+            pressed,
+            modifiers,
+        } => {
             // Convert USB HID code to our KeyCode enum
             // This is a simplified mapping - a full implementation would need
             // a comprehensive HID code table
@@ -1598,7 +1622,11 @@ fn inject_input_event(
                 caps_lock: false,
                 num_lock: false,
             };
-            RemoteInputEvent::Key { key, pressed: *pressed, modifiers: mods }
+            RemoteInputEvent::Key {
+                key,
+                pressed: *pressed,
+                modifiers: mods,
+            }
         }
     };
 

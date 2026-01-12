@@ -200,7 +200,7 @@ impl CrocOptions {
 /// Valid codes have the format: `number-word-word-word` (at least 2 hyphens).
 pub fn validate_croc_code(code: &str) -> bool {
     let parts: Vec<&str> = code.split('-').collect();
-    
+
     // Must have at least 3 parts (e.g., "7-alpha-beta")
     if parts.len() < 3 {
         return false;
@@ -212,7 +212,9 @@ pub fn validate_croc_code(code: &str) -> bool {
     }
 
     // Other parts should be non-empty words
-    parts[1..].iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_alphanumeric()))
+    parts[1..]
+        .iter()
+        .all(|p| !p.is_empty() && p.chars().all(|c| c.is_alphanumeric()))
 }
 
 #[cfg(test)]
@@ -224,7 +226,7 @@ mod tests {
         assert!(validate_croc_code("7-alpha-beta-gamma"));
         assert!(validate_croc_code("3-word-word"));
         assert!(validate_croc_code("123-a-b-c-d"));
-        
+
         assert!(!validate_croc_code("alpha-beta-gamma")); // no number
         assert!(!validate_croc_code("7-alpha")); // too few parts
         assert!(!validate_croc_code("7")); // no words
@@ -249,8 +251,7 @@ mod tests {
 
     #[test]
     fn test_receive_args() {
-        let opts = CrocOptions::new()
-            .with_overwrite(true);
+        let opts = CrocOptions::new().with_overwrite(true);
 
         let args = opts.to_receive_args();
         assert!(args.contains(&"--yes".to_string()));
@@ -275,4 +276,3 @@ mod tests {
         assert!(args.contains(&"--debug".to_string()));
     }
 }
-

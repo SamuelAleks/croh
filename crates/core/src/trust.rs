@@ -279,7 +279,9 @@ mod tests {
             "croh-trust-abc123.json"
         ));
         assert!(!TrustBundle::is_trust_bundle_filename("other-file.json"));
-        assert!(!TrustBundle::is_trust_bundle_filename("croh-trust-abc123.txt"));
+        assert!(!TrustBundle::is_trust_bundle_filename(
+            "croh-trust-abc123.txt"
+        ));
     }
 
     #[test]

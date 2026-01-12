@@ -52,7 +52,11 @@ pub async fn execute(config_path: Option<String>) -> Result<()> {
         info!(
             "Screen streaming enabled (max {}fps, input: {})",
             config.screen_stream.max_fps,
-            if config.screen_stream.allow_input { "allowed" } else { "disabled" }
+            if config.screen_stream.allow_input {
+                "allowed"
+            } else {
+                "disabled"
+            }
         );
         Some(handler)
     } else {
@@ -70,15 +74,15 @@ pub async fn execute(config_path: Option<String>) -> Result<()> {
 
     // Set up signal handlers for graceful shutdown
     let shutdown_state = state.clone();
-    
+
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
-        
+
         let mut sigterm = signal(SignalKind::terminate())?;
         let mut sigint = signal(SignalKind::interrupt())?;
         let mut sighup = signal(SignalKind::hangup())?;
-        
+
         let state_clone = shutdown_state.clone();
         tokio::spawn(async move {
             tokio::select! {
@@ -99,13 +103,13 @@ pub async fn execute(config_path: Option<String>) -> Result<()> {
                     return; // Don't shutdown on SIGHUP
                 }
             }
-            
+
             // Initiate shutdown
             let mut state = state_clone.write().await;
             state.running = false;
         });
     }
-    
+
     #[cfg(windows)]
     {
         let state_clone = shutdown_state.clone();
@@ -119,7 +123,7 @@ pub async fn execute(config_path: Option<String>) -> Result<()> {
     }
 
     info!("Daemon running. Press Ctrl+C to stop.");
-    
+
     // Write PID file
     let pid_file = platform::data_dir().join("daemon.pid");
     std::fs::write(&pid_file, std::process::id().to_string())?;
@@ -141,7 +145,7 @@ pub async fn execute(config_path: Option<String>) -> Result<()> {
 
     // Graceful shutdown
     info!("Initiating graceful shutdown...");
-    
+
     // Cancel any active transfers
     {
         let state_guard = state.read().await;
@@ -186,7 +190,7 @@ pub async fn execute(config_path: Option<String>) -> Result<()> {
 /// Check if the daemon is running by reading the PID file.
 pub fn is_daemon_running() -> Option<u32> {
     let pid_file = platform::data_dir().join("daemon.pid");
-    
+
     if !pid_file.exists() {
         return None;
     }
@@ -202,7 +206,7 @@ pub fn is_daemon_running() -> Option<u32> {
             .args(["-0", &pid.to_string()])
             .output()
             .ok()?;
-        
+
         if output.status.success() {
             return Some(pid);
         }
@@ -215,7 +219,7 @@ pub fn is_daemon_running() -> Option<u32> {
             .args(["/FI", &format!("PID eq {}", pid)])
             .output()
             .ok()?;
-        
+
         let stdout = String::from_utf8_lossy(&output.stdout);
         if stdout.contains(&pid.to_string()) {
             return Some(pid);

@@ -167,11 +167,7 @@ impl Transfer {
     }
 
     /// Create a new Iroh push transfer (send to trusted peer).
-    pub fn new_iroh_push(
-        files: Vec<String>,
-        peer_endpoint_id: String,
-        peer_name: String,
-    ) -> Self {
+    pub fn new_iroh_push(files: Vec<String>, peer_endpoint_id: String, peer_name: String) -> Self {
         Self {
             id: TransferId::new(),
             transfer_type: TransferType::IrohPush,
@@ -192,11 +188,7 @@ impl Transfer {
     }
 
     /// Create a new Iroh pull transfer (receive from trusted peer).
-    pub fn new_iroh_pull(
-        files: Vec<String>,
-        peer_endpoint_id: String,
-        peer_name: String,
-    ) -> Self {
+    pub fn new_iroh_pull(files: Vec<String>, peer_endpoint_id: String, peer_name: String) -> Self {
         Self {
             id: TransferId::new(),
             transfer_type: TransferType::IrohPull,
@@ -307,11 +299,10 @@ impl TransferManager {
         let mut transfers = self.transfers.write().await;
         transfers.retain(|_, t| {
             if t.status.is_terminal() {
-                t.completed_at.map_or(true, |completed| completed > cutoff)
+                t.completed_at.is_none_or(|completed| completed > cutoff)
             } else {
                 true
             }
         });
     }
 }
-

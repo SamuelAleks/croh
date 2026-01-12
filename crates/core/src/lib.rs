@@ -25,25 +25,32 @@ pub mod transfer_history;
 pub mod trust;
 
 // Re-export commonly used types
-pub use config::{BrowseSettings, CaptureBackend, Config, DndMode, GuestPolicy, RelayPreference, ScreenStreamSettings, SecurityPosture, WindowSize};
-pub use croc::{CrocOptions, CrocProcess, CrocProcessHandle, find_croc_executable, refresh_croc_cache};
+pub use chat::{
+    ChatConversation, ChatEvent, ChatHandler, ChatMessage, ChatStore, MessageId, MessageStatus,
+};
+pub use config::{
+    BrowseSettings, CaptureBackend, Config, DndMode, GuestPolicy, RelayPreference,
+    ScreenStreamSettings, SecurityPosture, WindowSize,
+};
+pub use croc::{
+    find_croc_executable, refresh_croc_cache, CrocOptions, CrocProcess, CrocProcessHandle,
+};
 pub use error::{Error, Result};
-pub use files::{format_size, format_duration, format_uptime, format_eta, get_disk_space};
+pub use files::{format_duration, format_eta, format_size, format_uptime, get_disk_space};
 pub use iroh::{
-    complete_trust_as_receiver, accept_trust_connections, HandshakeResult,
-    ControlConnection, ControlMessage, DirectoryEntry, FileRequest, Identity, IrohEndpoint, ALPN_CONTROL,
-    push_files, pull_files, handle_incoming_push, handle_incoming_pull, handle_browse_request, browse_remote, TransferEvent,
-    browse_directory, default_browsable_paths, get_browsable_roots,
-    run_speed_test, handle_speed_test_request, SpeedTestResult, DEFAULT_TEST_SIZE,
-    NodeAddr, NodeId, PeerAddress, RelayUrl,
-    stream_screen_from_peer, handle_screen_stream_request, ScreenStreamEvent,
+    accept_trust_connections, browse_directory, browse_remote, complete_trust_as_receiver,
+    default_browsable_paths, get_browsable_roots, handle_browse_request, handle_incoming_pull,
+    handle_incoming_push, handle_screen_stream_request, handle_speed_test_request, pull_files,
+    push_files, run_speed_test, stream_screen_from_peer, ControlConnection, ControlMessage,
+    DirectoryEntry, FileRequest, HandshakeResult, Identity, IrohEndpoint, NodeAddr, NodeId,
+    PeerAddress, RelayUrl, ScreenStreamEvent, SpeedTestResult, TransferEvent, ALPN_CONTROL,
+    DEFAULT_TEST_SIZE,
 };
 pub use networks::{NetworkSettings, NetworkStore, PeerNetwork};
 pub use peers::{PeerStore, Permissions, TrustedPeer};
 pub use transfer::{Transfer, TransferId, TransferManager, TransferStatus, TransferType};
 pub use transfer_history::TransferHistory;
 pub use trust::{Capability, PeerInfo, TrustBundle};
-pub use chat::{ChatEvent, ChatHandler, ChatMessage, ChatStore, ChatConversation, MessageId, MessageStatus};
 
 // Re-export serde_json for GUI use
 pub use serde_json;
@@ -52,4 +59,3 @@ pub use serde_json;
 pub fn generate_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
-

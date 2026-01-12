@@ -373,7 +373,9 @@ impl ChatSyncMessage {
             recipient_id,
             content: self.content.clone(),
             sent_at: Utc.timestamp_millis_opt(self.sent_at).unwrap(),
-            delivered_at: self.delivered_at.map(|t| Utc.timestamp_millis_opt(t).unwrap()),
+            delivered_at: self
+                .delivered_at
+                .map(|t| Utc.timestamp_millis_opt(t).unwrap()),
             read_at: self.read_at.map(|t| Utc.timestamp_millis_opt(t).unwrap()),
             status: if self.read_at.is_some() {
                 MessageStatus::Read
@@ -436,12 +438,8 @@ mod tests {
 
     #[test]
     fn test_message_is_outgoing() {
-        let msg = ChatMessage::new_outgoing(
-            "alice".to_string(),
-            "bob".to_string(),
-            "Hi".to_string(),
-            1,
-        );
+        let msg =
+            ChatMessage::new_outgoing("alice".to_string(), "bob".to_string(), "Hi".to_string(), 1);
 
         assert!(msg.is_outgoing("alice"));
         assert!(!msg.is_outgoing("bob"));

@@ -9,6 +9,7 @@ use std::time::Duration;
 pub const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Shorter timeout for operations expected to fail quickly.
+#[allow(dead_code)]
 pub const FAIL_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Initialize test logging with appropriate filters.

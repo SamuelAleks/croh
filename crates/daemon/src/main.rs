@@ -81,15 +81,8 @@ async fn main() -> Result<()> {
             info!("Receiving with code: {}", code);
             commands::receive::execute(&code).await
         }
-        Commands::Status => {
-            commands::status::execute().await
-        }
-        Commands::Peers => {
-            commands::peers::execute().await
-        }
-        Commands::Config { key, value } => {
-            commands::config::execute(key, value).await
-        }
+        Commands::Status => commands::status::execute().await,
+        Commands::Peers => commands::peers::execute().await,
+        Commands::Config { key, value } => commands::config::execute(key, value).await,
     }
 }
-

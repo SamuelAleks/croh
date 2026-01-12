@@ -104,7 +104,7 @@ impl DrmCapture {
     /// Check if DRM capture is available (can open device).
     pub async fn is_available() -> bool {
         // Check if we can read the DRM device
-        if !std::fs::metadata(DEFAULT_DRM_CARD).is_ok() {
+        if std::fs::metadata(DEFAULT_DRM_CARD).is_err() {
             return false;
         }
 
@@ -160,7 +160,10 @@ impl DrmCapture {
         // Release master to allow the compositor to continue functioning
         // This is crucial - without releasing master, the compositor would freeze
         if let Err(e) = device.release_master_lock() {
-            debug!("Failed to release DRM master (may not have been master): {:?}", e);
+            debug!(
+                "Failed to release DRM master (may not have been master): {:?}",
+                e
+            );
         }
 
         self.device = Some(device);
@@ -171,13 +174,14 @@ impl DrmCapture {
 
     /// Enumerate connected displays.
     fn enumerate_connectors(&mut self) -> Result<()> {
-        let device = self.device.as_ref().ok_or_else(|| {
-            Error::Screen("DRM device not open".into())
-        })?;
+        let device = self
+            .device
+            .as_ref()
+            .ok_or_else(|| Error::Screen("DRM device not open".into()))?;
 
-        let resources = device.resource_handles().map_err(|e| {
-            Error::Screen(format!("Failed to get DRM resources: {:?}", e))
-        })?;
+        let resources = device
+            .resource_handles()
+            .map_err(|e| Error::Screen(format!("Failed to get DRM resources: {:?}", e)))?;
 
         self.connectors.clear();
         self.displays.clear();
@@ -220,12 +224,12 @@ impl DrmCapture {
                         (
                             mode.size().0 as u32,
                             mode.size().1 as u32,
-                            (mode.vrefresh()) as u32,
+                            (mode.vrefresh()),
                         )
                     } else {
                         // No current mode, use first available
                         if let Some(mode) = connector.modes().first() {
-                            (mode.size().0 as u32, mode.size().1 as u32, mode.vrefresh() as u32)
+                            (mode.size().0 as u32, mode.size().1 as u32, mode.vrefresh())
                         } else {
                             continue;
                         }
@@ -236,7 +240,7 @@ impl DrmCapture {
             } else {
                 // No CRTC, use first available mode
                 if let Some(mode) = connector.modes().first() {
-                    (mode.size().0 as u32, mode.size().1 as u32, mode.vrefresh() as u32)
+                    (mode.size().0 as u32, mode.size().1 as u32, mode.vrefresh())
                 } else {
                     continue;
                 }
@@ -302,29 +306,31 @@ impl DrmCapture {
 
     /// Get the framebuffer for a CRTC.
     fn get_framebuffer(&self, crtc_handle: crtc::Handle) -> Result<framebuffer::Handle> {
-        let device = self.device.as_ref().ok_or_else(|| {
-            Error::Screen("DRM device not open".into())
-        })?;
+        let device = self
+            .device
+            .as_ref()
+            .ok_or_else(|| Error::Screen("DRM device not open".into()))?;
 
-        let crtc_info = device.get_crtc(crtc_handle).map_err(|e| {
-            Error::Screen(format!("Failed to get CRTC info: {:?}", e))
-        })?;
+        let crtc_info = device
+            .get_crtc(crtc_handle)
+            .map_err(|e| Error::Screen(format!("Failed to get CRTC info: {:?}", e)))?;
 
-        crtc_info.framebuffer().ok_or_else(|| {
-            Error::Screen("No framebuffer attached to CRTC".into())
-        })
+        crtc_info
+            .framebuffer()
+            .ok_or_else(|| Error::Screen("No framebuffer attached to CRTC".into()))
     }
 
     /// Export framebuffer as DMA-BUF and read pixels.
     fn capture_framebuffer(&self, fb_handle: framebuffer::Handle) -> Result<CapturedFrame> {
-        let device = self.device.as_ref().ok_or_else(|| {
-            Error::Screen("DRM device not open".into())
-        })?;
+        let device = self
+            .device
+            .as_ref()
+            .ok_or_else(|| Error::Screen("DRM device not open".into()))?;
 
         // Get framebuffer info
-        let fb_info = device.get_framebuffer(fb_handle).map_err(|e| {
-            Error::Screen(format!("Failed to get framebuffer info: {:?}", e))
-        })?;
+        let fb_info = device
+            .get_framebuffer(fb_handle)
+            .map_err(|e| Error::Screen(format!("Failed to get framebuffer info: {:?}", e)))?;
 
         let width = fb_info.size().0;
         let height = fb_info.size().1;
@@ -340,7 +346,7 @@ impl DrmCapture {
         // Determine pixel format based on depth/bpp
         let format = match (depth, bpp) {
             (24, 32) | (32, 32) => PixelFormat::Bgrx8, // Most common: XRGB8888 / ARGB8888
-            (24, 24) => PixelFormat::Bgra8, // BGR888
+            (24, 24) => PixelFormat::Bgra8,            // BGR888
             _ => {
                 warn!("Unknown framebuffer format: depth={}, bpp={}", depth, bpp);
                 PixelFormat::Bgrx8 // Assume common format
@@ -348,9 +354,9 @@ impl DrmCapture {
         };
 
         // Get the buffer handle from the framebuffer info
-        let buffer_handle = fb_info.buffer().ok_or_else(|| {
-            Error::Screen("Framebuffer has no buffer handle".into())
-        })?;
+        let buffer_handle = fb_info
+            .buffer()
+            .ok_or_else(|| Error::Screen("Framebuffer has no buffer handle".into()))?;
 
         // Convert buffer::Handle to u32 for the PRIME export
         let handle_u32: u32 = buffer_handle.into();
@@ -365,7 +371,8 @@ impl DrmCapture {
         // Fallback: try to map the framebuffer directly
         // This is more limited and may not work on all hardware
         Err(Error::Screen(
-            "Failed to capture framebuffer: DMA-BUF export not supported and no fallback available".into()
+            "Failed to capture framebuffer: DMA-BUF export not supported and no fallback available"
+                .into(),
         ))
     }
 
@@ -384,7 +391,8 @@ impl DrmCapture {
             device.as_fd(),
             handle,
             drm_ffi::DRM_CLOEXEC | drm_ffi::DRM_RDWR,
-        ).map_err(|e| Error::Screen(format!("PRIME_HANDLE_TO_FD failed: {:?}", e)))?;
+        )
+        .map_err(|e| Error::Screen(format!("PRIME_HANDLE_TO_FD failed: {:?}", e)))?;
 
         let fd = unsafe { OwnedFd::from_raw_fd(prime_result.fd) };
 
@@ -451,7 +459,8 @@ impl ScreenCapture for DrmCapture {
         // If we haven't enumerated yet, do it now
         if self.displays.is_empty() {
             // Create a temporary device to enumerate
-            let mut temp = Self::with_device(self.device_path.to_str().unwrap_or(DEFAULT_DRM_CARD)).await?;
+            let mut temp =
+                Self::with_device(self.device_path.to_str().unwrap_or(DEFAULT_DRM_CARD)).await?;
             temp.open_device()?;
             return Ok(temp.displays);
         }
@@ -467,13 +476,14 @@ impl ScreenCapture for DrmCapture {
         }
 
         // Find the requested display
-        let connector_info = self.connectors.get(display_id).ok_or_else(|| {
-            Error::Screen(format!("Display not found: {}", display_id))
-        })?;
+        let connector_info = self
+            .connectors
+            .get(display_id)
+            .ok_or_else(|| Error::Screen(format!("Display not found: {}", display_id)))?;
 
-        let crtc_handle = connector_info.crtc.ok_or_else(|| {
-            Error::Screen(format!("Display {} has no CRTC assigned", display_id))
-        })?;
+        let crtc_handle = connector_info
+            .crtc
+            .ok_or_else(|| Error::Screen(format!("Display {} has no CRTC assigned", display_id)))?;
 
         self.current_crtc = Some(crtc_handle);
         self.current_display = Some(display_id.to_string());
@@ -481,10 +491,7 @@ impl ScreenCapture for DrmCapture {
 
         info!(
             "DRM capture started for {} ({}x{} @ {}Hz)",
-            display_id,
-            connector_info.width,
-            connector_info.height,
-            connector_info.refresh_rate
+            display_id, connector_info.width, connector_info.height, connector_info.refresh_rate
         );
 
         Ok(())
@@ -495,9 +502,9 @@ impl ScreenCapture for DrmCapture {
             return Err(Error::Screen("Capture not started".into()));
         }
 
-        let crtc_handle = self.current_crtc.ok_or_else(|| {
-            Error::Screen("No CRTC selected".into())
-        })?;
+        let crtc_handle = self
+            .current_crtc
+            .ok_or_else(|| Error::Screen("No CRTC selected".into()))?;
 
         // Get current framebuffer
         let fb_handle = self.get_framebuffer(crtc_handle)?;

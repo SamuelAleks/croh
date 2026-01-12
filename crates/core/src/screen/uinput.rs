@@ -51,7 +51,7 @@ const ABS_Y: u16 = 0x01;
 const BTN_LEFT: u16 = 0x110;
 const BTN_RIGHT: u16 = 0x111;
 const BTN_MIDDLE: u16 = 0x112;
-const BTN_SIDE: u16 = 0x113;  // Back
+const BTN_SIDE: u16 = 0x113; // Back
 const BTN_EXTRA: u16 = 0x114; // Forward
 
 // uinput ioctl commands
@@ -77,7 +77,10 @@ struct InputEvent {
 impl Default for InputEvent {
     fn default() -> Self {
         Self {
-            time: libc::timeval { tv_sec: 0, tv_usec: 0 },
+            time: libc::timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
             type_: 0,
             code: 0,
             value: 0,
@@ -138,7 +141,7 @@ impl UinputInjector {
     pub fn new() -> Self {
         Self {
             file: None,
-            screen_width: 1920,  // Default, can be updated
+            screen_width: 1920, // Default, can be updated
             screen_height: 1080,
         }
     }
@@ -156,12 +159,16 @@ impl UinputInjector {
 
     /// Write an input event.
     fn write_event(&mut self, type_: u16, code: u16, value: i32) -> Result<()> {
-        let file = self.file.as_mut().ok_or_else(|| {
-            Error::Screen("uinput device not initialized".into())
-        })?;
+        let file = self
+            .file
+            .as_mut()
+            .ok_or_else(|| Error::Screen("uinput device not initialized".into()))?;
 
         let event = InputEvent {
-            time: libc::timeval { tv_sec: 0, tv_usec: 0 },
+            time: libc::timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
             type_,
             code,
             value,

@@ -5,10 +5,10 @@
 //!
 //! This module provides efficient conversion using FFmpeg's swscale library.
 
-use ffmpeg_the_third as ffmpeg;
 use ffmpeg::software::scaling::{Context as ScalingContext, Flags};
 use ffmpeg::util::format::Pixel;
 use ffmpeg::util::frame::video::Video as VideoFrame;
+use ffmpeg_the_third as ffmpeg;
 
 use crate::error::{Error, Result};
 use crate::screen::types::{CapturedFrame, PixelFormat};
@@ -39,12 +39,7 @@ unsafe impl Send for FrameScaler {}
 
 impl FrameScaler {
     /// Create a new scaler for the given dimensions and formats.
-    pub fn new(
-        width: u32,
-        height: u32,
-        src_format: Pixel,
-        dst_format: Pixel,
-    ) -> Result<Self> {
+    pub fn new(width: u32, height: u32, src_format: Pixel, dst_format: Pixel) -> Result<Self> {
         let context = ScalingContext::get(
             src_format,
             width,
@@ -275,8 +270,7 @@ mod tests {
     fn test_bgra_to_yuv420p() {
         ffmpeg::init().unwrap();
 
-        let mut scaler =
-            FrameScaler::new(100, 100, Pixel::BGRA, Pixel::YUV420P).unwrap();
+        let mut scaler = FrameScaler::new(100, 100, Pixel::BGRA, Pixel::YUV420P).unwrap();
 
         let frame = create_test_frame(100, 100, PixelFormat::Bgra8);
         let result = scaler.scale(&frame);

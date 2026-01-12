@@ -24,13 +24,7 @@ pub struct CapturedFrame {
 
 impl CapturedFrame {
     /// Create a new captured frame.
-    pub fn new(
-        width: u32,
-        height: u32,
-        format: PixelFormat,
-        data: Vec<u8>,
-        stride: u32,
-    ) -> Self {
+    pub fn new(width: u32, height: u32, format: PixelFormat, data: Vec<u8>, stride: u32) -> Self {
         Self {
             width,
             height,

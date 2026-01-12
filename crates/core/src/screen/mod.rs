@@ -61,14 +61,14 @@
 //! }
 //! ```
 
-mod types;
-mod session;
-mod events;
-mod manager;
-mod encoder;
 mod decoder;
-mod viewer;
+mod encoder;
+mod events;
 mod input;
+mod manager;
+mod session;
+mod types;
+mod viewer;
 
 // FFmpeg video encoding (optional feature)
 #[cfg(feature = "ffmpeg")]
@@ -94,14 +94,14 @@ mod dxgi;
 mod windows_input;
 
 // Re-export public types
-pub use types::*;
-pub use session::*;
-pub use events::*;
-pub use manager::*;
-pub use encoder::*;
 pub use decoder::*;
-pub use viewer::*;
+pub use encoder::*;
+pub use events::*;
 pub use input::*;
+pub use manager::*;
+pub use session::*;
+pub use types::*;
+pub use viewer::*;
 
 use crate::config::{CaptureBackend, ScreenStreamSettings};
 use crate::error::{Error, Result};
@@ -138,9 +138,9 @@ pub async fn create_capture_backend(
                 Err(Error::Screen("DRM capture only available on Linux".into()))
             }
         }
-        CaptureBackend::WlrScreencopy => {
-            Err(Error::Screen("wlroots screencopy not yet implemented".into()))
-        }
+        CaptureBackend::WlrScreencopy => Err(Error::Screen(
+            "wlroots screencopy not yet implemented".into(),
+        )),
         CaptureBackend::Portal => {
             #[cfg(target_os = "linux")]
             {
@@ -149,7 +149,9 @@ pub async fn create_capture_backend(
             }
             #[cfg(not(target_os = "linux"))]
             {
-                Err(Error::Screen("Portal capture only available on Linux".into()))
+                Err(Error::Screen(
+                    "Portal capture only available on Linux".into(),
+                ))
             }
         }
         CaptureBackend::X11 => {
@@ -169,7 +171,9 @@ pub async fn create_capture_backend(
             }
             #[cfg(not(target_os = "windows"))]
             {
-                Err(Error::Screen("DXGI capture only available on Windows".into()))
+                Err(Error::Screen(
+                    "DXGI capture only available on Windows".into(),
+                ))
             }
         }
     }
@@ -200,10 +204,15 @@ async fn auto_detect_backend() -> Result<Box<dyn ScreenCapture>> {
                                     return Ok(Box::new(capture));
                                 }
                                 Ok(None) => {
-                                    tracing::debug!("DRM capture returned no frame, trying next backend");
+                                    tracing::debug!(
+                                        "DRM capture returned no frame, trying next backend"
+                                    );
                                 }
                                 Err(e) => {
-                                    tracing::debug!("DRM capture failed test frame: {}, trying next backend", e);
+                                    tracing::debug!(
+                                        "DRM capture failed test frame: {}, trying next backend",
+                                        e
+                                    );
                                 }
                             }
                         }
@@ -256,7 +265,9 @@ async fn auto_detect_backend() -> Result<Box<dyn ScreenCapture>> {
 
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
-        Err(Error::Screen("Screen capture not supported on this platform".into()))
+        Err(Error::Screen(
+            "Screen capture not supported on this platform".into(),
+        ))
     }
 }
 

@@ -39,14 +39,25 @@ impl ChatStore {
             std::fs::create_dir_all(parent)?;
         }
 
-        let db = sled::open(&db_path).map_err(|e| Error::Chat(format!("failed to open chat database: {}", e)))?;
+        let db = sled::open(&db_path)
+            .map_err(|e| Error::Chat(format!("failed to open chat database: {}", e)))?;
 
         Ok(Self {
-            conversations: db.open_tree("conversations").map_err(|e| Error::Chat(e.to_string()))?,
-            messages: db.open_tree("messages").map_err(|e| Error::Chat(e.to_string()))?,
-            pending: db.open_tree("pending").map_err(|e| Error::Chat(e.to_string()))?,
-            message_index: db.open_tree("message_index").map_err(|e| Error::Chat(e.to_string()))?,
-            sync_states: db.open_tree("sync_states").map_err(|e| Error::Chat(e.to_string()))?,
+            conversations: db
+                .open_tree("conversations")
+                .map_err(|e| Error::Chat(e.to_string()))?,
+            messages: db
+                .open_tree("messages")
+                .map_err(|e| Error::Chat(e.to_string()))?,
+            pending: db
+                .open_tree("pending")
+                .map_err(|e| Error::Chat(e.to_string()))?,
+            message_index: db
+                .open_tree("message_index")
+                .map_err(|e| Error::Chat(e.to_string()))?,
+            sync_states: db
+                .open_tree("sync_states")
+                .map_err(|e| Error::Chat(e.to_string()))?,
             db,
         })
     }
@@ -55,14 +66,26 @@ impl ChatStore {
     #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
         let config = sled::Config::new().temporary(true);
-        let db = config.open().map_err(|e| Error::Chat(format!("failed to open in-memory database: {}", e)))?;
+        let db = config
+            .open()
+            .map_err(|e| Error::Chat(format!("failed to open in-memory database: {}", e)))?;
 
         Ok(Self {
-            conversations: db.open_tree("conversations").map_err(|e| Error::Chat(e.to_string()))?,
-            messages: db.open_tree("messages").map_err(|e| Error::Chat(e.to_string()))?,
-            pending: db.open_tree("pending").map_err(|e| Error::Chat(e.to_string()))?,
-            message_index: db.open_tree("message_index").map_err(|e| Error::Chat(e.to_string()))?,
-            sync_states: db.open_tree("sync_states").map_err(|e| Error::Chat(e.to_string()))?,
+            conversations: db
+                .open_tree("conversations")
+                .map_err(|e| Error::Chat(e.to_string()))?,
+            messages: db
+                .open_tree("messages")
+                .map_err(|e| Error::Chat(e.to_string()))?,
+            pending: db
+                .open_tree("pending")
+                .map_err(|e| Error::Chat(e.to_string()))?,
+            message_index: db
+                .open_tree("message_index")
+                .map_err(|e| Error::Chat(e.to_string()))?,
+            sync_states: db
+                .open_tree("sync_states")
+                .map_err(|e| Error::Chat(e.to_string()))?,
             db,
         })
     }
@@ -73,8 +96,9 @@ impl ChatStore {
     pub fn get_conversation(&self, peer_id: &str) -> Result<Option<ChatConversation>> {
         match self.conversations.get(peer_id.as_bytes()) {
             Ok(Some(data)) => {
-                let conv: ChatConversation = serde_json::from_slice(&data)
-                    .map_err(|e| Error::Chat(format!("failed to deserialize conversation: {}", e)))?;
+                let conv: ChatConversation = serde_json::from_slice(&data).map_err(|e| {
+                    Error::Chat(format!("failed to deserialize conversation: {}", e))
+                })?;
                 Ok(Some(conv))
             }
             Ok(None) => Ok(None),
@@ -83,7 +107,11 @@ impl ChatStore {
     }
 
     /// Get or create a conversation for a peer.
-    pub fn get_or_create_conversation(&self, peer_id: &str, peer_name: &str) -> Result<ChatConversation> {
+    pub fn get_or_create_conversation(
+        &self,
+        peer_id: &str,
+        peer_name: &str,
+    ) -> Result<ChatConversation> {
         match self.get_conversation(peer_id)? {
             Some(conv) => Ok(conv),
             None => {
@@ -108,16 +136,15 @@ impl ChatStore {
     pub fn list_conversations(&self) -> Result<Vec<ChatConversation>> {
         let mut conversations = Vec::new();
         for item in self.conversations.iter() {
-            let (_, data) = item.map_err(|e| Error::Chat(format!("failed to iterate conversations: {}", e)))?;
+            let (_, data) =
+                item.map_err(|e| Error::Chat(format!("failed to iterate conversations: {}", e)))?;
             let conv: ChatConversation = serde_json::from_slice(&data)
                 .map_err(|e| Error::Chat(format!("failed to deserialize conversation: {}", e)))?;
             conversations.push(conv);
         }
 
         // Sort by last message time, most recent first
-        conversations.sort_by(|a, b| {
-            b.last_message_at.cmp(&a.last_message_at)
-        });
+        conversations.sort_by(|a, b| b.last_message_at.cmp(&a.last_message_at));
 
         Ok(conversations)
     }
@@ -133,21 +160,27 @@ impl ChatStore {
         let prefix = format!("{}:", peer_id);
         let mut to_delete = Vec::new();
         for item in self.messages.scan_prefix(prefix.as_bytes()) {
-            let (key, _) = item.map_err(|e| Error::Chat(format!("failed to scan messages: {}", e)))?;
+            let (key, _) =
+                item.map_err(|e| Error::Chat(format!("failed to scan messages: {}", e)))?;
             to_delete.push(key);
         }
         for key in to_delete {
-            self.messages.remove(&key).map_err(|e| Error::Chat(format!("failed to delete message: {}", e)))?;
+            self.messages
+                .remove(&key)
+                .map_err(|e| Error::Chat(format!("failed to delete message: {}", e)))?;
         }
 
         // Delete pending messages
         let mut to_delete = Vec::new();
         for item in self.pending.scan_prefix(prefix.as_bytes()) {
-            let (key, _) = item.map_err(|e| Error::Chat(format!("failed to scan pending: {}", e)))?;
+            let (key, _) =
+                item.map_err(|e| Error::Chat(format!("failed to scan pending: {}", e)))?;
             to_delete.push(key);
         }
         for key in to_delete {
-            self.pending.remove(&key).map_err(|e| Error::Chat(format!("failed to delete pending: {}", e)))?;
+            self.pending
+                .remove(&key)
+                .map_err(|e| Error::Chat(format!("failed to delete pending: {}", e)))?;
         }
 
         // Delete sync state
@@ -220,7 +253,8 @@ impl ChatStore {
 
         // Collect all messages for this peer
         for item in self.messages.scan_prefix(prefix.as_bytes()) {
-            let (_, data) = item.map_err(|e| Error::Chat(format!("failed to scan messages: {}", e)))?;
+            let (_, data) =
+                item.map_err(|e| Error::Chat(format!("failed to scan messages: {}", e)))?;
             let msg: ChatMessage = serde_json::from_slice(&data)
                 .map_err(|e| Error::Chat(format!("failed to deserialize message: {}", e)))?;
 
@@ -254,7 +288,8 @@ impl ChatStore {
         let mut messages = Vec::new();
 
         for item in self.messages.scan_prefix(prefix.as_bytes()) {
-            let (_, data) = item.map_err(|e| Error::Chat(format!("failed to scan messages: {}", e)))?;
+            let (_, data) =
+                item.map_err(|e| Error::Chat(format!("failed to scan messages: {}", e)))?;
             let msg: ChatMessage = serde_json::from_slice(&data)
                 .map_err(|e| Error::Chat(format!("failed to deserialize message: {}", e)))?;
 
@@ -349,9 +384,11 @@ impl ChatStore {
         let mut messages = Vec::new();
 
         for item in self.pending.scan_prefix(prefix.as_bytes()) {
-            let (_, data) = item.map_err(|e| Error::Chat(format!("failed to scan pending: {}", e)))?;
-            let msg: ChatMessage = serde_json::from_slice(&data)
-                .map_err(|e| Error::Chat(format!("failed to deserialize pending message: {}", e)))?;
+            let (_, data) =
+                item.map_err(|e| Error::Chat(format!("failed to scan pending: {}", e)))?;
+            let msg: ChatMessage = serde_json::from_slice(&data).map_err(|e| {
+                Error::Chat(format!("failed to deserialize pending message: {}", e))
+            })?;
             messages.push(msg);
         }
 
@@ -366,7 +403,12 @@ impl ChatStore {
         let mut count = 0;
         for id in message_ids {
             let key = format!("{}:{}", peer_id, id);
-            if self.pending.remove(key.as_bytes()).map_err(|e| Error::Chat(e.to_string()))?.is_some() {
+            if self
+                .pending
+                .remove(key.as_bytes())
+                .map_err(|e| Error::Chat(e.to_string()))?
+                .is_some()
+            {
                 count += 1;
             }
         }
@@ -380,12 +422,15 @@ impl ChatStore {
         let mut to_delete = Vec::new();
 
         for item in self.pending.scan_prefix(prefix.as_bytes()) {
-            let (key, _) = item.map_err(|e| Error::Chat(format!("failed to scan pending: {}", e)))?;
+            let (key, _) =
+                item.map_err(|e| Error::Chat(format!("failed to scan pending: {}", e)))?;
             to_delete.push(key);
         }
 
         for key in to_delete {
-            self.pending.remove(&key).map_err(|e| Error::Chat(e.to_string()))?;
+            self.pending
+                .remove(&key)
+                .map_err(|e| Error::Chat(e.to_string()))?;
             count += 1;
         }
 
@@ -431,7 +476,8 @@ impl ChatStore {
     pub fn get_total_unread(&self) -> Result<u32> {
         let mut total = 0;
         for item in self.conversations.iter() {
-            let (_, data) = item.map_err(|e| Error::Chat(format!("failed to iterate conversations: {}", e)))?;
+            let (_, data) =
+                item.map_err(|e| Error::Chat(format!("failed to iterate conversations: {}", e)))?;
             let conv: ChatConversation = serde_json::from_slice(&data)
                 .map_err(|e| Error::Chat(format!("failed to deserialize conversation: {}", e)))?;
             total += conv.unread_count;
@@ -441,11 +487,21 @@ impl ChatStore {
 
     /// Flush the database to disk.
     pub fn flush(&self) -> Result<()> {
-        self.conversations.flush().map_err(|e| Error::Chat(e.to_string()))?;
-        self.messages.flush().map_err(|e| Error::Chat(e.to_string()))?;
-        self.pending.flush().map_err(|e| Error::Chat(e.to_string()))?;
-        self.message_index.flush().map_err(|e| Error::Chat(e.to_string()))?;
-        self.sync_states.flush().map_err(|e| Error::Chat(e.to_string()))?;
+        self.conversations
+            .flush()
+            .map_err(|e| Error::Chat(e.to_string()))?;
+        self.messages
+            .flush()
+            .map_err(|e| Error::Chat(e.to_string()))?;
+        self.pending
+            .flush()
+            .map_err(|e| Error::Chat(e.to_string()))?;
+        self.message_index
+            .flush()
+            .map_err(|e| Error::Chat(e.to_string()))?;
+        self.sync_states
+            .flush()
+            .map_err(|e| Error::Chat(e.to_string()))?;
         Ok(())
     }
 }
@@ -541,18 +597,24 @@ mod tests {
         store.store_message(&msg, our_id).unwrap();
 
         // Update to sent
-        store.update_message_status(msg.id.as_str(), MessageStatus::Sent).unwrap();
+        store
+            .update_message_status(msg.id.as_str(), MessageStatus::Sent)
+            .unwrap();
         let loaded = store.get_message(msg.id.as_str()).unwrap().unwrap();
         assert_eq!(loaded.status, MessageStatus::Sent);
 
         // Update to delivered
-        store.update_message_status(msg.id.as_str(), MessageStatus::Delivered).unwrap();
+        store
+            .update_message_status(msg.id.as_str(), MessageStatus::Delivered)
+            .unwrap();
         let loaded = store.get_message(msg.id.as_str()).unwrap().unwrap();
         assert_eq!(loaded.status, MessageStatus::Delivered);
         assert!(loaded.delivered_at.is_some());
 
         // Update to read
-        store.update_message_status(msg.id.as_str(), MessageStatus::Read).unwrap();
+        store
+            .update_message_status(msg.id.as_str(), MessageStatus::Read)
+            .unwrap();
         let loaded = store.get_message(msg.id.as_str()).unwrap().unwrap();
         assert_eq!(loaded.status, MessageStatus::Read);
         assert!(loaded.read_at.is_some());
@@ -575,7 +637,9 @@ mod tests {
         assert_eq!(pending[0].sequence, 1); // Ordered by sequence
 
         // Clear specific messages
-        store.clear_pending("peer1", &[msg1.id.0.clone()]).unwrap();
+        store
+            .clear_pending("peer1", std::slice::from_ref(&msg1.id.0))
+            .unwrap();
         let pending = store.get_pending("peer1").unwrap();
         assert_eq!(pending.len(), 1);
 

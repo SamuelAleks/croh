@@ -10,10 +10,10 @@
 //! - Message history synchronization
 //! - Offline message queuing
 
-pub mod types;
-pub mod store;
 pub mod handler;
+pub mod store;
+pub mod types;
 
-pub use types::*;
-pub use store::ChatStore;
 pub use handler::{ChatEvent, ChatHandler};
+pub use store::ChatStore;
+pub use types::*;

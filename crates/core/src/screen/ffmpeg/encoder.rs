@@ -5,10 +5,10 @@
 
 use std::time::Instant;
 
-use ffmpeg_the_third as ffmpeg;
 use ffmpeg::codec::encoder::video::Encoder as VideoEncoder;
 use ffmpeg::util::format::Pixel;
 use ffmpeg::util::frame::video::Video as VideoFrame;
+use ffmpeg_the_third as ffmpeg;
 use libc::EAGAIN;
 use tracing::{debug, info, warn};
 
@@ -18,8 +18,8 @@ use crate::screen::encoder::{EncodedFrame, FrameEncoder};
 use crate::screen::types::CapturedFrame;
 
 use super::hwaccel::{
-    detect_hardware_encoders, get_balanced_options, get_low_latency_options,
-    get_quality_options, DetectedEncoder, HardwareAccel,
+    detect_hardware_encoders, get_balanced_options, get_low_latency_options, get_quality_options,
+    DetectedEncoder, HardwareAccel,
 };
 use super::scaler::AutoScaler;
 
@@ -133,9 +133,9 @@ impl FfmpegEncoder {
         encoder.set_bit_rate(bitrate as usize);
         encoder.set_gop(30); // Keyframe every second at 30fps
 
-        let encoder = encoder
-            .open_with(opts)
-            .map_err(|e| Error::Screen(format!("Failed to open encoder {}: {}", detected.name, e)))?;
+        let encoder = encoder.open_with(opts).map_err(|e| {
+            Error::Screen(format!("Failed to open encoder {}: {}", detected.name, e))
+        })?;
 
         let scaler = if detected.hwaccel.is_hardware() {
             AutoScaler::for_hardware()
@@ -413,12 +413,19 @@ mod tests {
 
         match FfmpegEncoder::new(640, 480, ScreenQuality::Fast) {
             Ok(encoder) => {
-                println!("Created encoder: {} ({})", encoder.name(), encoder.encoder_name());
+                println!(
+                    "Created encoder: {} ({})",
+                    encoder.name(),
+                    encoder.encoder_name()
+                );
                 assert_eq!(encoder.width, 640);
                 assert_eq!(encoder.height, 480);
             }
             Err(e) => {
-                println!("Encoder creation failed (expected if no H.264 support): {}", e);
+                println!(
+                    "Encoder creation failed (expected if no H.264 support): {}",
+                    e
+                );
             }
         }
     }

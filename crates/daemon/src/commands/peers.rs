@@ -29,10 +29,7 @@ pub async fn execute() -> Result<()> {
                 .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
                 .unwrap_or_else(|| "Never".to_string());
 
-            println!(
-                "  {} - {}",
-                peer.name, peer.id
-            );
+            println!("  {} - {}", peer.name, peer.id);
             println!(
                 "    Endpoint: {}...{}",
                 &peer.endpoint_id[..8.min(peer.endpoint_id.len())],

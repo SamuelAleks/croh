@@ -34,9 +34,10 @@ use super::decoder::AutoDecoder;
 use super::events::RemoteInputEvent;
 
 /// Viewer connection state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewerState {
     /// Not connected to any stream.
+    #[default]
     Disconnected,
     /// Connecting to the remote peer.
     Connecting,
@@ -50,12 +51,6 @@ pub enum ViewerState {
     Disconnecting,
     /// Error state.
     Error,
-}
-
-impl Default for ViewerState {
-    fn default() -> Self {
-        Self::Disconnected
-    }
 }
 
 impl std::fmt::Display for ViewerState {
@@ -187,14 +182,9 @@ pub enum ViewerEvent {
         compression: ScreenCompression,
     },
     /// Stream rejected by remote.
-    StreamRejected {
-        stream_id: String,
-        reason: String,
-    },
+    StreamRejected { stream_id: String, reason: String },
     /// Stream ended.
-    StreamEnded {
-        reason: String,
-    },
+    StreamEnded { reason: String },
     /// Error occurred.
     Error(String),
 }
@@ -220,13 +210,9 @@ pub enum ViewerCommand {
     /// Disconnect from the current stream.
     Disconnect,
     /// Request display list from peer.
-    RequestDisplayList {
-        peer_id: String,
-    },
+    RequestDisplayList { peer_id: String },
     /// Switch to a different display.
-    SwitchDisplay {
-        display_id: String,
-    },
+    SwitchDisplay { display_id: String },
     /// Pause the stream.
     Pause,
     /// Resume the stream.
@@ -560,15 +546,14 @@ impl ScreenViewer {
 
     /// Handle connection established.
     pub fn on_connected(&mut self, displays: Vec<DisplayInfo>) {
-        info!(
-            "Connected to peer, {} displays available",
-            displays.len()
-        );
+        info!("Connected to peer, {} displays available", displays.len());
         self.displays = displays.clone();
         self.connected_at = Some(Instant::now());
         self.set_state(ViewerState::WaitingForFrame);
 
-        let _ = self.event_tx.try_send(ViewerEvent::DisplaysReceived(displays));
+        let _ = self
+            .event_tx
+            .try_send(ViewerEvent::DisplaysReceived(displays));
     }
 
     /// Handle stream accepted.
@@ -698,10 +683,7 @@ impl ScreenViewer {
 
     /// Get current statistics.
     pub fn stats(&self) -> ViewerStats {
-        let connected_duration = self
-            .connected_at
-            .map(|t| t.elapsed())
-            .unwrap_or_default();
+        let connected_duration = self.connected_at.map(|t| t.elapsed()).unwrap_or_default();
 
         let avg_bitrate_kbps = if connected_duration.as_secs() > 0 {
             (self.bytes_received * 8 / 1000) / connected_duration.as_secs()
@@ -725,7 +707,9 @@ impl ScreenViewer {
 
     /// Emit stats update event.
     pub fn emit_stats(&self) {
-        let _ = self.event_tx.try_send(ViewerEvent::StatsUpdated(self.stats()));
+        let _ = self
+            .event_tx
+            .try_send(ViewerEvent::StatsUpdated(self.stats()));
     }
 }
 
@@ -751,7 +735,9 @@ mod tests {
         let width = 10u32;
         let height = 10u32;
         let frame_data = vec![0u8; (width * height * 4) as usize];
-        viewer.on_frame_received(&frame_data, width, height, 0).unwrap();
+        viewer
+            .on_frame_received(&frame_data, width, height, 0)
+            .unwrap();
         assert_eq!(viewer.state(), ViewerState::Streaming);
 
         viewer.disconnect("user request".into());

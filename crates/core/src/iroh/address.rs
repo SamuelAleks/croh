@@ -100,8 +100,8 @@ impl PeerAddress {
     pub fn is_metadata_protected(&self) -> bool {
         match self {
             Self::Iroh { .. } => false, // Relay server sees IP
-            // Self::Tor { .. } => true,   // IP hidden by Tor network
-            // Self::I2P { .. } => true,   // IP hidden by I2P network
+                                        // Self::Tor { .. } => true,   // IP hidden by Tor network
+                                        // Self::I2P { .. } => true,   // IP hidden by I2P network
         }
     }
 

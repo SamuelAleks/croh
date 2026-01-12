@@ -71,7 +71,8 @@ fn main() -> Result<()> {
     let window_weak = window.as_weak();
     let last_size: Rc<RefCell<(u32, u32)>> = Rc::new(RefCell::new((initial_width, initial_height)));
     let last_change: Rc<RefCell<Option<Instant>>> = Rc::new(RefCell::new(None));
-    let saved_size: Rc<RefCell<(u32, u32)>> = Rc::new(RefCell::new((initial_width, initial_height)));
+    let saved_size: Rc<RefCell<(u32, u32)>> =
+        Rc::new(RefCell::new((initial_width, initial_height)));
 
     let size_check_timer = Timer::default();
     size_check_timer.start(
@@ -144,4 +145,3 @@ fn main() -> Result<()> {
     info!("Croc GUI shutting down");
     Ok(())
 }
-

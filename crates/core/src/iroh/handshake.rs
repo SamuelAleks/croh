@@ -61,12 +61,10 @@ pub async fn complete_trust_as_receiver(
     endpoint.add_node_addr(node_addr)?;
 
     // Connect to the sender
-    let mut conn = tokio::time::timeout(
-        HANDSHAKE_TIMEOUT,
-        endpoint.connect_to_node(sender_node_id),
-    )
-    .await
-    .map_err(|_| Error::Iroh("connection timeout".to_string()))??;
+    let mut conn =
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, endpoint.connect_to_node(sender_node_id))
+            .await
+            .map_err(|_| Error::Iroh("connection timeout".to_string()))??;
 
     info!("Connected to sender, sending TrustConfirm");
 
@@ -74,7 +72,10 @@ pub async fn complete_trust_as_receiver(
     // This allows the initiator to connect back to us later
     let our_relay_url = endpoint.relay_url().map(|u| u.to_string());
     if our_relay_url.is_some() {
-        info!("Including our relay URL in TrustConfirm: {:?}", our_relay_url);
+        info!(
+            "Including our relay URL in TrustConfirm: {:?}",
+            our_relay_url
+        );
     }
 
     // Send TrustConfirm with the nonce and our info (including relay URL)
@@ -94,8 +95,7 @@ pub async fn complete_trust_as_receiver(
         ControlMessage::TrustComplete => {
             info!(
                 "Trust handshake completed successfully with {} (guest: {})",
-                bundle.sender.name,
-                bundle.guest_mode
+                bundle.sender.name, bundle.guest_mode
             );
 
             // Create the peer from the bundle's sender info
@@ -111,10 +111,7 @@ pub async fn complete_trust_as_receiver(
                     direct_addrs: vec![],
                 };
 
-                info!(
-                    "Creating guest peer with {} hour duration",
-                    duration_hours
-                );
+                info!("Creating guest peer with {} hour duration", duration_hours);
 
                 TrustedPeer::new_guest(
                     bundle.sender.endpoint_id.clone(),
@@ -310,7 +307,14 @@ pub async fn accept_trust_connections(
                 );
 
                 // Handle the trust confirmation, passing the bundle so we know if it's a guest
-                match handle_trust_confirm(&mut conn, &their_peer_info, &their_permissions, pending_bundle).await {
+                match handle_trust_confirm(
+                    &mut conn,
+                    &their_peer_info,
+                    &their_permissions,
+                    pending_bundle,
+                )
+                .await
+                {
                     Ok(result) => {
                         info!("Trust established with {}", result.peer.name);
 

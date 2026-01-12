@@ -73,25 +73,19 @@ pub fn upload_dir() -> PathBuf {
 /// Open a path in the system file explorer.
 #[cfg(target_os = "windows")]
 pub fn open_in_explorer(path: &std::path::Path) -> std::io::Result<()> {
-    std::process::Command::new("explorer")
-        .arg(path)
-        .spawn()?;
+    std::process::Command::new("explorer").arg(path).spawn()?;
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
 pub fn open_in_explorer(path: &std::path::Path) -> std::io::Result<()> {
-    std::process::Command::new("xdg-open")
-        .arg(path)
-        .spawn()?;
+    std::process::Command::new("xdg-open").arg(path).spawn()?;
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
 pub fn open_in_explorer(path: &std::path::Path) -> std::io::Result<()> {
-    std::process::Command::new("open")
-        .arg(path)
-        .spawn()?;
+    std::process::Command::new("open").arg(path).spawn()?;
     Ok(())
 }
 
@@ -102,4 +96,3 @@ pub fn open_in_explorer(_path: &std::path::Path) -> std::io::Result<()> {
         "open_in_explorer not supported on this platform",
     ))
 }
-

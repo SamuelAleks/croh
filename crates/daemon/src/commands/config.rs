@@ -32,11 +32,7 @@ pub async fn execute(key: Option<String>, value: Option<String>) -> Result<()> {
                     println!("Set download_dir = {:?}", config.download_dir);
                 }
                 "default_relay" => {
-                    config.default_relay = if value.is_empty() {
-                        None
-                    } else {
-                        Some(value)
-                    };
+                    config.default_relay = if value.is_empty() { None } else { Some(value) };
                     config.save()?;
                     println!("Set default_relay = {:?}", config.default_relay);
                 }
@@ -50,4 +46,3 @@ pub async fn execute(key: Option<String>, value: Option<String>) -> Result<()> {
 
     Ok(())
 }
-

@@ -46,7 +46,7 @@ mod common;
 use croh_core::iroh::identity::Identity;
 use croh_core::iroh::protocol::{ControlMessage, ALPN_CONTROL};
 use croh_core::iroh::{hash_file, verify_file_hash};
-use croh_core::peers::{Permissions, PeerStore, TrustedPeer};
+use croh_core::peers::{PeerStore, Permissions, TrustedPeer};
 use croh_core::trust::TrustBundle;
 use tempfile::TempDir;
 

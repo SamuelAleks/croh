@@ -225,7 +225,12 @@ impl SecureInputHandler {
 
         // Check for blocked combinations
         if self.settings.block_dangerous_combos {
-            if let RemoteInputEvent::Key { key, pressed: true, modifiers } = event {
+            if let RemoteInputEvent::Key {
+                key,
+                pressed: true,
+                modifiers,
+            } = event
+            {
                 for combo in &self.settings.blocked_combos {
                     if combo.matches(*key, modifiers) {
                         tracing::warn!("Blocked dangerous key combo: {}", combo.description);

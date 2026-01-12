@@ -31,14 +31,13 @@ use windows::{
     Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE,
     Win32::Graphics::Direct3D11::{
         D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
-        D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_FLAG, D3D11_MAPPED_SUBRESOURCE,
-        D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+        D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_FLAG, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
+        D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
     },
     Win32::Graphics::Dxgi::{
         Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_MODE_ROTATION},
         CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGIOutput1,
-        IDXGIOutputDuplication, IDXGISurface, DXGI_OUTDUPL_FRAME_INFO,
-        DXGI_OUTPUT_DESC,
+        IDXGIOutputDuplication, IDXGISurface, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC,
     },
 };
 
@@ -83,9 +82,7 @@ impl DxgiCapture {
         #[cfg(target_os = "windows")]
         {
             // Try to create a DXGI factory to verify DXGI is available
-            unsafe {
-                CreateDXGIFactory1::<IDXGIFactory1>().is_ok()
-            }
+            unsafe { CreateDXGIFactory1::<IDXGIFactory1>().is_ok() }
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -165,13 +162,16 @@ impl DxgiCapture {
 
                 // Enumerate outputs for this adapter
                 while let Ok(output) = adapter.EnumOutputs(output_index) {
-                    let mut desc = DXGI_OUTPUT_DESC::default();
-                    output
-                        .GetDesc(&mut desc)
-                        .map_err(|e| Error::Screen(format!("Failed to get output desc: {:?}", e)))?;
+                    let desc = output.GetDesc().map_err(|e| {
+                        Error::Screen(format!("Failed to get output desc: {:?}", e))
+                    })?;
 
                     // Get display name
-                    let name_end = desc.DeviceName.iter().position(|&c| c == 0).unwrap_or(desc.DeviceName.len());
+                    let name_end = desc
+                        .DeviceName
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(desc.DeviceName.len());
                     let name = String::from_utf16_lossy(&desc.DeviceName[..name_end]);
 
                     let rect = desc.DesktopCoordinates;
@@ -214,27 +214,33 @@ impl DxgiCapture {
             let factory: IDXGIFactory1 = CreateDXGIFactory1()
                 .map_err(|e| Error::Screen(format!("Failed to create DXGI factory: {:?}", e)))?;
 
-            let adapter: IDXGIAdapter1 = factory.EnumAdapters1(adapter_idx)
-                .map_err(|e| Error::Screen(format!("Adapter {} not found: {:?}", adapter_idx, e)))?;
+            let adapter: IDXGIAdapter1 = factory.EnumAdapters1(adapter_idx).map_err(|e| {
+                Error::Screen(format!("Adapter {} not found: {:?}", adapter_idx, e))
+            })?;
 
-            let output: IDXGIOutput = adapter.EnumOutputs(output_idx)
+            let output: IDXGIOutput = adapter
+                .EnumOutputs(output_idx)
                 .map_err(|e| Error::Screen(format!("Output {} not found: {:?}", output_idx, e)))?;
 
             // Get output1 interface for DuplicateOutput
-            let output1: IDXGIOutput1 = output.cast()
+            let output1: IDXGIOutput1 = output
+                .cast()
                 .map_err(|e| Error::Screen(format!("Failed to get IDXGIOutput1: {:?}", e)))?;
 
-            let device = self.device.as_ref().ok_or_else(|| {
-                Error::Screen("D3D11 device not initialized".into())
-            })?;
+            let device = self
+                .device
+                .as_ref()
+                .ok_or_else(|| Error::Screen("D3D11 device not initialized".into()))?;
 
             // Create output duplication
-            let duplication = output1.DuplicateOutput(device)
+            let duplication = output1
+                .DuplicateOutput(device)
                 .map_err(|e| Error::Screen(format!("Failed to duplicate output: {:?}", e)))?;
 
             // Get output description for dimensions
-            let mut desc = DXGI_OUTPUT_DESC::default();
-            output.GetDesc(&mut desc).map_err(|e| Error::Screen(format!("Failed to get output desc: {:?}", e)))?;
+            let desc = output
+                .GetDesc()
+                .map_err(|e| Error::Screen(format!("Failed to get output desc: {:?}", e)))?;
 
             let width = (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left) as u32;
             let height = (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top) as u32;
@@ -257,7 +263,8 @@ impl DxgiCapture {
             };
 
             let mut staging: Option<ID3D11Texture2D> = None;
-            device.CreateTexture2D(&staging_desc, None, Some(&mut staging))
+            device
+                .CreateTexture2D(&staging_desc, None, Some(&mut staging))
                 .map_err(|e| Error::Screen(format!("Failed to create staging texture: {:?}", e)))?;
 
             self.duplication = Some(duplication);
@@ -274,15 +281,18 @@ impl DxgiCapture {
     /// Capture a frame using DXGI Desktop Duplication.
     fn capture_dxgi(&mut self) -> Result<CapturedFrame> {
         unsafe {
-            let duplication = self.duplication.as_ref().ok_or_else(|| {
-                Error::Screen("Output duplication not initialized".into())
-            })?;
-            let context = self.context.as_ref().ok_or_else(|| {
-                Error::Screen("D3D11 context not initialized".into())
-            })?;
-            let staging = self.staging_texture.as_ref().ok_or_else(|| {
-                Error::Screen("Staging texture not initialized".into())
-            })?;
+            let duplication = self
+                .duplication
+                .as_ref()
+                .ok_or_else(|| Error::Screen("Output duplication not initialized".into()))?;
+            let context = self
+                .context
+                .as_ref()
+                .ok_or_else(|| Error::Screen("D3D11 context not initialized".into()))?;
+            let staging = self
+                .staging_texture
+                .as_ref()
+                .ok_or_else(|| Error::Screen("Staging texture not initialized".into()))?;
 
             // Acquire next frame (100ms timeout)
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
@@ -294,12 +304,12 @@ impl DxgiCapture {
                 return Err(Error::Screen(format!("Failed to acquire frame: {:?}", e)));
             }
 
-            let desktop_resource = desktop_resource.ok_or_else(|| {
-                Error::Screen("No desktop resource acquired".into())
-            })?;
+            let desktop_resource = desktop_resource
+                .ok_or_else(|| Error::Screen("No desktop resource acquired".into()))?;
 
             // Get the texture from the resource
-            let desktop_texture: ID3D11Texture2D = desktop_resource.cast()
+            let desktop_texture: ID3D11Texture2D = desktop_resource
+                .cast()
                 .map_err(|e| Error::Screen(format!("Failed to get desktop texture: {:?}", e)))?;
 
             // Copy to staging texture
@@ -307,7 +317,8 @@ impl DxgiCapture {
 
             // Map the staging texture for CPU read
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            context.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+            context
+                .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
                 .map_err(|e| Error::Screen(format!("Failed to map staging texture: {:?}", e)))?;
 
             // Copy the data
@@ -377,12 +388,17 @@ impl ScreenCapture for DxgiCapture {
             // Parse display ID (format: "adapter:output")
             let parts: Vec<&str> = display_id.split(':').collect();
             if parts.len() != 2 {
-                return Err(Error::Screen(format!("Invalid display ID format: {}", display_id)));
+                return Err(Error::Screen(format!(
+                    "Invalid display ID format: {}",
+                    display_id
+                )));
             }
 
-            let adapter_idx: u32 = parts[0].parse()
+            let adapter_idx: u32 = parts[0]
+                .parse()
                 .map_err(|_| Error::Screen("Invalid adapter index".into()))?;
-            let output_idx: u32 = parts[1].parse()
+            let output_idx: u32 = parts[1]
+                .parse()
                 .map_err(|_| Error::Screen("Invalid output index".into()))?;
 
             // Initialize D3D11 if not already done

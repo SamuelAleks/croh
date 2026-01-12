@@ -187,7 +187,6 @@ pub struct TrustedPeer {
     pub address: PeerAddress,
 
     // === Guest peer fields ===
-
     /// Is this a temporary guest peer?
     /// Guest peers have limited permissions and auto-expire.
     #[serde(default)]
@@ -216,7 +215,6 @@ pub struct TrustedPeer {
     pub promotion_pending: bool,
 
     // === Legacy field for backwards compatibility ===
-
     /// Legacy relay URL field - migrated to `address` on load.
     /// This field is kept for backwards compatibility with existing peers.json files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -323,11 +321,7 @@ impl TrustedPeer {
     }
 
     /// Create a guest peer with default 24-hour duration and guest permissions.
-    pub fn new_guest_default(
-        endpoint_id: String,
-        name: String,
-        address: PeerAddress,
-    ) -> Self {
+    pub fn new_guest_default(endpoint_id: String, name: String, address: PeerAddress) -> Self {
         Self::new_guest(
             endpoint_id,
             name,

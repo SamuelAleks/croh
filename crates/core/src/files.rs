@@ -170,7 +170,9 @@ pub fn get_disk_space(path: &Path) -> (u64, u64) {
         let check_path = if path.exists() {
             path.to_path_buf()
         } else {
-            path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| path.to_path_buf())
+            path.parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| path.to_path_buf())
         };
 
         let c_path = match CString::new(check_path.to_string_lossy().as_bytes()) {
@@ -183,8 +185,8 @@ pub fn get_disk_space(path: &Path) -> (u64, u64) {
 
         if result == 0 {
             let stat = unsafe { stat.assume_init() };
-            let available = stat.f_bavail as u64 * stat.f_frsize as u64;
-            let total = stat.f_blocks as u64 * stat.f_frsize as u64;
+            let available = stat.f_bavail * stat.f_frsize;
+            let total = stat.f_blocks * stat.f_frsize;
             (available, total)
         } else {
             (0, 0)
@@ -198,10 +200,16 @@ pub fn get_disk_space(path: &Path) -> (u64, u64) {
         let check_path = if path.exists() {
             path.to_path_buf()
         } else {
-            path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| path.to_path_buf())
+            path.parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| path.to_path_buf())
         };
 
-        let wide: Vec<u16> = check_path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let wide: Vec<u16> = check_path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
 
         let mut free_bytes_available: u64 = 0;
         let mut total_bytes: u64 = 0;
@@ -238,7 +246,10 @@ mod tests {
     fn test_secure_filename() {
         assert_eq!(secure_filename("normal.txt"), "normal.txt");
         assert_eq!(secure_filename("../../../etc/passwd"), "passwd");
-        assert_eq!(secure_filename("file<with>bad:chars"), "file_with_bad_chars");
+        assert_eq!(
+            secure_filename("file<with>bad:chars"),
+            "file_with_bad_chars"
+        );
         // "..." becomes empty after stripping leading dots, so falls back to "unnamed"
         assert_eq!(secure_filename("..."), "unnamed");
         assert_eq!(secure_filename(""), "unnamed");
@@ -281,4 +292,3 @@ mod tests {
         assert_eq!(format_eta(4980), "~1h 23m");
     }
 }
-

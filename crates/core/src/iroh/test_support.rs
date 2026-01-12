@@ -156,7 +156,10 @@ impl TestEndpoint {
     }
 
     /// Wait for direct addresses to be available, with timeout.
-    pub async fn wait_for_direct_addresses(&self, timeout: Duration) -> Result<Vec<std::net::SocketAddr>> {
+    pub async fn wait_for_direct_addresses(
+        &self,
+        timeout: Duration,
+    ) -> Result<Vec<std::net::SocketAddr>> {
         let start = std::time::Instant::now();
         loop {
             let addrs = self.direct_addresses();
@@ -164,7 +167,9 @@ impl TestEndpoint {
                 return Ok(addrs);
             }
             if start.elapsed() > timeout {
-                return Err(Error::Iroh("timeout waiting for direct addresses".to_string()));
+                return Err(Error::Iroh(
+                    "timeout waiting for direct addresses".to_string(),
+                ));
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -439,8 +444,9 @@ mod tests {
         // Bob connects to Alice with timeout
         let conn_result = tokio::time::timeout(
             Duration::from_secs(10),
-            pair.bob.endpoint.connect(alice_node_id, ALPN_CONTROL)
-        ).await;
+            pair.bob.endpoint.connect(alice_node_id, ALPN_CONTROL),
+        )
+        .await;
 
         // Wait for accept
         let accept_result = accept_handle.await.unwrap();
@@ -448,11 +454,18 @@ mod tests {
         // Both should succeed
         assert!(conn_result.is_ok(), "Connection timed out");
         let conn_result = conn_result.unwrap();
-        assert!(conn_result.is_ok(), "Bob failed to connect to Alice: {:?}", conn_result.err());
+        assert!(
+            conn_result.is_ok(),
+            "Bob failed to connect to Alice: {:?}",
+            conn_result.err()
+        );
 
         assert!(accept_result.is_ok(), "Accept timed out");
         let accept_result = accept_result.unwrap();
-        assert!(accept_result.is_some(), "Alice didn't receive incoming connection");
+        assert!(
+            accept_result.is_some(),
+            "Alice didn't receive incoming connection"
+        );
 
         let incoming = accept_result.unwrap();
         let incoming_conn = incoming.await.unwrap();

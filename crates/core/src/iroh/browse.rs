@@ -36,9 +36,8 @@ fn matches_exclude_pattern(name: &str, patterns: &[String]) -> bool {
                 if name.contains(middle) {
                     return true;
                 }
-            } else if pattern.starts_with('*') {
+            } else if let Some(suffix) = pattern.strip_prefix('*') {
                 // *.txt - suffix match
-                let suffix = &pattern[1..];
                 if name.ends_with(suffix) {
                     return true;
                 }
@@ -85,7 +84,7 @@ pub fn default_browsable_paths() -> Vec<PathBuf> {
         }
 
         // /run/media/$USER is where modern Linux (udisks2) auto-mounts removable drives
-        if let Some(username) = std::env::var("USER").ok() {
+        if let Ok(username) = std::env::var("USER") {
             let run_media = PathBuf::from(format!("/run/media/{}", username));
             if run_media.exists() {
                 paths.push(run_media);
@@ -93,7 +92,7 @@ pub fn default_browsable_paths() -> Vec<PathBuf> {
         }
 
         // /media/$USER is another common auto-mount location (older systems)
-        if let Some(username) = std::env::var("USER").ok() {
+        if let Ok(username) = std::env::var("USER") {
             let media = PathBuf::from(format!("/media/{}", username));
             if media.exists() {
                 paths.push(media);
@@ -132,9 +131,9 @@ pub fn navigable_paths(allowed_paths: &[PathBuf]) -> Vec<PathBuf> {
 /// Returns the canonicalized path if valid.
 pub fn validate_path(path: &Path, allowed_paths: &[PathBuf]) -> Result<PathBuf> {
     // Canonicalize the requested path
-    let canonical = path.canonicalize().map_err(|e| {
-        Error::Browse(format!("Cannot access path '{}': {}", path.display(), e))
-    })?;
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| Error::Browse(format!("Cannot access path '{}': {}", path.display(), e)))?;
 
     // Check for path traversal attempts
     let path_str = path.to_string_lossy();
@@ -150,7 +149,11 @@ pub fn validate_path(path: &Path, allowed_paths: &[PathBuf]) -> Result<PathBuf> 
         };
 
         if canonical.starts_with(&allowed_canonical) {
-            debug!("Path {} validated under {}", canonical.display(), allowed_canonical.display());
+            debug!(
+                "Path {} validated under {}",
+                canonical.display(),
+                allowed_canonical.display()
+            );
             return Ok(canonical);
         }
     }
@@ -182,7 +185,8 @@ pub fn browse_directory(
 
             for root in allowed_paths {
                 if root.exists() {
-                    let name = root.file_name()
+                    let name = root
+                        .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or_else(|| root.to_str().unwrap_or("unknown"));
 
@@ -212,7 +216,11 @@ pub fn browse_directory(
             let mut entries = Vec::new();
 
             let read_dir = std::fs::read_dir(&validated).map_err(|e| {
-                Error::Browse(format!("Cannot read directory '{}': {}", validated.display(), e))
+                Error::Browse(format!(
+                    "Cannot read directory '{}': {}",
+                    validated.display(),
+                    e
+                ))
             })?;
 
             for entry in read_dir {
@@ -258,18 +266,20 @@ pub fn browse_directory(
                 entries.push(DirectoryEntry {
                     name,
                     is_dir: metadata.is_dir(),
-                    size: if metadata.is_file() { metadata.len() } else { 0 },
+                    size: if metadata.is_file() {
+                        metadata.len()
+                    } else {
+                        0
+                    },
                     modified,
                 });
             }
 
             // Sort: directories first, then alphabetically
-            entries.sort_by(|a, b| {
-                match (a.is_dir, b.is_dir) {
-                    (true, false) => std::cmp::Ordering::Less,
-                    (false, true) => std::cmp::Ordering::Greater,
-                    _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-                }
+            entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
             });
 
             Ok((validated.to_string_lossy().to_string(), entries))
@@ -280,12 +290,7 @@ pub fn browse_directory(
 /// Gets the browsable root paths, checking that they exist.
 pub fn get_browsable_roots(configured_paths: Option<&[PathBuf]>) -> Vec<PathBuf> {
     match configured_paths {
-        Some(paths) if !paths.is_empty() => {
-            paths.iter()
-                .filter(|p| p.exists())
-                .cloned()
-                .collect()
-        }
+        Some(paths) if !paths.is_empty() => paths.iter().filter(|p| p.exists()).cloned().collect(),
         _ => default_browsable_paths(),
     }
 }
@@ -322,9 +327,7 @@ pub fn resolve_browse_path(path: &str, allowed_paths: &[PathBuf]) -> Option<Path
     let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     if let Some(first) = parts.first() {
         for root in allowed_paths {
-            let root_name = root.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
+            let root_name = root.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
             if root_name == *first {
                 // Build the full path
@@ -389,7 +392,8 @@ mod tests {
         // Browse with hidden
         let mut settings_with_hidden = default_settings();
         settings_with_hidden.show_hidden = true;
-        let (_, entries) = browse_directory(Some(temp.path()), &allowed, &settings_with_hidden).unwrap();
+        let (_, entries) =
+            browse_directory(Some(temp.path()), &allowed, &settings_with_hidden).unwrap();
         assert_eq!(entries.len(), 4); // includes .hidden
 
         // Verify sorting: directory first
@@ -416,7 +420,8 @@ mod tests {
         // With exclusions
         let mut settings_exclude = default_settings();
         settings_exclude.exclude_patterns = vec!["*.tmp".to_string(), "node_modules".to_string()];
-        let (_, entries) = browse_directory(Some(temp.path()), &allowed, &settings_exclude).unwrap();
+        let (_, entries) =
+            browse_directory(Some(temp.path()), &allowed, &settings_exclude).unwrap();
         assert_eq!(entries.len(), 2); // only file.txt and src
         assert!(entries.iter().any(|e| e.name == "file.txt"));
         assert!(entries.iter().any(|e| e.name == "src"));
@@ -449,19 +454,34 @@ mod tests {
     #[test]
     fn test_glob_matching() {
         // Suffix match
-        assert!(matches_exclude_pattern("file.tmp", &vec!["*.tmp".to_string()]));
-        assert!(!matches_exclude_pattern("file.txt", &vec!["*.tmp".to_string()]));
+        assert!(matches_exclude_pattern("file.tmp", &["*.tmp".to_string()]));
+        assert!(!matches_exclude_pattern("file.txt", &["*.tmp".to_string()]));
 
         // Prefix match
-        assert!(matches_exclude_pattern("test_file.rs", &vec!["test_*".to_string()]));
-        assert!(!matches_exclude_pattern("file_test.rs", &vec!["test_*".to_string()]));
+        assert!(matches_exclude_pattern(
+            "test_file.rs",
+            &["test_*".to_string()]
+        ));
+        assert!(!matches_exclude_pattern(
+            "file_test.rs",
+            &["test_*".to_string()]
+        ));
 
         // Contains match
-        assert!(matches_exclude_pattern("my_temp_file", &vec!["*temp*".to_string()]));
+        assert!(matches_exclude_pattern(
+            "my_temp_file",
+            &["*temp*".to_string()]
+        ));
 
         // Exact match
-        assert!(matches_exclude_pattern("node_modules", &vec!["node_modules".to_string()]));
-        assert!(!matches_exclude_pattern("node_modules_backup", &vec!["node_modules".to_string()]));
+        assert!(matches_exclude_pattern(
+            "node_modules",
+            &["node_modules".to_string()]
+        ));
+        assert!(!matches_exclude_pattern(
+            "node_modules_backup",
+            &["node_modules".to_string()]
+        ));
     }
 
     #[test]

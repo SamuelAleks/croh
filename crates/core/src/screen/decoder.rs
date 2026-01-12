@@ -80,7 +80,7 @@ impl FrameDecoder for RawDecoder {
         // Check it's not PNG or ZRGB
         if data.len() >= 8 {
             // PNG signature
-            if &data[0..8] == &[137, 80, 78, 71, 13, 10, 26, 10] {
+            if data[0..8] == [137, 80, 78, 71, 13, 10, 26, 10] {
                 return false;
             }
             // ZRGB header
@@ -98,7 +98,10 @@ impl FrameDecoder for RawDecoder {
         if data.len() != expected_size {
             return Err(Error::Screen(format!(
                 "Raw frame size mismatch: expected {} bytes for {}x{}, got {}",
-                expected_size, width, height, data.len()
+                expected_size,
+                width,
+                height,
+                data.len()
             )));
         }
 
@@ -134,7 +137,7 @@ impl FrameDecoder for PngDecoder {
 
     fn can_decode(&self, data: &[u8]) -> bool {
         // Check for PNG signature
-        data.len() >= 8 && &data[0..8] == &[137, 80, 78, 71, 13, 10, 26, 10]
+        data.len() >= 8 && data[0..8] == [137, 80, 78, 71, 13, 10, 26, 10]
     }
 
     fn decode(&mut self, data: &[u8], _width: u32, _height: u32) -> Result<DecodedFrame> {
@@ -384,7 +387,7 @@ pub fn create_decoder(compression: ScreenCompression) -> Box<dyn FrameDecoder> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::screen::encoder::{PngEncoder, RawEncoder, ZstdEncoder, FrameEncoder};
+    use crate::screen::encoder::{FrameEncoder, PngEncoder, RawEncoder, ZstdEncoder};
     use crate::screen::types::{CapturedFrame, PixelFormat};
 
     fn create_test_frame(width: u32, height: u32) -> CapturedFrame {
@@ -397,10 +400,10 @@ mod tests {
         for y in 0..height {
             for x in 0..width {
                 let offset = ((y * stride) + (x * bytes_per_pixel)) as usize;
-                data[offset] = (x % 256) as u8;     // R
+                data[offset] = (x % 256) as u8; // R
                 data[offset + 1] = (y % 256) as u8; // G
-                data[offset + 2] = 128;              // B
-                data[offset + 3] = 255;              // A
+                data[offset + 2] = 128; // B
+                data[offset + 3] = 255; // A
             }
         }
 
@@ -414,7 +417,9 @@ mod tests {
         let mut decoder = RawDecoder::new();
 
         let encoded = encoder.encode(&frame).unwrap();
-        let decoded = decoder.decode(&encoded.data, encoded.width, encoded.height).unwrap();
+        let decoded = decoder
+            .decode(&encoded.data, encoded.width, encoded.height)
+            .unwrap();
 
         assert_eq!(decoded.width, 100);
         assert_eq!(decoded.height, 100);
@@ -431,7 +436,9 @@ mod tests {
         let encoded = encoder.encode(&frame).unwrap();
         assert!(decoder.can_decode(&encoded.data));
 
-        let decoded = decoder.decode(&encoded.data, encoded.width, encoded.height).unwrap();
+        let decoded = decoder
+            .decode(&encoded.data, encoded.width, encoded.height)
+            .unwrap();
 
         assert_eq!(decoded.width, 100);
         assert_eq!(decoded.height, 100);
@@ -448,7 +455,9 @@ mod tests {
         let encoded = encoder.encode(&frame).unwrap();
         assert!(decoder.can_decode(&encoded.data));
 
-        let decoded = decoder.decode(&encoded.data, encoded.width, encoded.height).unwrap();
+        let decoded = decoder
+            .decode(&encoded.data, encoded.width, encoded.height)
+            .unwrap();
 
         assert_eq!(decoded.width, 100);
         assert_eq!(decoded.height, 100);

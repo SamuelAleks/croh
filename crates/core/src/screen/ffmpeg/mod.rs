@@ -30,15 +30,15 @@
 //! - Zero lookahead (no buffering for rate control)
 //! - Sliced threading (encode parts of frame in parallel)
 
+mod decoder;
+mod encoder;
 mod hwaccel;
 mod scaler;
-mod encoder;
-mod decoder;
 
+pub use decoder::FfmpegDecoder;
+pub use encoder::FfmpegEncoder;
 pub use hwaccel::{detect_hardware_encoders, DetectedEncoder, HardwareAccel};
 pub use scaler::{AutoScaler, FrameScaler};
-pub use encoder::FfmpegEncoder;
-pub use decoder::FfmpegDecoder;
 
 use ffmpeg_the_third as ffmpeg;
 

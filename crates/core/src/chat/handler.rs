@@ -23,37 +23,19 @@ pub enum ChatEvent {
         message: ChatMessage,
     },
     /// Message delivery confirmed by peer.
-    MessageDelivered {
-        message_id: String,
-    },
+    MessageDelivered { message_id: String },
     /// Message read by peer.
-    MessageRead {
-        message_id: String,
-    },
+    MessageRead { message_id: String },
     /// Message failed to send.
-    MessageFailed {
-        message_id: String,
-        error: String,
-    },
+    MessageFailed { message_id: String, error: String },
     /// Peer typing state changed.
-    TypingChanged {
-        peer_id: String,
-        is_typing: bool,
-    },
+    TypingChanged { peer_id: String, is_typing: bool },
     /// Conversation was updated (new message, unread count, etc.).
-    ConversationUpdated {
-        conversation: ChatConversation,
-    },
+    ConversationUpdated { conversation: ChatConversation },
     /// History sync completed.
-    SyncCompleted {
-        peer_id: String,
-        count: usize,
-    },
+    SyncCompleted { peer_id: String, count: usize },
     /// Pending messages were flushed after peer came online.
-    PendingFlushed {
-        peer_id: String,
-        count: usize,
-    },
+    PendingFlushed { peer_id: String, count: usize },
 }
 
 /// Handler for chat protocol operations.
@@ -96,7 +78,9 @@ impl ChatHandler {
     ) -> Result<(ChatMessage, Vec<ChatEvent>)> {
         // Validate content
         if content.is_empty() {
-            return Err(crate::error::Error::Chat("message content cannot be empty".to_string()));
+            return Err(crate::error::Error::Chat(
+                "message content cannot be empty".to_string(),
+            ));
         }
         if content.len() > ChatMessage::MAX_CONTENT_LENGTH {
             return Err(crate::error::Error::Chat(format!(
@@ -162,11 +146,7 @@ impl ChatHandler {
     }
 
     /// Send a typing indicator to a peer.
-    pub async fn send_typing(
-        &self,
-        conn: &mut ControlConnection,
-        is_typing: bool,
-    ) -> Result<()> {
+    pub async fn send_typing(&self, conn: &mut ControlConnection, is_typing: bool) -> Result<()> {
         let msg = ControlMessage::ChatTyping { is_typing };
         conn.send(&msg).await
     }
@@ -220,7 +200,9 @@ impl ChatHandler {
         self.store.store_message(&message, &self.our_endpoint_id)?;
 
         // Get or create conversation and update it
-        let mut conversation = self.store.get_or_create_conversation(sender_id, sender_name)?;
+        let mut conversation = self
+            .store
+            .get_or_create_conversation(sender_id, sender_name)?;
         conversation.on_message_received(&message);
         self.store.upsert_conversation(&conversation)?;
 
@@ -228,9 +210,7 @@ impl ChatHandler {
             peer_id: sender_id.to_string(),
             message: message.clone(),
         });
-        events.push(ChatEvent::ConversationUpdated {
-            conversation,
-        });
+        events.push(ChatEvent::ConversationUpdated { conversation });
 
         Ok(events)
     }
@@ -240,10 +220,11 @@ impl ChatHandler {
         let mut events = Vec::new();
 
         for id in message_ids {
-            if self.store.update_message_status(&id, MessageStatus::Delivered)? {
-                events.push(ChatEvent::MessageDelivered {
-                    message_id: id,
-                });
+            if self
+                .store
+                .update_message_status(&id, MessageStatus::Delivered)?
+            {
+                events.push(ChatEvent::MessageDelivered { message_id: id });
             }
         }
 
@@ -251,14 +232,16 @@ impl ChatHandler {
     }
 
     /// Handle read receipts from a peer.
-    pub fn handle_read(&self, message_ids: Vec<String>, _up_to_sequence: u64) -> Result<Vec<ChatEvent>> {
+    pub fn handle_read(
+        &self,
+        message_ids: Vec<String>,
+        _up_to_sequence: u64,
+    ) -> Result<Vec<ChatEvent>> {
         let mut events = Vec::new();
 
         for id in message_ids {
             if self.store.update_message_status(&id, MessageStatus::Read)? {
-                events.push(ChatEvent::MessageRead {
-                    message_id: id,
-                });
+                events.push(ChatEvent::MessageRead { message_id: id });
             }
         }
 
@@ -266,7 +249,12 @@ impl ChatHandler {
     }
 
     /// Handle typing indicator from a peer.
-    pub fn handle_typing(&self, peer_id: &str, peer_name: &str, is_typing: bool) -> Result<Vec<ChatEvent>> {
+    pub fn handle_typing(
+        &self,
+        peer_id: &str,
+        peer_name: &str,
+        is_typing: bool,
+    ) -> Result<Vec<ChatEvent>> {
         let mut events = Vec::new();
 
         // Update conversation
@@ -278,12 +266,11 @@ impl ChatHandler {
                 peer_id: peer_id.to_string(),
                 is_typing,
             });
-            events.push(ChatEvent::ConversationUpdated {
-                conversation,
-            });
+            events.push(ChatEvent::ConversationUpdated { conversation });
         } else if is_typing {
             // Create conversation if needed when typing starts
-            let mut conversation = ChatConversation::new(peer_id.to_string(), peer_name.to_string());
+            let mut conversation =
+                ChatConversation::new(peer_id.to_string(), peer_name.to_string());
             conversation.set_typing(true);
             self.store.upsert_conversation(&conversation)?;
 
@@ -291,9 +278,7 @@ impl ChatHandler {
                 peer_id: peer_id.to_string(),
                 is_typing: true,
             });
-            events.push(ChatEvent::ConversationUpdated {
-                conversation,
-            });
+            events.push(ChatEvent::ConversationUpdated { conversation });
         }
 
         Ok(events)
@@ -309,7 +294,8 @@ impl ChatHandler {
         limit: u32,
     ) -> Result<()> {
         // Get the last received sequence for this peer
-        let after_sequence = self.store
+        let after_sequence = self
+            .store
             .get_sync_state(peer_id)?
             .map(|s| s.last_received_sequence)
             .unwrap_or(0);
@@ -330,11 +316,9 @@ impl ChatHandler {
         limit: u32,
     ) -> Result<()> {
         // Get messages we've sent to this peer after the given sequence
-        let messages = self.store.get_messages_after_sequence(
-            peer_id,
-            after_sequence,
-            limit as usize,
-        )?;
+        let messages =
+            self.store
+                .get_messages_after_sequence(peer_id, after_sequence, limit as usize)?;
 
         // Filter to only messages we sent
         let our_messages: Vec<_> = messages
@@ -388,7 +372,8 @@ impl ChatHandler {
         }
 
         // Update sync state
-        let mut sync_state = self.store
+        let mut sync_state = self
+            .store
             .get_sync_state(peer_id)?
             .unwrap_or_else(|| crate::chat::types::SyncState::new(peer_id.to_string()));
         sync_state.on_received(max_sequence);
@@ -436,7 +421,8 @@ impl ChatHandler {
             match conn.send(&protocol_msg).await {
                 Ok(()) => {
                     // Update status to sent
-                    self.store.update_message_status(&msg.id.0, MessageStatus::Sent)?;
+                    self.store
+                        .update_message_status(&msg.id.0, MessageStatus::Sent)?;
                     sent_ids.push(msg.id.0.clone());
                 }
                 Err(e) => {
@@ -551,7 +537,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0], ChatEvent::MessageReceived { peer_id, .. } if peer_id == "peer1"));
+        assert!(
+            matches!(&events[0], ChatEvent::MessageReceived { peer_id, .. } if peer_id == "peer1")
+        );
         assert!(matches!(&events[1], ChatEvent::ConversationUpdated { .. }));
 
         // Check conversation was created
@@ -604,14 +592,26 @@ mod tests {
 
         // Set typing
         let events = handler.handle_typing("peer1", "Peer One", true).unwrap();
-        assert!(events.iter().any(|e| matches!(e, ChatEvent::TypingChanged { is_typing: true, .. })));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            ChatEvent::TypingChanged {
+                is_typing: true,
+                ..
+            }
+        )));
 
         let conv = handler.get_conversation("peer1").unwrap().unwrap();
         assert!(conv.peer_is_typing);
 
         // Clear typing
         let events = handler.handle_typing("peer1", "Peer One", false).unwrap();
-        assert!(events.iter().any(|e| matches!(e, ChatEvent::TypingChanged { is_typing: false, .. })));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            ChatEvent::TypingChanged {
+                is_typing: false,
+                ..
+            }
+        )));
 
         let conv = handler.get_conversation("peer1").unwrap().unwrap();
         assert!(!conv.peer_is_typing);

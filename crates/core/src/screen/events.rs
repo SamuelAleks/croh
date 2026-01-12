@@ -89,9 +89,7 @@ pub enum StreamEvent {
     },
 
     /// Available displays changed
-    DisplaysChanged {
-        displays: Vec<Display>,
-    },
+    DisplaysChanged { displays: Vec<Display> },
 }
 
 /// Reason for dropping a frame.
@@ -163,10 +161,7 @@ pub enum RemoteInputEvent {
     },
 
     /// Mouse button press/release
-    MouseButton {
-        button: MouseButton,
-        pressed: bool,
-    },
+    MouseButton { button: MouseButton, pressed: bool },
 
     /// Mouse wheel scroll
     MouseScroll {
@@ -187,9 +182,7 @@ pub enum RemoteInputEvent {
     },
 
     /// Text input (for IME and text fields)
-    TextInput {
-        text: String,
-    },
+    TextInput { text: String },
 }
 
 /// Mouse button identifiers.
@@ -208,44 +201,125 @@ pub enum MouseButton {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyCode {
     // Letters
-    A, B, C, D, E, F, G, H, I, J, K, L, M,
-    N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
+    A,
+    B,
+    C,
+    D,
+    E,
+    F,
+    G,
+    H,
+    I,
+    J,
+    K,
+    L,
+    M,
+    N,
+    O,
+    P,
+    Q,
+    R,
+    S,
+    T,
+    U,
+    V,
+    W,
+    X,
+    Y,
+    Z,
 
     // Numbers
-    Key0, Key1, Key2, Key3, Key4, Key5, Key6, Key7, Key8, Key9,
+    Key0,
+    Key1,
+    Key2,
+    Key3,
+    Key4,
+    Key5,
+    Key6,
+    Key7,
+    Key8,
+    Key9,
 
     // Function keys
-    F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
 
     // Modifiers
-    LeftShift, RightShift,
-    LeftControl, RightControl,
-    LeftAlt, RightAlt,
-    LeftSuper, RightSuper,
+    LeftShift,
+    RightShift,
+    LeftControl,
+    RightControl,
+    LeftAlt,
+    RightAlt,
+    LeftSuper,
+    RightSuper,
 
     // Navigation
-    Up, Down, Left, Right,
-    Home, End, PageUp, PageDown,
-    Insert, Delete,
+    Up,
+    Down,
+    Left,
+    Right,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Insert,
+    Delete,
 
     // Editing
-    Backspace, Tab, Return, Escape, Space,
+    Backspace,
+    Tab,
+    Return,
+    Escape,
+    Space,
 
     // Punctuation
-    Comma, Period, Slash, Backslash,
-    Semicolon, Apostrophe,
-    LeftBracket, RightBracket,
-    Minus, Equals, Grave,
+    Comma,
+    Period,
+    Slash,
+    Backslash,
+    Semicolon,
+    Apostrophe,
+    LeftBracket,
+    RightBracket,
+    Minus,
+    Equals,
+    Grave,
 
     // Numpad
-    Numpad0, Numpad1, Numpad2, Numpad3, Numpad4,
-    Numpad5, Numpad6, Numpad7, Numpad8, Numpad9,
-    NumpadAdd, NumpadSubtract, NumpadMultiply, NumpadDivide,
-    NumpadDecimal, NumpadEnter,
+    Numpad0,
+    Numpad1,
+    Numpad2,
+    Numpad3,
+    Numpad4,
+    Numpad5,
+    Numpad6,
+    Numpad7,
+    Numpad8,
+    Numpad9,
+    NumpadAdd,
+    NumpadSubtract,
+    NumpadMultiply,
+    NumpadDivide,
+    NumpadDecimal,
+    NumpadEnter,
     NumLock,
 
     // Other
-    CapsLock, ScrollLock, PrintScreen, Pause,
+    CapsLock,
+    ScrollLock,
+    PrintScreen,
+    Pause,
     Menu,
 
     /// Unknown or platform-specific key

@@ -124,10 +124,7 @@ impl BlobStore {
         }
 
         // Add suffix to make unique
-        let stem = base
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("file");
+        let stem = base.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
         let ext = base.extension().and_then(|s| s.to_str()).unwrap_or("");
 
         for i in 1..1000 {
@@ -161,9 +158,7 @@ mod tests {
     async fn test_hash_file() {
         let temp_dir = TempDir::new().unwrap();
         let test_file = temp_dir.path().join("test.txt");
-        tokio::fs::write(&test_file, b"hello world")
-            .await
-            .unwrap();
+        tokio::fs::write(&test_file, b"hello world").await.unwrap();
 
         let hash = hash_file(&test_file).await.unwrap();
         assert!(!hash.is_empty());
@@ -178,9 +173,7 @@ mod tests {
     async fn test_verify_file_hash() {
         let temp_dir = TempDir::new().unwrap();
         let test_file = temp_dir.path().join("test.txt");
-        tokio::fs::write(&test_file, b"hello world")
-            .await
-            .unwrap();
+        tokio::fs::write(&test_file, b"hello world").await.unwrap();
 
         let hash = hash_file(&test_file).await.unwrap();
 

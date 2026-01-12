@@ -4,8 +4,8 @@ use anyhow::Result;
 use croh_core::{
     complete_trust_as_receiver,
     croc::{CrocEvent, CrocProcess, Progress},
-    Config, CrocOptions, Identity, IrohEndpoint, PeerStore,
     trust::TrustBundle,
+    Config, CrocOptions, Identity, IrohEndpoint, PeerStore,
 };
 use std::path::PathBuf;
 use tracing::{debug, error, info, warn};
@@ -111,7 +111,7 @@ pub async fn execute(code: &str) -> Result<()> {
 }
 
 /// Check if a received file is a trust bundle.
-async fn check_for_trust_bundle(path: &PathBuf) -> Option<TrustBundle> {
+async fn check_for_trust_bundle(path: &std::path::Path) -> Option<TrustBundle> {
     // Check filename first
     if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
         if !TrustBundle::is_trust_bundle_filename(filename) {

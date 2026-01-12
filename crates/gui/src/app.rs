@@ -1,19 +1,22 @@
 //! Application state and callback handling.
 
 use croh_core::{
+    browse_remote,
     config::Theme,
-    croc::{find_croc_executable, refresh_croc_cache, Curve, CrocEvent, CrocOptions, CrocProcess, HashAlgorithm},
-    files, platform, Config, ControlMessage, FileRequest, Identity, IrohEndpoint, NetworkStore, PeerAddress, PeerInfo, PeerStore, Permissions,
-    Transfer, TransferId, TransferEvent, TransferHistory, TransferManager, TransferStatus, TransferType,
-    TrustedPeer, TrustBundle, push_files, pull_files, handle_incoming_push, handle_incoming_pull, handle_browse_request, browse_remote, default_browsable_paths,
-    NodeAddr, NodeId, generate_id, serde_json,
-    ChatStore, ChatHandler,
-    stream_screen_from_peer, handle_screen_stream_request, ScreenStreamEvent,
-    screen::{
-        ScreenViewer, ViewerConfig, ViewerCommand, ViewerEvent,
-        viewer_command_channel, viewer_event_channel,
-        ViewerCommandSender, RemoteInputEvent,
+    croc::{
+        find_croc_executable, refresh_croc_cache, CrocEvent, CrocOptions, CrocProcess, Curve,
+        HashAlgorithm,
     },
+    default_browsable_paths, files, generate_id, handle_browse_request, handle_incoming_pull,
+    handle_incoming_push, handle_screen_stream_request, platform, pull_files, push_files,
+    screen::{
+        viewer_command_channel, viewer_event_channel, RemoteInputEvent, ScreenViewer,
+        ViewerCommand, ViewerCommandSender, ViewerConfig, ViewerEvent,
+    },
+    serde_json, stream_screen_from_peer, ChatHandler, ChatStore, Config, ControlMessage,
+    FileRequest, Identity, IrohEndpoint, NetworkStore, NodeAddr, NodeId, PeerAddress, PeerInfo,
+    PeerStore, Permissions, ScreenStreamEvent, Transfer, TransferEvent, TransferHistory,
+    TransferId, TransferManager, TransferStatus, TransferType, TrustBundle, TrustedPeer,
 };
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 use std::collections::HashMap;
@@ -22,7 +25,10 @@ use std::sync::Arc;
 use tokio::sync::{oneshot, RwLock};
 use tracing::{debug, error, info, warn};
 
-use crate::{AppLogic, AppSettings, BrowseEntry, ChatMessageItem, MainWindow, NetworkItem, NetworkMember, PeerItem, SelectedFile, SessionStats, TransferItem};
+use crate::{
+    AppLogic, AppSettings, BrowseEntry, ChatMessageItem, MainWindow, NetworkItem, NetworkMember,
+    PeerItem, SelectedFile, SessionStats, TransferItem,
+};
 
 /// Connection status for a peer.
 #[derive(Clone, Debug, Default)]
@@ -117,6 +123,7 @@ struct SessionStatsTracker {
 
 /// State for a pending peer introduction.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // WIP: Peer introduction feature not yet implemented
 struct PendingIntroduction {
     /// Unique introduction ID.
     introduction_id: String,
@@ -302,7 +309,8 @@ impl App {
                     let peers: Vec<TrustedPeer> = {
                         let store = peer_store.read().await;
                         let disconnected = disconnected_peers.read().await;
-                        store.list()
+                        store
+                            .list()
                             .iter()
                             .filter(|p| !disconnected.contains(&p.id))
                             .cloned()
@@ -357,7 +365,8 @@ impl App {
                                     }
                                     // Calculate average
                                     let sum: u32 = status.latency_history.iter().sum();
-                                    status.avg_latency_ms = Some(sum / status.latency_history.len() as u32);
+                                    status.avg_latency_ms =
+                                        Some(sum / status.latency_history.len() as u32);
                                 }
 
                                 // Determine connection type based on relay presence
@@ -469,7 +478,8 @@ impl App {
 
                         // Refresh the peers list in the UI
                         let store = peer_store.read().await;
-                        let peer_items: Vec<PeerItem> = store.list().iter().map(trusted_peer_to_item).collect();
+                        let peer_items: Vec<PeerItem> =
+                            store.list().iter().map(trusted_peer_to_item).collect();
                         drop(store);
 
                         let window_weak_ui = window_weak.clone();
@@ -1240,7 +1250,7 @@ impl App {
                                     // Find and update the peer in the model
                                     for i in 0..model.row_count() {
                                         if let Some(mut peer_item) = model.row_data(i) {
-                                            if peer_item.id.to_string() == peer_id {
+                                            if peer_item.id == peer_id {
                                                 peer_item.revoked = true;
                                                 peer_item.status = SharedString::from("revoked");
                                                 model.set_row_data(i, peer_item);
@@ -1636,7 +1646,7 @@ impl App {
                                 sequence,
                                 sent_at,
                             ) {
-                                Ok(events) => {
+                                Ok(_events) => {
                                     // Send delivery receipt
                                     let _ = conn.send(&ControlMessage::ChatDelivered {
                                         message_ids: vec![message_id.clone()],
@@ -1727,7 +1737,7 @@ impl App {
                             drop(active);
 
                             if is_active {
-                                let peer_id = peer.endpoint_id.clone();
+                                let _peer_id = peer.endpoint_id.clone();
                                 let message_ids_clone = message_ids.clone();
                                 let _ = slint::invoke_from_event_loop({
                                     let window_weak = window_weak.clone();
@@ -1941,10 +1951,12 @@ impl App {
                 let theme = config_guard.theme.to_ui_string();
 
                 // Transfer options
-                let hash_algorithm = config_guard.default_hash
+                let hash_algorithm = config_guard
+                    .default_hash
                     .map(|h| h.as_str().to_string())
                     .unwrap_or_default();
-                let curve = config_guard.default_curve
+                let curve = config_guard
+                    .default_curve
                     .map(|c| c.as_str().to_string())
                     .unwrap_or_default();
                 let throttle = config_guard.throttle.clone().unwrap_or_default();
@@ -1953,7 +1965,8 @@ impl App {
                 // Browse settings
                 let browse_show_hidden = config_guard.browse_settings.show_hidden;
                 let browse_show_protected = config_guard.browse_settings.show_protected;
-                let browse_exclude_patterns = config_guard.browse_settings.exclude_patterns.join(", ");
+                let browse_exclude_patterns =
+                    config_guard.browse_settings.exclude_patterns.join(", ");
 
                 // DND settings
                 let dnd_mode = config_guard.dnd_mode.to_ui_string().to_string();
@@ -2045,7 +2058,11 @@ impl App {
                         let endpoint_id = id.endpoint_id.clone();
                         // Truncate for display
                         let display_id = if endpoint_id.len() > 12 {
-                            format!("{}...{}", &endpoint_id[..6], &endpoint_id[endpoint_id.len()-6..])
+                            format!(
+                                "{}...{}",
+                                &endpoint_id[..6],
+                                &endpoint_id[endpoint_id.len() - 6..]
+                            )
                         } else {
                             endpoint_id
                         };
@@ -2069,7 +2086,9 @@ impl App {
                         // Update UI with endpoint ID
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(window) = window_weak.upgrade() {
-                                window.global::<AppLogic>().set_endpoint_id(SharedString::from(display_id));
+                                window
+                                    .global::<AppLogic>()
+                                    .set_endpoint_id(SharedString::from(display_id));
                             }
                         });
                     }
@@ -2134,15 +2153,19 @@ impl App {
                             let mut files_guard = selected_files.write().await;
                             files_guard.extend(new_files);
                             // Convert to sendable data
-                            let files_data: Vec<_> = files_guard.iter().map(|f| {
-                                (f.name.clone(), files::format_size(f.size), f.path.clone())
-                            }).collect();
+                            let files_data: Vec<_> = files_guard
+                                .iter()
+                                .map(|f| {
+                                    (f.name.clone(), files::format_size(f.size), f.path.clone())
+                                })
+                                .collect();
                             drop(files_guard);
 
                             // Update UI on main thread
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(window) = window_weak.upgrade() {
-                                    let items: Vec<SelectedFile> = files_data.into_iter()
+                                    let items: Vec<SelectedFile> = files_data
+                                        .into_iter()
                                         .map(|(name, size, path)| SelectedFile {
                                             name: SharedString::from(name),
                                             size: SharedString::from(size),
@@ -2212,14 +2235,18 @@ impl App {
                         if index < files_guard.len() {
                             files_guard.remove(index);
                             // Convert to sendable data
-                            let files_data: Vec<_> = files_guard.iter().map(|f| {
-                                (f.name.clone(), files::format_size(f.size), f.path.clone())
-                            }).collect();
+                            let files_data: Vec<_> = files_guard
+                                .iter()
+                                .map(|f| {
+                                    (f.name.clone(), files::format_size(f.size), f.path.clone())
+                                })
+                                .collect();
                             drop(files_guard);
 
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(window) = window_weak.upgrade() {
-                                    let items: Vec<SelectedFile> = files_data.into_iter()
+                                    let items: Vec<SelectedFile> = files_data
+                                        .into_iter()
                                         .map(|(name, size, path)| SelectedFile {
                                             name: SharedString::from(name),
                                             size: SharedString::from(size),
@@ -2258,7 +2285,14 @@ impl App {
 
             move |custom_code| {
                 let custom_code = custom_code.to_string();
-                info!("Start send requested with custom_code: {:?}", if custom_code.is_empty() { "auto" } else { &custom_code });
+                info!(
+                    "Start send requested with custom_code: {:?}",
+                    if custom_code.is_empty() {
+                        "auto"
+                    } else {
+                        &custom_code
+                    }
+                );
                 let window_weak = window_weak.clone();
                 let selected_files = selected_files.clone();
                 let transfer_manager = transfer_manager.clone();
@@ -2353,10 +2387,7 @@ impl App {
                                                     t.code = Some(code.clone());
                                                 })
                                                 .await;
-                                            update_status(
-                                                &window_weak,
-                                                &format!("Code: {}", code),
-                                            );
+                                            update_status(&window_weak, &format!("Code: {}", code));
                                             update_transfers_ui(&window_weak, &transfer_manager)
                                                 .await;
                                         }
@@ -2382,8 +2413,15 @@ impl App {
                                             update_status(&window_weak, "Transfer completed!");
                                             update_transfers_ui(&window_weak, &transfer_manager)
                                                 .await;
-                                            let keep_completed = config.read().await.keep_completed_transfers;
-                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id, keep_completed).await;
+                                            let keep_completed =
+                                                config.read().await.keep_completed_transfers;
+                                            save_to_history(
+                                                &transfer_history,
+                                                &transfer_manager,
+                                                &transfer_id,
+                                                keep_completed,
+                                            )
+                                            .await;
 
                                             // Clear selected files
                                             let mut files_guard = selected_files.write().await;
@@ -2412,8 +2450,15 @@ impl App {
                                             );
                                             update_transfers_ui(&window_weak, &transfer_manager)
                                                 .await;
-                                            let keep_completed = config.read().await.keep_completed_transfers;
-                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id, keep_completed).await;
+                                            let keep_completed =
+                                                config.read().await.keep_completed_transfers;
+                                            save_to_history(
+                                                &transfer_history,
+                                                &transfer_manager,
+                                                &transfer_id,
+                                                keep_completed,
+                                            )
+                                            .await;
                                             break;
                                         }
                                         Some(CrocEvent::Output(line)) => {
@@ -2447,9 +2492,17 @@ impl App {
                                                 })
                                                 .await;
                                             update_status(&window_weak, "Transfer completed!");
-                                            update_transfers_ui(&window_weak, &transfer_manager).await;
-                                            let keep_completed = config.read().await.keep_completed_transfers;
-                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id, keep_completed).await;
+                                            update_transfers_ui(&window_weak, &transfer_manager)
+                                                .await;
+                                            let keep_completed =
+                                                config.read().await.keep_completed_transfers;
+                                            save_to_history(
+                                                &transfer_history,
+                                                &transfer_manager,
+                                                &transfer_id,
+                                                keep_completed,
+                                            )
+                                            .await;
 
                                             // Clear selected files
                                             let mut files_guard = selected_files.write().await;
@@ -2459,8 +2512,12 @@ impl App {
                                                 move || {
                                                     if let Some(window) = window_weak.upgrade() {
                                                         let model: ModelRc<SelectedFile> =
-                                                            ModelRc::new(VecModel::from(Vec::new()));
-                                                        window.global::<AppLogic>().set_selected_files(model);
+                                                            ModelRc::new(
+                                                                VecModel::from(Vec::new()),
+                                                            );
+                                                        window
+                                                            .global::<AppLogic>()
+                                                            .set_selected_files(model);
                                                     }
                                                 }
                                             });
@@ -2475,9 +2532,17 @@ impl App {
                                                 })
                                                 .await;
                                             update_status(&window_weak, "Transfer failed");
-                                            update_transfers_ui(&window_weak, &transfer_manager).await;
-                                            let keep_completed = config.read().await.keep_completed_transfers;
-                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id, keep_completed).await;
+                                            update_transfers_ui(&window_weak, &transfer_manager)
+                                                .await;
+                                            let keep_completed =
+                                                config.read().await.keep_completed_transfers;
+                                            save_to_history(
+                                                &transfer_history,
+                                                &transfer_manager,
+                                                &transfer_id,
+                                                keep_completed,
+                                            )
+                                            .await;
                                         }
                                         Err(e) => {
                                             error!("Failed to get process status: {}", e);
@@ -2519,7 +2584,8 @@ impl App {
 
             move |code| {
                 // Sanitize code: remove nul bytes and other control characters
-                let code: String = code.chars()
+                let code: String = code
+                    .chars()
                     .filter(|c| !c.is_control() || *c == ' ')
                     .collect();
                 let code = code.trim().to_string();
@@ -2659,11 +2725,26 @@ impl App {
                                             update_status(&window_weak, "Receive completed!");
                                             update_transfers_ui(&window_weak, &transfer_manager)
                                                 .await;
-                                            let keep_completed = config.read().await.keep_completed_transfers;
-                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id, keep_completed).await;
+                                            let keep_completed =
+                                                config.read().await.keep_completed_transfers;
+                                            save_to_history(
+                                                &transfer_history,
+                                                &transfer_manager,
+                                                &transfer_id,
+                                                keep_completed,
+                                            )
+                                            .await;
 
                                             // Check for trust bundles in received files
-                                            check_and_handle_trust_bundle(&download_dir, &window_weak, &identity, &shared_endpoint, &peer_store, &peer_status).await;
+                                            check_and_handle_trust_bundle(
+                                                &download_dir,
+                                                &window_weak,
+                                                &identity,
+                                                &shared_endpoint,
+                                                &peer_store,
+                                                &peer_status,
+                                            )
+                                            .await;
                                             break;
                                         }
                                         Some(CrocEvent::Failed(err)) => {
@@ -2681,8 +2762,15 @@ impl App {
                                             );
                                             update_transfers_ui(&window_weak, &transfer_manager)
                                                 .await;
-                                            let keep_completed = config.read().await.keep_completed_transfers;
-                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id, keep_completed).await;
+                                            let keep_completed =
+                                                config.read().await.keep_completed_transfers;
+                                            save_to_history(
+                                                &transfer_history,
+                                                &transfer_manager,
+                                                &transfer_id,
+                                                keep_completed,
+                                            )
+                                            .await;
                                             break;
                                         }
                                         Some(CrocEvent::Output(line)) => {
@@ -2712,15 +2800,34 @@ impl App {
                                                 })
                                                 .await;
                                             update_status(&window_weak, "Receive completed!");
-                                            update_transfers_ui(&window_weak, &transfer_manager).await;
-                                            let keep_completed = config.read().await.keep_completed_transfers;
-                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id, keep_completed).await;
+                                            update_transfers_ui(&window_weak, &transfer_manager)
+                                                .await;
+                                            let keep_completed =
+                                                config.read().await.keep_completed_transfers;
+                                            save_to_history(
+                                                &transfer_history,
+                                                &transfer_manager,
+                                                &transfer_id,
+                                                keep_completed,
+                                            )
+                                            .await;
 
                                             // Check for trust bundles in received files
-                                            check_and_handle_trust_bundle(&download_dir, &window_weak, &identity, &shared_endpoint, &peer_store, &peer_status).await;
+                                            check_and_handle_trust_bundle(
+                                                &download_dir,
+                                                &window_weak,
+                                                &identity,
+                                                &shared_endpoint,
+                                                &peer_store,
+                                                &peer_status,
+                                            )
+                                            .await;
                                         }
                                         Ok(status) => {
-                                            warn!("Receive process exited with status: {:?}", status);
+                                            warn!(
+                                                "Receive process exited with status: {:?}",
+                                                status
+                                            );
                                             let _ = transfer_manager
                                                 .update(&transfer_id, |t| {
                                                     t.status = TransferStatus::Failed;
@@ -2729,9 +2836,17 @@ impl App {
                                                 })
                                                 .await;
                                             update_status(&window_weak, "Receive failed");
-                                            update_transfers_ui(&window_weak, &transfer_manager).await;
-                                            let keep_completed = config.read().await.keep_completed_transfers;
-                                            save_to_history(&transfer_history, &transfer_manager, &transfer_id, keep_completed).await;
+                                            update_transfers_ui(&window_weak, &transfer_manager)
+                                                .await;
+                                            let keep_completed =
+                                                config.read().await.keep_completed_transfers;
+                                            save_to_history(
+                                                &transfer_history,
+                                                &transfer_manager,
+                                                &transfer_id,
+                                                keep_completed,
+                                            )
+                                            .await;
                                         }
                                         Err(e) => {
                                             error!("Failed to get process status: {}", e);
@@ -2860,14 +2975,18 @@ impl App {
 
                 // Update UI to show copied state
                 if let Some(window) = window_weak.upgrade() {
-                    window.global::<AppLogic>().set_copied_code(SharedString::from(code_str.clone()));
+                    window
+                        .global::<AppLogic>()
+                        .set_copied_code(SharedString::from(code_str.clone()));
 
                     // Clear after 2 seconds
                     let window_weak = window_weak.clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_secs(2));
                         if let Some(window) = window_weak.upgrade() {
-                            window.global::<AppLogic>().set_copied_code(SharedString::from(""));
+                            window
+                                .global::<AppLogic>()
+                                .set_copied_code(SharedString::from(""));
                         }
                     });
                 }
@@ -2934,7 +3053,8 @@ impl App {
                             // Update UI
                             if let Some(window) = window_weak.upgrade() {
                                 let mut settings = window.global::<AppLogic>().get_settings();
-                                settings.download_dir = SharedString::from(path.to_string_lossy().to_string());
+                                settings.download_dir =
+                                    SharedString::from(path.to_string_lossy().to_string());
                                 window.global::<AppLogic>().set_settings(settings);
                             }
                         });
@@ -3046,9 +3166,13 @@ impl App {
                             window.global::<AppLogic>().set_settings(settings);
 
                             if croc_found {
-                                window.global::<AppLogic>().set_app_status(SharedString::from("Croc found!"));
+                                window
+                                    .global::<AppLogic>()
+                                    .set_app_status(SharedString::from("Croc found!"));
                             } else {
-                                window.global::<AppLogic>().set_app_status(SharedString::from("Croc not found"));
+                                window
+                                    .global::<AppLogic>()
+                                    .set_app_status(SharedString::from("Croc not found"));
                             }
                         }
                     });
@@ -3071,16 +3195,12 @@ impl App {
 
                 #[cfg(target_os = "macos")]
                 {
-                    let _ = std::process::Command::new("open")
-                        .arg(url)
-                        .spawn();
+                    let _ = std::process::Command::new("open").arg(url).spawn();
                 }
 
                 #[cfg(target_os = "linux")]
                 {
-                    let _ = std::process::Command::new("xdg-open")
-                        .arg(url)
-                        .spawn();
+                    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
                 }
             }
         });
@@ -3116,26 +3236,32 @@ impl App {
                         let theme = config_guard.theme.to_ui_string();
                         let download_dir = config_guard.download_dir.to_string_lossy().to_string();
                         let default_relay = config_guard.default_relay.clone().unwrap_or_default();
-                        let hash_algorithm = config_guard.default_hash
+                        let hash_algorithm = config_guard
+                            .default_hash
                             .map(|h| h.as_str().to_string())
                             .unwrap_or_default();
-                        let curve = config_guard.default_curve
+                        let curve = config_guard
+                            .default_curve
                             .map(|c| c.as_str().to_string())
                             .unwrap_or_default();
                         let throttle = config_guard.throttle.clone().unwrap_or_default();
                         let no_local = config_guard.no_local;
                         let browse_show_hidden = config_guard.browse_settings.show_hidden;
                         let browse_show_protected = config_guard.browse_settings.show_protected;
-                        let browse_exclude_patterns = config_guard.browse_settings.exclude_patterns.join(", ");
+                        let browse_exclude_patterns =
+                            config_guard.browse_settings.exclude_patterns.join(", ");
                         let dnd_mode = config_guard.dnd_mode.to_ui_string().to_string();
                         let dnd_message = config_guard.dnd_message.clone().unwrap_or_default();
                         let show_session_stats = config_guard.show_session_stats;
                         let keep_completed_transfers = config_guard.keep_completed_transfers;
-                        let security_posture = config_guard.security_posture.to_ui_string().to_string();
-                        let relay_preference = config_guard.relay_preference.to_ui_string().to_string();
+                        let security_posture =
+                            config_guard.security_posture.to_ui_string().to_string();
+                        let relay_preference =
+                            config_guard.relay_preference.to_ui_string().to_string();
                         let screen_streaming_enabled = config_guard.screen_stream.enabled;
                         let screen_allow_input = config_guard.screen_stream.allow_input;
-                        let device_nickname = config_guard.device_nickname.clone().unwrap_or_default();
+                        let device_nickname =
+                            config_guard.device_nickname.clone().unwrap_or_default();
                         let device_hostname = Config::get_hostname();
                         let (croc_path, croc_found) = match find_croc_executable() {
                             Ok(path) => (path.to_string_lossy().to_string(), true),
@@ -3159,7 +3285,9 @@ impl App {
                                     no_local,
                                     browse_show_hidden,
                                     browse_show_protected,
-                                    browse_exclude_patterns: SharedString::from(browse_exclude_patterns),
+                                    browse_exclude_patterns: SharedString::from(
+                                        browse_exclude_patterns,
+                                    ),
                                     dnd_mode: SharedString::from(dnd_mode),
                                     dnd_message: SharedString::from(dnd_message),
                                     show_session_stats,
@@ -3203,7 +3331,8 @@ impl App {
                         if !download_dir.is_empty() {
                             config_guard.download_dir = PathBuf::from(&download_dir);
                         }
-                        config_guard.default_relay = if relay.is_empty() { None } else { Some(relay) };
+                        config_guard.default_relay =
+                            if relay.is_empty() { None } else { Some(relay) };
                         config_guard.theme = Theme::from_ui_string(&theme);
                         config_guard.default_hash = match hash.as_str() {
                             "xxhash" => Some(HashAlgorithm::Xxhash),
@@ -3218,7 +3347,11 @@ impl App {
                             "p521" => Some(Curve::P521),
                             _ => None,
                         };
-                        config_guard.throttle = if throttle.is_empty() { None } else { Some(throttle) };
+                        config_guard.throttle = if throttle.is_empty() {
+                            None
+                        } else {
+                            Some(throttle)
+                        };
                         config_guard.no_local = no_local;
 
                         if let Err(e) = config_guard.save() {
@@ -3274,7 +3407,8 @@ impl App {
                                 let mut settings = window.global::<AppLogic>().get_settings();
                                 settings.browse_show_hidden = show_hidden;
                                 settings.browse_show_protected = show_protected;
-                                settings.browse_exclude_patterns = SharedString::from(&patterns_str);
+                                settings.browse_exclude_patterns =
+                                    SharedString::from(&patterns_str);
                                 window.global::<AppLogic>().set_settings(settings);
                             }
                         });
@@ -3309,7 +3443,11 @@ impl App {
                         {
                             let mut config_guard = config.write().await;
                             config_guard.dnd_mode = croh_core::DndMode::from_ui_string(&mode_str);
-                            config_guard.dnd_message = if message_str.is_empty() { None } else { Some(message_str.clone()) };
+                            config_guard.dnd_message = if message_str.is_empty() {
+                                None
+                            } else {
+                                Some(message_str.clone())
+                            };
                             if let Err(e) = config_guard.save() {
                                 error!("Failed to save DND settings: {}", e);
                             }
@@ -3342,15 +3480,25 @@ impl App {
                                             enabled: mode_str != "off",
                                             mode: mode_str.clone(),
                                             until: None,
-                                            message: if message_str.is_empty() { None } else { Some(message_str.clone()) },
+                                            message: if message_str.is_empty() {
+                                                None
+                                            } else {
+                                                Some(message_str.clone())
+                                            },
                                         };
                                         if let Err(e) = conn.send(&msg).await {
-                                            warn!("Failed to send DND status to {}: {}", peer.name, e);
+                                            warn!(
+                                                "Failed to send DND status to {}: {}",
+                                                peer.name, e
+                                            );
                                         }
                                     }
                                     Err(e) => {
                                         // Peer may be offline, that's ok
-                                        debug!("Failed to connect to {} for DND broadcast: {}", peer.name, e);
+                                        debug!(
+                                            "Failed to connect to {} for DND broadcast: {}",
+                                            peer.name, e
+                                        );
                                     }
                                 }
                             }
@@ -3380,7 +3528,8 @@ impl App {
                         // Update config with new posture and regenerate guest policy
                         {
                             let mut config_guard = config.write().await;
-                            let new_posture = croh_core::SecurityPosture::from_ui_string(&posture_str);
+                            let new_posture =
+                                croh_core::SecurityPosture::from_ui_string(&posture_str);
                             config_guard.security_posture = new_posture;
                             // Apply the new posture's default guest policy
                             config_guard.guest_policy = new_posture.default_guest_policy();
@@ -3428,7 +3577,8 @@ impl App {
                         // Update config with new relay preference
                         {
                             let mut config_guard = config.write().await;
-                            config_guard.relay_preference = croh_core::RelayPreference::from_ui_string(&preference_str);
+                            config_guard.relay_preference =
+                                croh_core::RelayPreference::from_ui_string(&preference_str);
                             if let Err(e) = config_guard.save() {
                                 error!("Failed to save relay preference: {}", e);
                             }
@@ -3492,7 +3642,10 @@ impl App {
                             }
                         });
 
-                        info!("Screen streaming settings: enabled={}, allow_input={}", enabled, allow_input);
+                        info!(
+                            "Screen streaming settings: enabled={}, allow_input={}",
+                            enabled, allow_input
+                        );
                     });
                 });
             }
@@ -3527,7 +3680,10 @@ impl App {
                                 Some(nickname_str.clone())
                             };
                             let display_name = config_guard.get_device_display_name();
-                            info!("Saving device nickname, display_name will be: {}", display_name);
+                            info!(
+                                "Saving device nickname, display_name will be: {}",
+                                display_name
+                            );
                             if let Err(e) = config_guard.save() {
                                 error!("Failed to save device nickname: {}", e);
                             } else {
@@ -3559,7 +3715,14 @@ impl App {
                             }
                         });
 
-                        info!("Device nickname set to: {}", if nickname_str.is_empty() { "(hostname)" } else { &nickname_str });
+                        info!(
+                            "Device nickname set to: {}",
+                            if nickname_str.is_empty() {
+                                "(hostname)"
+                            } else {
+                                &nickname_str
+                            }
+                        );
                     });
                 });
             }
@@ -3605,43 +3768,49 @@ impl App {
         });
 
         // Toggle keep completed transfers callback
-        window.global::<AppLogic>().on_toggle_keep_completed_transfers({
-            let config = config.clone();
-            let window_weak = window_weak.clone();
-
-            move || {
+        window
+            .global::<AppLogic>()
+            .on_toggle_keep_completed_transfers({
                 let config = config.clone();
                 let window_weak = window_weak.clone();
 
-                std::thread::spawn(move || {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .unwrap();
+                move || {
+                    let config = config.clone();
+                    let window_weak = window_weak.clone();
 
-                    rt.block_on(async {
-                        // Toggle the setting
-                        let new_value = {
-                            let mut config_guard = config.write().await;
-                            config_guard.keep_completed_transfers = !config_guard.keep_completed_transfers;
-                            if let Err(e) = config_guard.save() {
-                                error!("Failed to save keep_completed_transfers setting: {}", e);
-                            }
-                            config_guard.keep_completed_transfers
-                        };
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .unwrap();
 
-                        // Update UI
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(window) = window_weak.upgrade() {
-                                let mut settings = window.global::<AppLogic>().get_settings();
-                                settings.keep_completed_transfers = new_value;
-                                window.global::<AppLogic>().set_settings(settings);
-                            }
+                        rt.block_on(async {
+                            // Toggle the setting
+                            let new_value = {
+                                let mut config_guard = config.write().await;
+                                config_guard.keep_completed_transfers =
+                                    !config_guard.keep_completed_transfers;
+                                if let Err(e) = config_guard.save() {
+                                    error!(
+                                        "Failed to save keep_completed_transfers setting: {}",
+                                        e
+                                    );
+                                }
+                                config_guard.keep_completed_transfers
+                            };
+
+                            // Update UI
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(window) = window_weak.upgrade() {
+                                    let mut settings = window.global::<AppLogic>().get_settings();
+                                    settings.keep_completed_transfers = new_value;
+                                    window.global::<AppLogic>().set_settings(settings);
+                                }
+                            });
                         });
                     });
-                });
-            }
-        });
+                }
+            });
     }
 
     fn setup_peer_callbacks(&self, window: &MainWindow) {
@@ -3653,7 +3822,7 @@ impl App {
         let config = self.config.clone();
         let pending_trust = self.pending_trust.clone();
         let peer_status = self.peer_status.clone();
-        let transfer_history = self.transfer_history.clone();
+        let _transfer_history = self.transfer_history.clone();
 
         // Initiate trust callback
         window.global::<AppLogic>().on_initiate_trust({
@@ -3805,7 +3974,7 @@ impl App {
                         }
                         drop(config_guard);
 
-                        match CrocProcess::send(&[bundle_path.clone()], &options).await {
+                        match CrocProcess::send(std::slice::from_ref(&bundle_path), &options).await {
                             Ok((mut process, _handle)) => {
                                 // Monitor for code
                                 loop {
@@ -3959,7 +4128,9 @@ impl App {
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(window) = window_weak.upgrade() {
                                 window.global::<AppLogic>().set_trust_in_progress(false);
-                                window.global::<AppLogic>().set_trust_code(SharedString::from(""));
+                                window
+                                    .global::<AppLogic>()
+                                    .set_trust_code(SharedString::from(""));
                             }
                         });
                     });
@@ -4013,7 +4184,8 @@ impl App {
                                             info!("Sent TrustRevoke to {}", peer.name);
                                         }
                                         // Give time for message to be delivered
-                                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                        tokio::time::sleep(std::time::Duration::from_millis(100))
+                                            .await;
                                         let _ = conn.close().await;
                                     }
                                     Err(e) => {
@@ -4066,7 +4238,7 @@ impl App {
                 info!("Revoking trust for peer: {}", id_str);
                 let window_weak = window_weak.clone();
                 let peer_store = peer_store.clone();
-                let peer_status = peer_status.clone();
+                let _peer_status = peer_status.clone();
                 let revoked_by_us = revoked_by_us.clone();
                 let shared_endpoint = shared_endpoint.clone();
 
@@ -4098,7 +4270,8 @@ impl App {
                                             info!("Sent TrustRevoke to {}", peer.name);
                                         }
                                         // Give time for message to be delivered
-                                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                        tokio::time::sleep(std::time::Duration::from_millis(100))
+                                            .await;
                                         let _ = conn.close().await;
                                     }
                                     Err(e) => {
@@ -4123,7 +4296,7 @@ impl App {
                                 let model = logic.get_peers();
                                 for i in 0..model.row_count() {
                                     if let Some(mut peer) = model.row_data(i) {
-                                        if peer.id.to_string() == id_str_clone {
+                                        if peer.id == id_str_clone {
                                             peer.we_revoked = true;
                                             peer.status = SharedString::from("offline");
                                             model.set_row_data(i, peer);
@@ -4208,7 +4381,7 @@ impl App {
                     let model = window.global::<AppLogic>().get_peers();
                     for i in 0..model.row_count() {
                         if let Some(mut peer) = model.row_data(i) {
-                            if peer.id.to_string() == id.to_string() {
+                            if id == peer.id {
                                 peer.connected = false;
                                 peer.status = "offline".into();
                                 model.set_row_data(i, peer);
@@ -4249,7 +4422,7 @@ impl App {
                     let model = window.global::<AppLogic>().get_peers();
                     for i in 0..model.row_count() {
                         if let Some(mut peer) = model.row_data(i) {
-                            if peer.id.to_string() == id.to_string() {
+                            if id == peer.id {
                                 peer.connected = true;
                                 peer.status = "connecting".into();
                                 model.set_row_data(i, peer);
@@ -4335,7 +4508,8 @@ impl App {
                                         status.latency_history.remove(0);
                                     }
                                     let sum: u32 = status.latency_history.iter().sum();
-                                    status.avg_latency_ms = Some(sum / status.latency_history.len() as u32);
+                                    status.avg_latency_ms =
+                                        Some(sum / status.latency_history.len() as u32);
                                 }
 
                                 status.connection_type = if peer.relay_url().is_some() {
@@ -4352,8 +4526,16 @@ impl App {
                                 Ok(mut conn) => {
                                     if conn.send(&ControlMessage::StatusRequest).await.is_ok() {
                                         if let Ok(ControlMessage::StatusResponse {
-                                            hostname, os, free_space, total_space, version, uptime, active_transfers, ..
-                                        }) = conn.recv().await {
+                                            hostname,
+                                            os,
+                                            free_space,
+                                            total_space,
+                                            version,
+                                            uptime,
+                                            active_transfers,
+                                            ..
+                                        }) = conn.recv().await
+                                        {
                                             let mut status_map = peer_status.write().await;
                                             if let Some(status) = status_map.get_mut(&id_str) {
                                                 status.peer_hostname = Some(hostname);
@@ -4362,7 +4544,8 @@ impl App {
                                                 status.peer_free_space = Some(free_space);
                                                 status.peer_total_space = Some(total_space);
                                                 status.peer_uptime = Some(uptime);
-                                                status.peer_active_transfers = Some(active_transfers);
+                                                status.peer_active_transfers =
+                                                    Some(active_transfers);
                                             }
                                         }
                                     }
@@ -4378,7 +4561,10 @@ impl App {
                         update_peers_ui_with_status(&window_weak, &peer_store, &peer_status).await;
 
                         if online {
-                            update_status(&window_weak, &format!("Refreshed status for {}", peer.name));
+                            update_status(
+                                &window_weak,
+                                &format!("Refreshed status for {}", peer.name),
+                            );
                         } else {
                             update_status(&window_weak, &format!("{} is offline", peer.name));
                         }
@@ -4563,7 +4749,8 @@ impl App {
                                 info!("Extended guest {} until {}", id_str, new_expiry);
 
                                 // Update UI
-                                let new_expiry_str = new_expiry.format("%Y-%m-%d %H:%M").to_string();
+                                let new_expiry_str =
+                                    new_expiry.format("%Y-%m-%d %H:%M").to_string();
                                 let time_remaining = {
                                     let now = chrono::Utc::now();
                                     if new_expiry > now {
@@ -4572,9 +4759,17 @@ impl App {
                                         if total_secs < 3600 {
                                             format!("{}m", total_secs / 60)
                                         } else if total_secs < 86400 {
-                                            format!("{}h {}m", total_secs / 3600, (total_secs % 3600) / 60)
+                                            format!(
+                                                "{}h {}m",
+                                                total_secs / 3600,
+                                                (total_secs % 3600) / 60
+                                            )
                                         } else {
-                                            format!("{}d {}h", total_secs / 86400, (total_secs % 86400) / 3600)
+                                            format!(
+                                                "{}d {}h",
+                                                total_secs / 86400,
+                                                (total_secs % 86400) / 3600
+                                            )
                                         }
                                     } else {
                                         "Expired".to_string()
@@ -4582,7 +4777,8 @@ impl App {
                                 };
 
                                 // Get the new extension count
-                                let new_ext_count = store.find_by_id(&id_str)
+                                let new_ext_count = store
+                                    .find_by_id(&id_str)
                                     .map(|p| p.extension_count as i32)
                                     .unwrap_or(0);
                                 drop(store);
@@ -4596,8 +4792,10 @@ impl App {
                                             for i in 0..model.row_count() {
                                                 if let Some(mut item) = model.row_data(i) {
                                                     if item.id.as_str() == id_str {
-                                                        item.expires_at = SharedString::from(&new_expiry_str);
-                                                        item.time_remaining = SharedString::from(&time_remaining);
+                                                        item.expires_at =
+                                                            SharedString::from(&new_expiry_str);
+                                                        item.time_remaining =
+                                                            SharedString::from(&time_remaining);
                                                         item.extension_count = new_ext_count;
                                                         model.set_row_data(i, item);
                                                         break;
@@ -4605,7 +4803,7 @@ impl App {
                                                 }
                                             }
                                             window.global::<AppLogic>().set_app_status(
-                                                SharedString::from("Guest access extended")
+                                                SharedString::from("Guest access extended"),
                                             );
                                         }
                                     }
@@ -4617,7 +4815,10 @@ impl App {
                             }
                             Err(e) => {
                                 error!("Failed to extend guest {}: {}", id_str, e);
-                                update_status(&window_weak, &format!("Error extending guest: {}", e));
+                                update_status(
+                                    &window_weak,
+                                    &format!("Error extending guest: {}", e),
+                                );
                             }
                         }
                     });
@@ -4650,7 +4851,8 @@ impl App {
                                 info!("Promoted guest {} to trusted peer", id_str);
 
                                 // Get peer name for status message
-                                let peer_name = store.find_by_id(&id_str)
+                                let peer_name = store
+                                    .find_by_id(&id_str)
                                     .map(|p| p.name.clone())
                                     .unwrap_or_else(|| "Peer".to_string());
                                 drop(store);
@@ -4677,7 +4879,10 @@ impl App {
                                                 }
                                             }
                                             window.global::<AppLogic>().set_app_status(
-                                                SharedString::from(format!("{} is now a trusted peer", peer_name))
+                                                SharedString::from(format!(
+                                                    "{} is now a trusted peer",
+                                                    peer_name
+                                                )),
                                             );
                                         }
                                     }
@@ -4689,7 +4894,10 @@ impl App {
                             }
                             Err(e) => {
                                 error!("Failed to promote guest {}: {}", id_str, e);
-                                update_status(&window_weak, &format!("Error promoting guest: {}", e));
+                                update_status(
+                                    &window_weak,
+                                    &format!("Error promoting guest: {}", e),
+                                );
                             }
                         }
                     });
@@ -4734,6 +4942,8 @@ impl App {
                                 peer.permissions_granted.pull = allow_pull;
                                 peer.permissions_granted.browse = allow_browse;
                                 peer.permissions_granted.screen_view = allow_screen_view;
+                                // For now, control permission follows view permission
+                                peer.permissions_granted.screen_control = allow_screen_view;
                             }) {
                                 error!("Failed to update peer permissions: {}", e);
                                 update_status(&window_weak_thread, &format!("Error: {}", e));
@@ -4754,7 +4964,7 @@ impl App {
                                             status: true, // Always allow status
                                             chat: true,   // Always allow chat
                                             screen_view: allow_screen_view,
-                                            screen_control: false, // TODO: Add UI control for screen control
+                                            screen_control: allow_screen_view, // For now, control follows view permission
                                         };
                                         let msg = ControlMessage::PermissionsUpdate { permissions };
                                         if let Err(e) = conn.send(&msg).await {
@@ -4781,7 +4991,7 @@ impl App {
                     let model = window.global::<AppLogic>().get_peers();
                     for i in 0..model.row_count() {
                         if let Some(peer) = model.row_data(i) {
-                            if peer.id.to_string() == id_str {
+                            if peer.id == id_str {
                                 let updated_peer = PeerItem {
                                     allow_push,
                                     allow_pull,
@@ -4809,11 +5019,8 @@ impl App {
                     let model = window.global::<AppLogic>().get_peers();
                     for i in 0..model.row_count() {
                         if let Some(peer) = model.row_data(i) {
-                            if peer.id.to_string() == id_str {
-                                let updated_peer = PeerItem {
-                                    expanded,
-                                    ..peer
-                                };
+                            if peer.id == id_str {
+                                let updated_peer = PeerItem { expanded, ..peer };
                                 model.set_row_data(i, updated_peer);
                                 break;
                             }
@@ -4859,8 +5066,10 @@ impl App {
                             update_status(&window_weak, "No files selected for push");
                             return;
                         }
-                        let file_paths: Vec<PathBuf> = files.iter().map(|f| PathBuf::from(&f.path)).collect();
-                        let file_names: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
+                        let file_paths: Vec<PathBuf> =
+                            files.iter().map(|f| PathBuf::from(&f.path)).collect();
+                        let file_names: Vec<String> =
+                            files.iter().map(|f| f.name.clone()).collect();
                         drop(files);
 
                         // Get the peer
@@ -4869,7 +5078,10 @@ impl App {
                             Some(p) => p.clone(),
                             None => {
                                 error!("Peer not found: {}", peer_id_str);
-                                update_status(&window_weak, &format!("Peer not found: {}", peer_id_str));
+                                update_status(
+                                    &window_weak,
+                                    &format!("Peer not found: {}", peer_id_str),
+                                );
                                 return;
                             }
                         };
@@ -4877,7 +5089,10 @@ impl App {
 
                         // Check if peer allows push
                         if !peer.their_permissions.push {
-                            update_status(&window_weak, &format!("Peer {} does not allow push", peer.name));
+                            update_status(
+                                &window_weak,
+                                &format!("Peer {} does not allow push", peer.name),
+                            );
                             return;
                         }
 
@@ -4901,19 +5116,25 @@ impl App {
                                 Some(ep) => ep.clone(),
                                 None => {
                                     error!("Shared endpoint not ready");
-                                    let _ = transfer_manager.update(&transfer_id, |t| {
-                                        t.status = TransferStatus::Failed;
-                                        t.error = Some("Network not ready".to_string());
-                                    }).await;
+                                    let _ = transfer_manager
+                                        .update(&transfer_id, |t| {
+                                            t.status = TransferStatus::Failed;
+                                            t.error = Some("Network not ready".to_string());
+                                        })
+                                        .await;
                                     update_transfers_ui(&window_weak, &transfer_manager).await;
-                                    update_status(&window_weak, "Network not ready - please try again");
+                                    update_status(
+                                        &window_weak,
+                                        "Network not ready - please try again",
+                                    );
                                     return;
                                 }
                             }
                         };
 
                         // Create progress channel
-                        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<TransferEvent>(100);
+                        let (progress_tx, mut progress_rx) =
+                            tokio::sync::mpsc::channel::<TransferEvent>(100);
 
                         // Spawn progress handler
                         let transfer_manager_progress = transfer_manager.clone();
@@ -4924,66 +5145,140 @@ impl App {
                         let transfer_id_progress = transfer_id.clone();
                         tokio::spawn(async move {
                             while let Some(event) = progress_rx.recv().await {
-                                let keep_completed = config_progress.read().await.keep_completed_transfers;
+                                let keep_completed =
+                                    config_progress.read().await.keep_completed_transfers;
                                 match event {
                                     TransferEvent::Started { .. } => {
-                                        let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
-                                            t.status = TransferStatus::Running;
-                                        }).await;
-                                        update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                        let _ = transfer_manager_progress
+                                            .update(&transfer_id_progress, |t| {
+                                                t.status = TransferStatus::Running;
+                                            })
+                                            .await;
+                                        update_transfers_ui(
+                                            &window_weak_progress,
+                                            &transfer_manager_progress,
+                                        )
+                                        .await;
                                     }
-                                    TransferEvent::Progress { transferred, total, speed, .. } => {
-                                        let progress = if total > 0 { transferred as f64 / total as f64 * 100.0 } else { 0.0 };
-                                        let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
-                                            t.progress = progress;
-                                            t.speed = speed.clone();
-                                            t.transferred = transferred;
-                                            t.total_size = total;
-                                        }).await;
-                                        update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                    TransferEvent::Progress {
+                                        transferred,
+                                        total,
+                                        speed,
+                                        ..
+                                    } => {
+                                        let progress = if total > 0 {
+                                            transferred as f64 / total as f64 * 100.0
+                                        } else {
+                                            0.0
+                                        };
+                                        let _ = transfer_manager_progress
+                                            .update(&transfer_id_progress, |t| {
+                                                t.progress = progress;
+                                                t.speed = speed.clone();
+                                                t.transferred = transferred;
+                                                t.total_size = total;
+                                            })
+                                            .await;
+                                        update_transfers_ui(
+                                            &window_weak_progress,
+                                            &transfer_manager_progress,
+                                        )
+                                        .await;
                                     }
                                     TransferEvent::FileComplete { file, .. } => {
                                         info!("File transferred: {}", file);
                                     }
                                     TransferEvent::Complete { .. } => {
                                         // Get total size before updating status
-                                        let total_bytes = transfer_manager_progress.get(&transfer_id_progress).await
-                                            .map(|t| t.total_size).unwrap_or(0);
-                                        let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
-                                            t.status = TransferStatus::Completed;
-                                            t.progress = 100.0;
-                                            t.completed_at = Some(chrono::Utc::now());
-                                        }).await;
+                                        let total_bytes = transfer_manager_progress
+                                            .get(&transfer_id_progress)
+                                            .await
+                                            .map(|t| t.total_size)
+                                            .unwrap_or(0);
+                                        let _ = transfer_manager_progress
+                                            .update(&transfer_id_progress, |t| {
+                                                t.status = TransferStatus::Completed;
+                                                t.progress = 100.0;
+                                                t.completed_at = Some(chrono::Utc::now());
+                                            })
+                                            .await;
                                         // Update session stats (push is an upload)
                                         {
                                             let mut stats = session_stats_progress.write().await;
                                             stats.bytes_uploaded += total_bytes;
                                             stats.transfers_completed += 1;
                                         }
-                                        update_session_stats_ui(&window_weak_progress, &session_stats_progress);
-                                        update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
-                                        update_status(&window_weak_progress, "Push completed successfully");
-                                        save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress, keep_completed).await;
+                                        update_session_stats_ui(
+                                            &window_weak_progress,
+                                            &session_stats_progress,
+                                        );
+                                        update_transfers_ui(
+                                            &window_weak_progress,
+                                            &transfer_manager_progress,
+                                        )
+                                        .await;
+                                        update_status(
+                                            &window_weak_progress,
+                                            "Push completed successfully",
+                                        );
+                                        save_to_history(
+                                            &transfer_history_progress,
+                                            &transfer_manager_progress,
+                                            &transfer_id_progress,
+                                            keep_completed,
+                                        )
+                                        .await;
                                         // Refresh UI to clear the completed transfer
-                                        update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                        update_transfers_ui(
+                                            &window_weak_progress,
+                                            &transfer_manager_progress,
+                                        )
+                                        .await;
                                     }
                                     TransferEvent::Failed { error, .. } => {
                                         error!("Transfer failed: {}", error);
-                                        let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
-                                            t.status = TransferStatus::Failed;
-                                            t.error = Some(error.clone());
-                                        }).await;
-                                        update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
-                                        update_status(&window_weak_progress, &format!("Push failed: {}", error));
-                                        save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress, keep_completed).await;
+                                        let _ = transfer_manager_progress
+                                            .update(&transfer_id_progress, |t| {
+                                                t.status = TransferStatus::Failed;
+                                                t.error = Some(error.clone());
+                                            })
+                                            .await;
+                                        update_transfers_ui(
+                                            &window_weak_progress,
+                                            &transfer_manager_progress,
+                                        )
+                                        .await;
+                                        update_status(
+                                            &window_weak_progress,
+                                            &format!("Push failed: {}", error),
+                                        );
+                                        save_to_history(
+                                            &transfer_history_progress,
+                                            &transfer_manager_progress,
+                                            &transfer_id_progress,
+                                            keep_completed,
+                                        )
+                                        .await;
                                     }
                                     TransferEvent::Cancelled { .. } => {
-                                        let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
-                                            t.status = TransferStatus::Cancelled;
-                                        }).await;
-                                        update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                        let _ = transfer_manager_progress
+                                            .update(&transfer_id_progress, |t| {
+                                                t.status = TransferStatus::Cancelled;
+                                            })
+                                            .await;
+                                        update_transfers_ui(
+                                            &window_weak_progress,
+                                            &transfer_manager_progress,
+                                        )
+                                        .await;
                                         update_status(&window_weak_progress, "Push cancelled");
-                                        save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress, keep_completed).await;
+                                        save_to_history(
+                                            &transfer_history_progress,
+                                            &transfer_manager_progress,
+                                            &transfer_id_progress,
+                                            keep_completed,
+                                        )
+                                        .await;
                                     }
                                 }
                             }
@@ -4996,10 +5291,12 @@ impl App {
                             }
                             Err(e) => {
                                 error!("Push to {} failed: {}", peer.name, e);
-                                let _ = transfer_manager.update(&transfer_id, |t| {
-                                    t.status = TransferStatus::Failed;
-                                    t.error = Some(e.to_string());
-                                }).await;
+                                let _ = transfer_manager
+                                    .update(&transfer_id, |t| {
+                                        t.status = TransferStatus::Failed;
+                                        t.error = Some(e.to_string());
+                                    })
+                                    .await;
                                 update_transfers_ui(&window_weak, &transfer_manager).await;
                                 update_status(&window_weak, &format!("Push failed: {}", e));
                             }
@@ -5299,7 +5596,9 @@ impl App {
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(window) = window_weak_loading.upgrade() {
                                 window.global::<AppLogic>().set_browse_loading(true);
-                                window.global::<AppLogic>().set_browse_error(SharedString::from(""));
+                                window
+                                    .global::<AppLogic>()
+                                    .set_browse_error(SharedString::from(""));
                             }
                         });
 
@@ -5316,13 +5615,18 @@ impl App {
                         };
 
                         // Browse the target path
-                        let browse_path = if target_path == "/" { None } else { Some(target_path.as_str()) };
+                        let browse_path = if target_path == "/" {
+                            None
+                        } else {
+                            Some(target_path.as_str())
+                        };
                         match browse_remote(&endpoint, &peer, browse_path).await {
                             Ok((path, entries)) => {
                                 info!("Navigate succeeded: {} entries at {}", entries.len(), path);
 
-                                let browse_entries: Vec<BrowseEntryData> = entries.iter().map(|e| {
-                                    BrowseEntryData {
+                                let browse_entries: Vec<BrowseEntryData> = entries
+                                    .iter()
+                                    .map(|e| BrowseEntryData {
                                         name: e.name.clone(),
                                         is_dir: e.is_dir,
                                         size: e.size,
@@ -5333,8 +5637,8 @@ impl App {
                                             format!("{}/{}", path, e.name)
                                         },
                                         selected: false,
-                                    }
-                                }).collect();
+                                    })
+                                    .collect();
 
                                 // Save previous path before updating
                                 let previous_path = {
@@ -5350,23 +5654,36 @@ impl App {
                                 let _ = slint::invoke_from_event_loop(move || {
                                     if let Some(window) = window_weak_ok.upgrade() {
                                         window.global::<AppLogic>().set_browse_loading(false);
-                                        window.global::<AppLogic>().set_browse_current_path(SharedString::from(&path));
-                                        window.global::<AppLogic>().set_browse_previous_path(SharedString::from(&previous_path));
+                                        window
+                                            .global::<AppLogic>()
+                                            .set_browse_current_path(SharedString::from(&path));
+                                        window.global::<AppLogic>().set_browse_previous_path(
+                                            SharedString::from(&previous_path),
+                                        );
                                         window.global::<AppLogic>().set_browse_selected_count(0);
-                                        window.global::<AppLogic>().set_browse_last_selected_index(-1);  // Reset shift-select anchor
-                                        window.global::<AppLogic>().set_browse_error(SharedString::from(""));
+                                        window
+                                            .global::<AppLogic>()
+                                            .set_browse_last_selected_index(-1); // Reset shift-select anchor
+                                        window
+                                            .global::<AppLogic>()
+                                            .set_browse_error(SharedString::from(""));
 
-                                        let ui_entries: Vec<BrowseEntry> = browse_entries.iter().map(|e| {
-                                            BrowseEntry {
+                                        let ui_entries: Vec<BrowseEntry> = browse_entries
+                                            .iter()
+                                            .map(|e| BrowseEntry {
                                                 name: SharedString::from(&e.name),
                                                 is_dir: e.is_dir,
                                                 size: SharedString::from(format_size(e.size)),
-                                                modified: SharedString::from(format_timestamp(e.modified)),
+                                                modified: SharedString::from(format_timestamp(
+                                                    e.modified,
+                                                )),
                                                 path: SharedString::from(&e.path),
                                                 selected: e.selected,
-                                            }
-                                        }).collect();
-                                        window.global::<AppLogic>().set_browse_entries(ModelRc::new(VecModel::from(ui_entries)));
+                                            })
+                                            .collect();
+                                        window.global::<AppLogic>().set_browse_entries(
+                                            ModelRc::new(VecModel::from(ui_entries)),
+                                        );
                                     }
                                 });
                             }
@@ -5377,7 +5694,9 @@ impl App {
                                 let _ = slint::invoke_from_event_loop(move || {
                                     if let Some(window) = window_weak_err.upgrade() {
                                         window.global::<AppLogic>().set_browse_loading(false);
-                                        window.global::<AppLogic>().set_browse_error(SharedString::from(&err_str));
+                                        window
+                                            .global::<AppLogic>()
+                                            .set_browse_error(SharedString::from(&err_str));
                                     }
                                 });
                             }
@@ -5411,7 +5730,11 @@ impl App {
                             if idx < state.entries.len() {
                                 state.entries[idx].selected = !state.entries[idx].selected;
                             }
-                            let count = state.entries.iter().filter(|e| e.selected && !e.is_dir).count();
+                            let count = state
+                                .entries
+                                .iter()
+                                .filter(|e| e.selected && !e.is_dir)
+                                .count();
                             (state.entries.clone(), count as i32)
                         };
 
@@ -5419,18 +5742,23 @@ impl App {
                         let window_weak_ui = window_weak.clone();
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(window) = window_weak_ui.upgrade() {
-                                let ui_entries: Vec<BrowseEntry> = entries.iter().map(|e| {
-                                    BrowseEntry {
+                                let ui_entries: Vec<BrowseEntry> = entries
+                                    .iter()
+                                    .map(|e| BrowseEntry {
                                         name: SharedString::from(&e.name),
                                         is_dir: e.is_dir,
                                         size: SharedString::from(format_size(e.size)),
                                         modified: SharedString::from(format_timestamp(e.modified)),
                                         path: SharedString::from(&e.path),
                                         selected: e.selected,
-                                    }
-                                }).collect();
-                                window.global::<AppLogic>().set_browse_entries(ModelRc::new(VecModel::from(ui_entries)));
-                                window.global::<AppLogic>().set_browse_selected_count(selected_count);
+                                    })
+                                    .collect();
+                                window
+                                    .global::<AppLogic>()
+                                    .set_browse_entries(ModelRc::new(VecModel::from(ui_entries)));
+                                window
+                                    .global::<AppLogic>()
+                                    .set_browse_selected_count(selected_count);
                             }
                         });
                     });
@@ -5449,11 +5777,14 @@ impl App {
                 let browse_state = browse_state.clone();
 
                 // Get the anchor index from the UI
-                let anchor_idx = window_weak.upgrade().map(|w| {
-                    w.global::<AppLogic>().get_browse_last_selected_index() as usize
-                });
+                let anchor_idx = window_weak
+                    .upgrade()
+                    .map(|w| w.global::<AppLogic>().get_browse_last_selected_index() as usize);
 
-                info!("Range select: anchor={:?} target={}", anchor_idx, target_idx);
+                info!(
+                    "Range select: anchor={:?} target={}",
+                    anchor_idx, target_idx
+                );
 
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
@@ -5478,7 +5809,11 @@ impl App {
                                 }
                             }
 
-                            let count = state.entries.iter().filter(|e| e.selected && !e.is_dir).count();
+                            let count = state
+                                .entries
+                                .iter()
+                                .filter(|e| e.selected && !e.is_dir)
+                                .count();
                             (state.entries.clone(), count as i32)
                         };
 
@@ -5486,18 +5821,23 @@ impl App {
                         let window_weak_ui = window_weak.clone();
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(window) = window_weak_ui.upgrade() {
-                                let ui_entries: Vec<BrowseEntry> = entries.iter().map(|e| {
-                                    BrowseEntry {
+                                let ui_entries: Vec<BrowseEntry> = entries
+                                    .iter()
+                                    .map(|e| BrowseEntry {
                                         name: SharedString::from(&e.name),
                                         is_dir: e.is_dir,
                                         size: SharedString::from(format_size(e.size)),
                                         modified: SharedString::from(format_timestamp(e.modified)),
                                         path: SharedString::from(&e.path),
                                         selected: e.selected,
-                                    }
-                                }).collect();
-                                window.global::<AppLogic>().set_browse_entries(ModelRc::new(VecModel::from(ui_entries)));
-                                window.global::<AppLogic>().set_browse_selected_count(selected_count);
+                                    })
+                                    .collect();
+                                window
+                                    .global::<AppLogic>()
+                                    .set_browse_entries(ModelRc::new(VecModel::from(ui_entries)));
+                                window
+                                    .global::<AppLogic>()
+                                    .set_browse_selected_count(selected_count);
                             }
                         });
                     });
@@ -5537,7 +5877,9 @@ impl App {
                         // Get selected files from browse state
                         let (peer_id, selected_files) = {
                             let state = browse_state.read().await;
-                            let selected: Vec<_> = state.entries.iter()
+                            let selected: Vec<_> = state
+                                .entries
+                                .iter()
                                 .filter(|e| e.selected && !e.is_dir)
                                 .map(|e| FileRequest {
                                     path: e.path.clone(),
@@ -5578,12 +5920,15 @@ impl App {
                         };
 
                         // Create transfer for tracking
-                        let file_names: Vec<String> = selected_files.iter()
-                            .map(|f| std::path::Path::new(&f.path)
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or(&f.path)
-                                .to_string())
+                        let file_names: Vec<String> = selected_files
+                            .iter()
+                            .map(|f| {
+                                std::path::Path::new(&f.path)
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or(&f.path)
+                                    .to_string()
+                            })
                             .collect();
                         let transfer = Transfer::new_iroh_pull(
                             file_names.clone(),
@@ -5595,7 +5940,14 @@ impl App {
 
                         // Update UI
                         update_transfers_ui(&window_weak, &transfer_manager).await;
-                        update_status(&window_weak, &format!("Pulling {} files from {}...", selected_files.len(), peer.name));
+                        update_status(
+                            &window_weak,
+                            &format!(
+                                "Pulling {} files from {}...",
+                                selected_files.len(),
+                                peer.name
+                            ),
+                        );
 
                         // Get the shared endpoint
                         let endpoint = {
@@ -5604,10 +5956,12 @@ impl App {
                                 Some(ep) => ep.clone(),
                                 None => {
                                     error!("Shared endpoint not ready");
-                                    let _ = transfer_manager.update(&transfer_id, |t| {
-                                        t.status = TransferStatus::Failed;
-                                        t.error = Some("Network not ready".to_string());
-                                    }).await;
+                                    let _ = transfer_manager
+                                        .update(&transfer_id, |t| {
+                                            t.status = TransferStatus::Failed;
+                                            t.error = Some("Network not ready".to_string());
+                                        })
+                                        .await;
                                     update_transfers_ui(&window_weak, &transfer_manager).await;
                                     return;
                                 }
@@ -5615,7 +5969,8 @@ impl App {
                         };
 
                         // Create progress channel
-                        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<TransferEvent>(100);
+                        let (progress_tx, mut progress_rx) =
+                            tokio::sync::mpsc::channel::<TransferEvent>(100);
 
                         // Spawn progress handler
                         let transfer_manager_progress = transfer_manager.clone();
@@ -5627,81 +5982,165 @@ impl App {
                         let peer_name = peer.name.clone();
                         tokio::spawn(async move {
                             while let Some(event) = progress_rx.recv().await {
-                                let keep_completed = config_progress.read().await.keep_completed_transfers;
+                                let keep_completed =
+                                    config_progress.read().await.keep_completed_transfers;
                                 match event {
                                     TransferEvent::Started { .. } => {
-                                        let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
-                                            t.status = TransferStatus::Running;
-                                        }).await;
-                                        update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                        let _ = transfer_manager_progress
+                                            .update(&transfer_id_progress, |t| {
+                                                t.status = TransferStatus::Running;
+                                            })
+                                            .await;
+                                        update_transfers_ui(
+                                            &window_weak_progress,
+                                            &transfer_manager_progress,
+                                        )
+                                        .await;
                                     }
-                                    TransferEvent::Progress { transferred, total, speed, .. } => {
-                                        let progress = if total > 0 { transferred as f64 / total as f64 * 100.0 } else { 0.0 };
-                                        let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
-                                            t.progress = progress;
-                                            t.speed = speed.clone();
-                                            t.transferred = transferred;
-                                            t.total_size = total;
-                                        }).await;
-                                        update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                    TransferEvent::Progress {
+                                        transferred,
+                                        total,
+                                        speed,
+                                        ..
+                                    } => {
+                                        let progress = if total > 0 {
+                                            transferred as f64 / total as f64 * 100.0
+                                        } else {
+                                            0.0
+                                        };
+                                        let _ = transfer_manager_progress
+                                            .update(&transfer_id_progress, |t| {
+                                                t.progress = progress;
+                                                t.speed = speed.clone();
+                                                t.transferred = transferred;
+                                                t.total_size = total;
+                                            })
+                                            .await;
+                                        update_transfers_ui(
+                                            &window_weak_progress,
+                                            &transfer_manager_progress,
+                                        )
+                                        .await;
                                     }
                                     TransferEvent::FileComplete { file, .. } => {
                                         info!("File pulled: {}", file);
                                     }
                                     TransferEvent::Complete { .. } => {
                                         // Get total size before updating status
-                                        let total_bytes = transfer_manager_progress.get(&transfer_id_progress).await
-                                            .map(|t| t.total_size).unwrap_or(0);
-                                        let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
-                                            t.status = TransferStatus::Completed;
-                                            t.progress = 100.0;
-                                            t.completed_at = Some(chrono::Utc::now());
-                                        }).await;
+                                        let total_bytes = transfer_manager_progress
+                                            .get(&transfer_id_progress)
+                                            .await
+                                            .map(|t| t.total_size)
+                                            .unwrap_or(0);
+                                        let _ = transfer_manager_progress
+                                            .update(&transfer_id_progress, |t| {
+                                                t.status = TransferStatus::Completed;
+                                                t.progress = 100.0;
+                                                t.completed_at = Some(chrono::Utc::now());
+                                            })
+                                            .await;
                                         // Update session stats (pull is a download)
                                         {
                                             let mut stats = session_stats_progress.write().await;
                                             stats.bytes_downloaded += total_bytes;
                                             stats.transfers_completed += 1;
                                         }
-                                        update_session_stats_ui(&window_weak_progress, &session_stats_progress);
-                                        update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
-                                        update_status(&window_weak_progress, &format!("Pull from {} completed", peer_name));
-                                        save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress, keep_completed).await;
+                                        update_session_stats_ui(
+                                            &window_weak_progress,
+                                            &session_stats_progress,
+                                        );
+                                        update_transfers_ui(
+                                            &window_weak_progress,
+                                            &transfer_manager_progress,
+                                        )
+                                        .await;
+                                        update_status(
+                                            &window_weak_progress,
+                                            &format!("Pull from {} completed", peer_name),
+                                        );
+                                        save_to_history(
+                                            &transfer_history_progress,
+                                            &transfer_manager_progress,
+                                            &transfer_id_progress,
+                                            keep_completed,
+                                        )
+                                        .await;
                                         // Refresh UI to clear the completed transfer
-                                        update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
+                                        update_transfers_ui(
+                                            &window_weak_progress,
+                                            &transfer_manager_progress,
+                                        )
+                                        .await;
                                     }
                                     TransferEvent::Failed { error, .. } => {
                                         error!("Pull failed: {}", error);
-                                        let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
-                                            t.status = TransferStatus::Failed;
-                                            t.error = Some(error.clone());
-                                        }).await;
-                                        update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
-                                        update_status(&window_weak_progress, &format!("Pull failed: {}", error));
-                                        save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress, keep_completed).await;
+                                        let _ = transfer_manager_progress
+                                            .update(&transfer_id_progress, |t| {
+                                                t.status = TransferStatus::Failed;
+                                                t.error = Some(error.clone());
+                                            })
+                                            .await;
+                                        update_transfers_ui(
+                                            &window_weak_progress,
+                                            &transfer_manager_progress,
+                                        )
+                                        .await;
+                                        update_status(
+                                            &window_weak_progress,
+                                            &format!("Pull failed: {}", error),
+                                        );
+                                        save_to_history(
+                                            &transfer_history_progress,
+                                            &transfer_manager_progress,
+                                            &transfer_id_progress,
+                                            keep_completed,
+                                        )
+                                        .await;
                                     }
                                     TransferEvent::Cancelled { .. } => {
-                                        let _ = transfer_manager_progress.update(&transfer_id_progress, |t| {
-                                            t.status = TransferStatus::Cancelled;
-                                        }).await;
-                                        update_transfers_ui(&window_weak_progress, &transfer_manager_progress).await;
-                                        save_to_history(&transfer_history_progress, &transfer_manager_progress, &transfer_id_progress, keep_completed).await;
+                                        let _ = transfer_manager_progress
+                                            .update(&transfer_id_progress, |t| {
+                                                t.status = TransferStatus::Cancelled;
+                                            })
+                                            .await;
+                                        update_transfers_ui(
+                                            &window_weak_progress,
+                                            &transfer_manager_progress,
+                                        )
+                                        .await;
+                                        save_to_history(
+                                            &transfer_history_progress,
+                                            &transfer_manager_progress,
+                                            &transfer_id_progress,
+                                            keep_completed,
+                                        )
+                                        .await;
                                     }
                                 }
                             }
                         });
 
                         // Start the pull
-                        match pull_files(&endpoint, &peer, &selected_files, &download_dir, progress_tx).await {
+                        match pull_files(
+                            &endpoint,
+                            &peer,
+                            &selected_files,
+                            &download_dir,
+                            progress_tx,
+                        )
+                        .await
+                        {
                             Ok(_) => {
                                 info!("Pull from {} completed", peer.name);
                             }
                             Err(e) => {
                                 error!("Pull from {} failed: {}", peer.name, e);
-                                let _ = transfer_manager.update(&transfer_id, |t| {
-                                    t.status = TransferStatus::Failed;
-                                    t.error = Some(e.to_string());
-                                }).await;
+                                let _ = transfer_manager
+                                    .update(&transfer_id, |t| {
+                                        t.status = TransferStatus::Failed;
+                                        t.error = Some(e.to_string());
+                                    })
+                                    .await;
                                 update_transfers_ui(&window_weak, &transfer_manager).await;
                                 update_status(&window_weak, &format!("Pull failed: {}", e));
                             }
@@ -5738,7 +6177,9 @@ impl App {
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(window) = window_weak.upgrade() {
                                 window.global::<AppLogic>().set_browse_open(false);
-                                window.global::<AppLogic>().set_browse_last_selected_index(-1);
+                                window
+                                    .global::<AppLogic>()
+                                    .set_browse_last_selected_index(-1);
                             }
                         });
                     });
@@ -5803,11 +6244,17 @@ impl App {
                                 info!("Network '{}' created successfully", name_str);
                                 drop(store);
                                 update_networks_ui(&window_weak, &network_store, &peer_store).await;
-                                update_status(&window_weak, &format!("Network '{}' created", name_str));
+                                update_status(
+                                    &window_weak,
+                                    &format!("Network '{}' created", name_str),
+                                );
                             }
                             Err(e) => {
                                 error!("Failed to create network: {}", e);
-                                update_status(&window_weak, &format!("Error creating network: {}", e));
+                                update_status(
+                                    &window_weak,
+                                    &format!("Error creating network: {}", e),
+                                );
                             }
                         }
                     });
@@ -5845,7 +6292,10 @@ impl App {
                             }
                             Err(e) => {
                                 error!("Failed to delete network: {}", e);
-                                update_status(&window_weak, &format!("Error deleting network: {}", e));
+                                update_status(
+                                    &window_weak,
+                                    &format!("Error deleting network: {}", e),
+                                );
                             }
                         }
                     });
@@ -5880,11 +6330,17 @@ impl App {
                                 info!("Network renamed successfully");
                                 drop(store);
                                 update_networks_ui(&window_weak, &network_store, &peer_store).await;
-                                update_status(&window_weak, &format!("Network renamed to '{}'", name_str));
+                                update_status(
+                                    &window_weak,
+                                    &format!("Network renamed to '{}'", name_str),
+                                );
                             }
                             Err(e) => {
                                 error!("Failed to rename network: {}", e);
-                                update_status(&window_weak, &format!("Error renaming network: {}", e));
+                                update_status(
+                                    &window_weak,
+                                    &format!("Error renaming network: {}", e),
+                                );
                             }
                         }
                     });
@@ -5940,7 +6396,10 @@ impl App {
             move |network_id, peer_id| {
                 let network_id_str = network_id.to_string();
                 let peer_id_str = peer_id.to_string();
-                info!("Removing peer {} from network {}", peer_id_str, network_id_str);
+                info!(
+                    "Removing peer {} from network {}",
+                    peer_id_str, network_id_str
+                );
                 let window_weak = window_weak.clone();
                 let network_store = network_store.clone();
                 let peer_store = peer_store.clone();
@@ -6048,7 +6507,7 @@ impl App {
                         drop(endpoint_guard);
 
                         let identity_guard = identity.read().await;
-                        let our_identity = match identity_guard.as_ref() {
+                        let _our_identity = match identity_guard.as_ref() {
                             Some(id) => id.clone(),
                             None => {
                                 error!("No identity available");
@@ -6471,11 +6930,15 @@ impl App {
                         // Get our endpoint ID
                         let our_id = {
                             let id_guard = identity.read().await;
-                            id_guard.as_ref().map(|i| i.endpoint_id.clone()).unwrap_or_default()
+                            id_guard
+                                .as_ref()
+                                .map(|i| i.endpoint_id.clone())
+                                .unwrap_or_default()
                         };
 
                         // Load messages from store (keyed by endpoint_id)
-                        let mut messages = chat_store.get_messages(&peer_endpoint_id, 50, None)
+                        let mut messages = chat_store
+                            .get_messages(&peer_endpoint_id, 50, None)
                             .unwrap_or_default();
 
                         // Reverse to get chronological order (oldest first for display)
@@ -6642,15 +7105,17 @@ impl App {
 
                         // Send message via handler
                         let handler = ChatHandler::new(chat_store.clone(), our_id.clone());
-                        let result = handler.send_message(
-                            conn_opt.as_mut(),
-                            &peer_id,
-                            &peer_name,
-                            content_str.clone(),
-                        ).await;
+                        let result = handler
+                            .send_message(
+                                conn_opt.as_mut(),
+                                &peer_id,
+                                &peer_name,
+                                content_str.clone(),
+                            )
+                            .await;
 
                         // Close connection if we opened one
-                        if let Some(mut conn) = conn_opt {
+                        if let Some(conn) = conn_opt {
                             let _ = conn.close().await;
                         }
 
@@ -6662,7 +7127,9 @@ impl App {
                                     id: SharedString::from(message.id.as_str()),
                                     content: SharedString::from(&message.content),
                                     is_mine: true,
-                                    timestamp: SharedString::from(format_chat_time(message.sent_at)),
+                                    timestamp: SharedString::from(format_chat_time(
+                                        message.sent_at,
+                                    )),
                                     status: SharedString::from(status),
                                     show_date_divider: false,
                                     date_label: SharedString::default(),
@@ -6672,11 +7139,14 @@ impl App {
                                     if let Some(window) = window_weak.upgrade() {
                                         let logic = window.global::<AppLogic>();
                                         let current = logic.get_chat_messages();
-                                        let mut messages: Vec<ChatMessageItem> = (0..current.row_count())
+                                        let mut messages: Vec<ChatMessageItem> = (0..current
+                                            .row_count())
                                             .filter_map(|i| current.row_data(i))
                                             .collect();
                                         messages.push(ui_message);
-                                        logic.set_chat_messages(ModelRc::new(VecModel::from(messages)));
+                                        logic.set_chat_messages(ModelRc::new(VecModel::from(
+                                            messages,
+                                        )));
                                     }
                                 });
                             }
@@ -6802,7 +7272,7 @@ impl App {
                                 if let Some(window) = window_weak.upgrade() {
                                     let logic = window.global::<AppLogic>();
                                     logic.set_screen_viewer_error(SharedString::from(
-                                        "Peer has not granted screen viewing permission"
+                                        "Peer has not granted screen viewing permission",
                                     ));
                                 }
                             });
@@ -6821,7 +7291,7 @@ impl App {
                                 if let Some(window) = window_weak.upgrade() {
                                     let logic = window.global::<AppLogic>();
                                     logic.set_screen_viewer_error(SharedString::from(
-                                        "Peer is not online"
+                                        "Peer is not online",
                                     ));
                                 }
                             });
@@ -6854,7 +7324,9 @@ impl App {
                             if let Some(window) = window_weak_ui.upgrade() {
                                 let logic = window.global::<AppLogic>();
                                 logic.set_screen_viewer_open(true);
-                                logic.set_screen_viewer_peer_id(SharedString::from(&peer_endpoint_id));
+                                logic.set_screen_viewer_peer_id(SharedString::from(
+                                    &peer_endpoint_id,
+                                ));
                                 logic.set_screen_viewer_peer_name(SharedString::from(&peer_name));
                                 logic.set_screen_viewer_status(SharedString::from("connecting"));
                                 logic.set_screen_viewer_error(SharedString::default());
@@ -6879,7 +7351,9 @@ impl App {
                                         let _ = slint::invoke_from_event_loop(move || {
                                             if let Some(window) = window_weak.upgrade() {
                                                 let logic = window.global::<AppLogic>();
-                                                logic.set_screen_viewer_status(SharedString::from(&status_str));
+                                                logic.set_screen_viewer_status(SharedString::from(
+                                                    &status_str,
+                                                ));
                                             }
                                         });
                                     }
@@ -6900,7 +7374,8 @@ impl App {
                                             if let Some(window) = window_weak.upgrade() {
                                                 let logic = window.global::<AppLogic>();
                                                 logic.set_screen_viewer_fps(fps);
-                                                logic.set_screen_viewer_bitrate_kbps(bitrate as i32);
+                                                logic
+                                                    .set_screen_viewer_bitrate_kbps(bitrate as i32);
                                                 logic.set_screen_viewer_latency_ms(latency as i32);
                                             }
                                         });
@@ -6909,8 +7384,12 @@ impl App {
                                         let _ = slint::invoke_from_event_loop(move || {
                                             if let Some(window) = window_weak.upgrade() {
                                                 let logic = window.global::<AppLogic>();
-                                                logic.set_screen_viewer_status(SharedString::from("error"));
-                                                logic.set_screen_viewer_error(SharedString::from(&reason));
+                                                logic.set_screen_viewer_status(SharedString::from(
+                                                    "error",
+                                                ));
+                                                logic.set_screen_viewer_error(SharedString::from(
+                                                    &reason,
+                                                ));
                                             }
                                         });
                                     }
@@ -6918,9 +7397,13 @@ impl App {
                                         let _ = slint::invoke_from_event_loop(move || {
                                             if let Some(window) = window_weak.upgrade() {
                                                 let logic = window.global::<AppLogic>();
-                                                logic.set_screen_viewer_status(SharedString::from("disconnected"));
+                                                logic.set_screen_viewer_status(SharedString::from(
+                                                    "disconnected",
+                                                ));
                                                 if !reason.is_empty() && reason != "user request" {
-                                                    logic.set_screen_viewer_error(SharedString::from(&reason));
+                                                    logic.set_screen_viewer_error(
+                                                        SharedString::from(&reason),
+                                                    );
                                                 }
                                             }
                                         });
@@ -6929,7 +7412,9 @@ impl App {
                                         let _ = slint::invoke_from_event_loop(move || {
                                             if let Some(window) = window_weak.upgrade() {
                                                 let logic = window.global::<AppLogic>();
-                                                logic.set_screen_viewer_error(SharedString::from(&msg));
+                                                logic.set_screen_viewer_error(SharedString::from(
+                                                    &msg,
+                                                ));
                                             }
                                         });
                                     }
@@ -6937,7 +7422,9 @@ impl App {
                                         // Convert displays to string names (Vec<String> is Send)
                                         let display_names: Vec<String> = displays
                                             .iter()
-                                            .map(|d| format!("{} ({}x{})", d.name, d.width, d.height))
+                                            .map(|d| {
+                                                format!("{} ({}x{})", d.name, d.width, d.height)
+                                            })
                                             .collect();
                                         let _ = slint::invoke_from_event_loop(move || {
                                             if let Some(window) = window_weak.upgrade() {
@@ -6947,8 +7434,12 @@ impl App {
                                                     .into_iter()
                                                     .map(SharedString::from)
                                                     .collect();
-                                                let display_model = std::rc::Rc::new(slint::VecModel::from(shared_names));
-                                                logic.set_screen_viewer_displays(slint::ModelRc::from(display_model));
+                                                let display_model = std::rc::Rc::new(
+                                                    slint::VecModel::from(shared_names),
+                                                );
+                                                logic.set_screen_viewer_displays(
+                                                    slint::ModelRc::from(display_model),
+                                                );
                                                 logic.set_screen_viewer_current_display(0);
                                             }
                                         });
@@ -6959,7 +7450,9 @@ impl App {
                                         let _ = slint::invoke_from_event_loop(move || {
                                             if let Some(window) = window_weak.upgrade() {
                                                 let logic = window.global::<AppLogic>();
-                                                logic.set_screen_viewer_encoder(SharedString::from(&encoder_name));
+                                                logic.set_screen_viewer_encoder(
+                                                    SharedString::from(&encoder_name),
+                                                );
                                             }
                                         });
                                     }
@@ -6981,20 +7474,32 @@ impl App {
                         };
 
                         // Create cancellation channel
-                        let (cancel_tx, cancel_rx) = tokio::sync::mpsc::channel::<()>(1);
+                        let (_cancel_tx, cancel_rx) = tokio::sync::mpsc::channel::<()>(1);
 
                         // Create stream event channel
-                        let (stream_event_tx, mut stream_event_rx) = tokio::sync::mpsc::channel::<ScreenStreamEvent>(256);
+                        let (stream_event_tx, mut stream_event_rx) =
+                            tokio::sync::mpsc::channel::<ScreenStreamEvent>(256);
 
                         // Create input event channel for forwarding mouse/keyboard to remote
-                        let (input_tx, input_rx) = tokio::sync::mpsc::channel::<Vec<croh_core::iroh::protocol::InputEvent>>(64);
+                        let (input_tx, input_rx) = tokio::sync::mpsc::channel::<
+                            Vec<croh_core::iroh::protocol::InputEvent>,
+                        >(64);
 
                         // Clone for the streaming task
                         let peer_clone = peer.clone();
 
                         // Spawn the streaming task
                         let stream_task = tokio::spawn(async move {
-                            match stream_screen_from_peer(&endpoint, &peer_clone, None, stream_event_tx, cancel_rx, input_rx).await {
+                            match stream_screen_from_peer(
+                                &endpoint,
+                                &peer_clone,
+                                None,
+                                stream_event_tx,
+                                cancel_rx,
+                                input_rx,
+                            )
+                            .await
+                            {
                                 Ok(stream_id) => {
                                     info!("Screen stream {} ended normally", stream_id);
                                 }
@@ -7015,7 +7520,10 @@ impl App {
                                         // Convert RemoteInputEvent to protocol InputEvent
                                         let input_event = match event {
                                             RemoteInputEvent::MouseMove { x, y, .. } => {
-                                                croh_core::iroh::protocol::InputEvent::MouseMove { x, y }
+                                                croh_core::iroh::protocol::InputEvent::MouseMove {
+                                                    x,
+                                                    y,
+                                                }
                                             }
                                             RemoteInputEvent::MouseButton { button, pressed } => {
                                                 let btn = match button {
@@ -7026,12 +7534,18 @@ impl App {
                                                     croh_core::screen::MouseButton::Forward => 4,
                                                     croh_core::screen::MouseButton::Other(n) => n,
                                                 };
-                                                croh_core::iroh::protocol::InputEvent::MouseButton { button: btn, pressed }
+                                                croh_core::iroh::protocol::InputEvent::MouseButton {
+                                                    button: btn,
+                                                    pressed,
+                                                }
                                             }
                                             RemoteInputEvent::MouseScroll { dx, dy } => {
-                                                croh_core::iroh::protocol::InputEvent::MouseScroll { delta_x: dx, delta_y: dy }
+                                                croh_core::iroh::protocol::InputEvent::MouseScroll {
+                                                    delta_x: dx,
+                                                    delta_y: dy,
+                                                }
                                             }
-                                            RemoteInputEvent::Key { pressed, .. } => {
+                                            RemoteInputEvent::Key { pressed: _, .. } => {
                                                 // Key events need proper mapping - for now just log
                                                 debug!("Key event not yet fully implemented");
                                                 continue;
@@ -7042,8 +7556,12 @@ impl App {
                                             }
                                         };
                                         // Send as a batch of one event
-                                        debug!("Sending input event to input_tx: {:?}", input_event);
-                                        if let Err(e) = input_tx_clone.send(vec![input_event]).await {
+                                        debug!(
+                                            "Sending input event to input_tx: {:?}",
+                                            input_event
+                                        );
+                                        if let Err(e) = input_tx_clone.send(vec![input_event]).await
+                                        {
                                             warn!("Failed to send input event to channel: {}", e);
                                         }
                                     }
@@ -7065,16 +7583,27 @@ impl App {
                         loop {
                             match stream_event_rx.recv().await {
                                 Some(stream_event) => match stream_event {
-                                    ScreenStreamEvent::Accepted { stream_id, displays, .. } => {
-                                        info!("Stream {} accepted, {} displays available", stream_id, displays.len());
-                                        let display_infos: Vec<_> = displays.iter().map(|d| croh_core::iroh::protocol::DisplayInfo {
-                                            id: d.id.clone(),
-                                            name: d.name.clone(),
-                                            width: d.width,
-                                            height: d.height,
-                                            refresh_rate: d.refresh_rate,
-                                            is_primary: d.is_primary,
-                                        }).collect();
+                                    ScreenStreamEvent::Accepted {
+                                        stream_id,
+                                        displays,
+                                        ..
+                                    } => {
+                                        info!(
+                                            "Stream {} accepted, {} displays available",
+                                            stream_id,
+                                            displays.len()
+                                        );
+                                        let display_infos: Vec<_> = displays
+                                            .iter()
+                                            .map(|d| croh_core::iroh::protocol::DisplayInfo {
+                                                id: d.id.clone(),
+                                                name: d.name.clone(),
+                                                width: d.width,
+                                                height: d.height,
+                                                refresh_rate: d.refresh_rate,
+                                                is_primary: d.is_primary,
+                                            })
+                                            .collect();
                                         viewer.on_connected(display_infos);
                                     }
                                     ScreenStreamEvent::Rejected { reason, .. } => {
@@ -7087,7 +7616,12 @@ impl App {
                                         viewer.record_latency(metadata.captured_at);
 
                                         // Pass frame to viewer for decoding and display
-                                        if let Err(e) = viewer.on_frame_received(&data, metadata.width, metadata.height, metadata.sequence) {
+                                        if let Err(e) = viewer.on_frame_received(
+                                            &data,
+                                            metadata.width,
+                                            metadata.height,
+                                            metadata.sequence,
+                                        ) {
                                             warn!("Frame processing error: {}", e);
                                             continue;
                                         }
@@ -7103,12 +7637,13 @@ impl App {
                                             let _ = slint::invoke_from_event_loop(move || {
                                                 if let Some(window) = window_weak_frame.upgrade() {
                                                     // Create a Slint image from RGBA data
-                                                    let pixel_buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
-                                                        &rgba_data,
-                                                        width,
-                                                        height,
+                                                    let pixel_buffer = slint::SharedPixelBuffer::<
+                                                        slint::Rgba8Pixel,
+                                                    >::clone_from_slice(
+                                                        &rgba_data, width, height
                                                     );
-                                                    let image = slint::Image::from_rgba8(pixel_buffer);
+                                                    let image =
+                                                        slint::Image::from_rgba8(pixel_buffer);
 
                                                     let logic = window.global::<AppLogic>();
                                                     logic.set_screen_viewer_frame(image);
@@ -7234,24 +7769,28 @@ impl App {
         });
 
         // Toggle fullscreen callback
-        window.global::<AppLogic>().on_screen_viewer_toggle_fullscreen({
-            let window_weak = window_weak.clone();
-
-            move || {
-                debug!("Toggling screen viewer fullscreen");
-
+        window
+            .global::<AppLogic>()
+            .on_screen_viewer_toggle_fullscreen({
                 let window_weak = window_weak.clone();
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(window) = window_weak.upgrade() {
-                        let logic = window.global::<AppLogic>();
-                        let is_fullscreen = logic.get_screen_viewer_fullscreen();
-                        logic.set_screen_viewer_fullscreen(!is_fullscreen);
-                    }
-                });
-            }
-        });
+
+                move || {
+                    debug!("Toggling screen viewer fullscreen");
+
+                    let window_weak = window_weak.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(window) = window_weak.upgrade() {
+                            let logic = window.global::<AppLogic>();
+                            let is_fullscreen = logic.get_screen_viewer_fullscreen();
+                            logic.set_screen_viewer_fullscreen(!is_fullscreen);
+                        }
+                    });
+                }
+            });
 
         // Toggle input forwarding callback
+        // When called with input already enabled, this captures the cursor
+        // When called with input disabled, this enables input mode
         window.global::<AppLogic>().on_screen_viewer_toggle_input({
             let window_weak = window_weak.clone();
 
@@ -7263,89 +7802,108 @@ impl App {
                     if let Some(window) = window_weak.upgrade() {
                         let logic = window.global::<AppLogic>();
                         let is_enabled = logic.get_screen_viewer_input_enabled();
-                        logic.set_screen_viewer_input_enabled(!is_enabled);
-                        info!("Input forwarding enabled: {}", !is_enabled);
+                        let is_captured = logic.get_screen_viewer_cursor_captured();
+
+                        if is_enabled && !is_captured {
+                            // Input is enabled but not captured - capture the cursor
+                            logic.set_screen_viewer_cursor_captured(true);
+                            info!("Cursor captured for input");
+                        } else if !is_enabled {
+                            // Enable input mode (user can then click to capture)
+                            logic.set_screen_viewer_input_enabled(true);
+                            info!("Input forwarding enabled");
+                        } else {
+                            // Disable input mode entirely
+                            logic.set_screen_viewer_input_enabled(false);
+                            logic.set_screen_viewer_cursor_captured(false);
+                            info!("Input forwarding disabled");
+                        }
                     }
                 });
             }
         });
 
         // Switch display callback
-        window.global::<AppLogic>().on_screen_viewer_switch_display({
-            let screen_viewer_cmd = screen_viewer_cmd.clone();
-            let window_weak = window_weak.clone();
-
-            move |display_index| {
-                debug!("Switching to display index: {}", display_index);
-
+        window
+            .global::<AppLogic>()
+            .on_screen_viewer_switch_display({
                 let screen_viewer_cmd = screen_viewer_cmd.clone();
                 let window_weak = window_weak.clone();
-                // Use index as display_id (common convention)
-                let display_id = display_index.to_string();
 
-                std::thread::spawn(move || {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .unwrap();
+                move |display_index| {
+                    debug!("Switching to display index: {}", display_index);
 
-                    rt.block_on(async {
-                        let cmd_guard = screen_viewer_cmd.read().await;
-                        if let Some(ref cmd_tx) = *cmd_guard {
-                            let _ = cmd_tx.send(ViewerCommand::SwitchDisplay {
-                                display_id,
-                            }).await;
+                    let screen_viewer_cmd = screen_viewer_cmd.clone();
+                    let window_weak = window_weak.clone();
+                    // Use index as display_id (common convention)
+                    let display_id = display_index.to_string();
+
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .unwrap();
+
+                        rt.block_on(async {
+                            let cmd_guard = screen_viewer_cmd.read().await;
+                            if let Some(ref cmd_tx) = *cmd_guard {
+                                let _ = cmd_tx
+                                    .send(ViewerCommand::SwitchDisplay { display_id })
+                                    .await;
+                            }
+                        });
+                    });
+
+                    // Update the UI immediately
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(window) = window_weak.upgrade() {
+                            window
+                                .global::<AppLogic>()
+                                .set_screen_viewer_current_display(display_index);
                         }
                     });
-                });
-
-                // Update the UI immediately
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(window) = window_weak.upgrade() {
-                        window.global::<AppLogic>().set_screen_viewer_current_display(display_index);
-                    }
-                });
-            }
-        });
+                }
+            });
 
         // Adjust quality callback
-        window.global::<AppLogic>().on_screen_viewer_adjust_quality({
-            let screen_viewer_cmd = screen_viewer_cmd.clone();
-
-            move |quality_str| {
-                let quality_str = quality_str.to_string();
-                debug!("Adjusting screen viewer quality to: {}", quality_str);
-
+        window
+            .global::<AppLogic>()
+            .on_screen_viewer_adjust_quality({
                 let screen_viewer_cmd = screen_viewer_cmd.clone();
 
-                std::thread::spawn(move || {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .unwrap();
+                move |quality_str| {
+                    let quality_str = quality_str.to_string();
+                    debug!("Adjusting screen viewer quality to: {}", quality_str);
 
-                    rt.block_on(async {
-                        use croh_core::iroh::protocol::ScreenQuality;
+                    let screen_viewer_cmd = screen_viewer_cmd.clone();
 
-                        let quality = match quality_str.as_str() {
-                            "fast" => ScreenQuality::Fast,
-                            "balanced" => ScreenQuality::Balanced,
-                            "quality" => ScreenQuality::Quality,
-                            "auto" => ScreenQuality::Auto,
-                            _ => ScreenQuality::Balanced,
-                        };
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .unwrap();
 
-                        let cmd_guard = screen_viewer_cmd.read().await;
-                        if let Some(ref cmd_tx) = *cmd_guard {
-                            let _ = cmd_tx.send(ViewerCommand::AdjustQuality {
-                                quality,
-                                fps: None,
-                            }).await;
-                        }
+                        rt.block_on(async {
+                            use croh_core::iroh::protocol::ScreenQuality;
+
+                            let quality = match quality_str.as_str() {
+                                "fast" => ScreenQuality::Fast,
+                                "balanced" => ScreenQuality::Balanced,
+                                "quality" => ScreenQuality::Quality,
+                                "auto" => ScreenQuality::Auto,
+                                _ => ScreenQuality::Balanced,
+                            };
+
+                            let cmd_guard = screen_viewer_cmd.read().await;
+                            if let Some(ref cmd_tx) = *cmd_guard {
+                                let _ = cmd_tx
+                                    .send(ViewerCommand::AdjustQuality { quality, fps: None })
+                                    .await;
+                            }
+                        });
                     });
-                });
-            }
-        });
+                }
+            });
 
         // Send input callback (mouse/keyboard events)
         window.global::<AppLogic>().on_screen_viewer_send_input({
@@ -7354,7 +7912,10 @@ impl App {
             move |event_type, x, y, data| {
                 // event_type: 0=mouse_move, 1=mouse_down, 2=mouse_up, 3=scroll, 4=key_down, 5=key_up
                 // data for button events: 0=left, 1=right, 2=middle (from UI)
-                debug!("Input event: type={}, x={}, y={}, data={}", event_type, x, y, data);
+                debug!(
+                    "Input event: type={}, x={}, y={}, data={}",
+                    event_type, x, y, data
+                );
                 let screen_viewer_cmd = screen_viewer_cmd.clone();
 
                 std::thread::spawn(move || {
@@ -7366,8 +7927,8 @@ impl App {
                     rt.block_on(async {
                         let event = match event_type {
                             0 => RemoteInputEvent::MouseMove {
-                                x: x as i32,
-                                y: y as i32,
+                                x,
+                                y,
                                 absolute: true,
                             },
                             1 => {
@@ -7378,7 +7939,10 @@ impl App {
                                     2 => croh_core::screen::MouseButton::Middle,
                                     _ => croh_core::screen::MouseButton::Left,
                                 };
-                                RemoteInputEvent::MouseButton { button, pressed: true }
+                                RemoteInputEvent::MouseButton {
+                                    button,
+                                    pressed: true,
+                                }
                             }
                             2 => {
                                 // Mouse button up - UI sends 0=left, 1=right, 2=middle
@@ -7388,12 +7952,12 @@ impl App {
                                     2 => croh_core::screen::MouseButton::Middle,
                                     _ => croh_core::screen::MouseButton::Left,
                                 };
-                                RemoteInputEvent::MouseButton { button, pressed: false }
+                                RemoteInputEvent::MouseButton {
+                                    button,
+                                    pressed: false,
+                                }
                             }
-                            3 => RemoteInputEvent::MouseScroll {
-                                dx: x as i32,
-                                dy: y as i32,
-                            },
+                            3 => RemoteInputEvent::MouseScroll { dx: x, dy: y },
                             // Key events would need additional handling
                             _ => return,
                         };
@@ -7411,6 +7975,25 @@ impl App {
                 });
             }
         });
+
+        // Release cursor capture callback (Escape key or button click)
+        window
+            .global::<AppLogic>()
+            .on_screen_viewer_release_capture({
+                let window_weak = window_weak.clone();
+
+                move || {
+                    info!("Releasing cursor capture");
+
+                    let window_weak = window_weak.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(window) = window_weak.upgrade() {
+                            let logic = window.global::<AppLogic>();
+                            logic.set_screen_viewer_cursor_captured(false);
+                        }
+                    });
+                }
+            });
     }
 }
 
@@ -7460,10 +8043,13 @@ async fn update_networks_ui(
         .iter()
         .map(|n| {
             // Build member list with names from peer store
-            let members: Vec<(String, String)> = n.members
+            let members: Vec<(String, String)> = n
+                .members
                 .iter()
                 .filter_map(|peer_id| {
-                    peers.find_by_id(peer_id).map(|peer| (peer_id.clone(), peer.name.clone()))
+                    peers
+                        .find_by_id(peer_id)
+                        .map(|peer| (peer_id.clone(), peer.name.clone()))
                 })
                 .collect();
 
@@ -7489,7 +8075,8 @@ async fn update_networks_ui(
             let items: Vec<NetworkItem> = data
                 .into_iter()
                 .map(|d| {
-                    let members: Vec<NetworkMember> = d.members
+                    let members: Vec<NetworkMember> = d
+                        .members
                         .into_iter()
                         .map(|(peer_id, name)| NetworkMember {
                             peer_id: SharedString::from(&peer_id),
@@ -7512,7 +8099,9 @@ async fn update_networks_ui(
                 })
                 .collect();
 
-            window.global::<AppLogic>().set_networks(ModelRc::new(VecModel::from(items)));
+            window
+                .global::<AppLogic>()
+                .set_networks(ModelRc::new(VecModel::from(items)));
         }
     });
 }
@@ -7537,8 +8126,7 @@ fn format_size(bytes: u64) -> String {
 fn format_timestamp(ts: Option<i64>) -> String {
     match ts {
         Some(secs) => {
-            let dt = chrono::DateTime::from_timestamp(secs, 0)
-                .unwrap_or_else(|| chrono::Utc::now());
+            let dt = chrono::DateTime::from_timestamp(secs, 0).unwrap_or_else(chrono::Utc::now);
             dt.format("%Y-%m-%d %H:%M").to_string()
         }
         None => "-".to_string(),
@@ -7564,18 +8152,19 @@ async fn update_transfers_ui(window_weak: &Weak<MainWindow>, manager: &TransferM
             };
 
             // Calculate ETA based on progress and elapsed time
-            let eta = if t.status == TransferStatus::Running && t.progress > 0.0 && t.progress < 100.0 {
-                let remaining_percent = 100.0 - t.progress;
-                let time_per_percent = elapsed_secs as f64 / t.progress;
-                let eta_secs = (remaining_percent * time_per_percent) as u64;
-                if eta_secs > 0 {
-                    croh_core::format_eta(eta_secs)
+            let eta =
+                if t.status == TransferStatus::Running && t.progress > 0.0 && t.progress < 100.0 {
+                    let remaining_percent = 100.0 - t.progress;
+                    let time_per_percent = elapsed_secs as f64 / t.progress;
+                    let eta_secs = (remaining_percent * time_per_percent) as u64;
+                    if eta_secs > 0 {
+                        croh_core::format_eta(eta_secs)
+                    } else {
+                        String::new()
+                    }
                 } else {
                     String::new()
-                }
-            } else {
-                String::new()
-            };
+                };
 
             TransferItem {
                 id: SharedString::from(t.id.to_string()),
@@ -7615,10 +8204,13 @@ async fn update_transfers_ui(window_weak: &Weak<MainWindow>, manager: &TransferM
         .collect();
 
     // Count active transfers
-    let active_count = items.iter().filter(|t| {
-        let status = t.status.as_str();
-        status == "running" || status == "pending"
-    }).count() as i32;
+    let active_count = items
+        .iter()
+        .filter(|t| {
+            let status = t.status.as_str();
+            status == "running" || status == "pending"
+        })
+        .count() as i32;
 
     let window_weak = window_weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
@@ -7664,10 +8256,8 @@ async fn ping_peer(endpoint: &IrohEndpoint, peer: &TrustedPeer) -> bool {
     let _ = endpoint.add_node_addr(node_addr);
 
     // Try to connect with a short timeout
-    let connect_result = tokio::time::timeout(
-        Duration::from_secs(5),
-        endpoint.connect(&peer.endpoint_id)
-    ).await;
+    let connect_result =
+        tokio::time::timeout(Duration::from_secs(5), endpoint.connect(&peer.endpoint_id)).await;
 
     let mut conn = match connect_result {
         Ok(Ok(c)) => c,
@@ -7687,17 +8277,11 @@ async fn ping_peer(endpoint: &IrohEndpoint, peer: &TrustedPeer) -> bool {
     }
 
     // Wait for pong with timeout
-    let pong_result = tokio::time::timeout(
-        Duration::from_secs(5),
-        conn.recv()
-    ).await;
+    let pong_result = tokio::time::timeout(Duration::from_secs(5), conn.recv()).await;
 
     let _ = conn.close().await;
 
-    match pong_result {
-        Ok(Ok(ControlMessage::Pong { .. })) => true,
-        _ => false,
-    }
+    matches!(pong_result, Ok(Ok(ControlMessage::Pong { .. })))
 }
 
 /// Check for trust bundles in a directory and handle them.
@@ -7718,7 +8302,7 @@ async fn check_and_handle_trust_bundle(
             .filter(|e| {
                 e.file_name()
                     .to_str()
-                    .map(|n| TrustBundle::is_trust_bundle_filename(n))
+                    .map(TrustBundle::is_trust_bundle_filename)
                     .unwrap_or(false)
             })
             .collect(),
@@ -7772,10 +8356,15 @@ async fn check_and_handle_trust_bundle(
         }
     };
 
-    info!("Processing most recent trust bundle from {} (created at {})",
-          bundle.sender.name, bundle.created_at);
+    info!(
+        "Processing most recent trust bundle from {} (created at {})",
+        bundle.sender.name, bundle.created_at
+    );
 
-    update_status(window_weak, &format!("Trust request from {}...", bundle.sender.name));
+    update_status(
+        window_weak,
+        &format!("Trust request from {}...", bundle.sender.name),
+    );
 
     // Get our identity
     let our_identity = {
@@ -7805,13 +8394,19 @@ async fn check_and_handle_trust_bundle(
         }
     };
 
-    update_status(window_weak, &format!("Connecting to {}...", bundle.sender.name));
+    update_status(
+        window_weak,
+        &format!("Connecting to {}...", bundle.sender.name),
+    );
 
     // Perform the handshake as receiver
     match complete_trust_as_receiver(&endpoint, &bundle, &our_identity).await {
         Ok(result) => {
             info!("Trust established with {}", result.peer.name);
-            update_status(window_weak, &format!("Trusted peer added: {}", result.peer.name));
+            update_status(
+                window_weak,
+                &format!("Trusted peer added: {}", result.peer.name),
+            );
 
             // Add to peer store (or update if peer already exists)
             let mut store = peer_store.write().await;
@@ -7856,12 +8451,17 @@ async fn check_and_handle_trust_bundle(
 
 /// Convert a TrustedPeer to PeerItem for UI display.
 fn trusted_peer_to_item(p: &TrustedPeer) -> PeerItem {
-    let last_seen = p.last_seen
+    let last_seen = p
+        .last_seen
         .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_else(|| "Never".to_string());
     let added_at = p.added_at.format("%Y-%m-%d").to_string();
     let endpoint_display = if p.endpoint_id.len() > 16 {
-        format!("{}...{}", &p.endpoint_id[..8], &p.endpoint_id[p.endpoint_id.len()-8..])
+        format!(
+            "{}...{}",
+            &p.endpoint_id[..8],
+            &p.endpoint_id[p.endpoint_id.len() - 8..]
+        )
     } else {
         p.endpoint_id.clone()
     };
@@ -7918,7 +8518,7 @@ fn trusted_peer_to_item(p: &TrustedPeer) -> PeerItem {
         expires_at: SharedString::from(
             p.expires_at
                 .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                .unwrap_or_default()
+                .unwrap_or_default(),
         ),
         time_remaining: SharedString::from(format_time_remaining(p)),
         extension_count: p.extension_count as i32,
@@ -7963,48 +8563,36 @@ fn apply_status_to_peer_item(item: &mut PeerItem, status: &PeerConnectionStatus)
 
     // Format last contact as relative time
     item.last_contact = SharedString::from(
-        status.last_contact
-            .map(|dt| format_relative_time(dt))
-            .unwrap_or_default()
+        status
+            .last_contact
+            .map(format_relative_time)
+            .unwrap_or_default(),
     );
 
     // Transfer speeds
-    item.last_upload_speed = SharedString::from(
-        status.last_upload_speed.clone().unwrap_or_default()
-    );
-    item.last_download_speed = SharedString::from(
-        status.last_download_speed.clone().unwrap_or_default()
-    );
+    item.last_upload_speed =
+        SharedString::from(status.last_upload_speed.clone().unwrap_or_default());
+    item.last_download_speed =
+        SharedString::from(status.last_download_speed.clone().unwrap_or_default());
 
     // Peer info
-    item.peer_hostname = SharedString::from(
-        status.peer_hostname.clone().unwrap_or_default()
-    );
-    item.peer_os = SharedString::from(
-        status.peer_os.clone().unwrap_or_default()
-    );
-    item.peer_version = SharedString::from(
-        status.peer_version.clone().unwrap_or_default()
-    );
-    item.peer_free_space = SharedString::from(
-        status.peer_free_space
-            .map(|bytes| format_size(bytes))
-            .unwrap_or_default()
-    );
-    item.peer_total_space = SharedString::from(
-        status.peer_total_space
-            .map(|bytes| format_size(bytes))
-            .unwrap_or_default()
-    );
+    item.peer_hostname = SharedString::from(status.peer_hostname.clone().unwrap_or_default());
+    item.peer_os = SharedString::from(status.peer_os.clone().unwrap_or_default());
+    item.peer_version = SharedString::from(status.peer_version.clone().unwrap_or_default());
+    item.peer_free_space =
+        SharedString::from(status.peer_free_space.map(format_size).unwrap_or_default());
+    item.peer_total_space =
+        SharedString::from(status.peer_total_space.map(format_size).unwrap_or_default());
     // Calculate storage percent (percent FREE)
     item.peer_storage_percent = match (status.peer_free_space, status.peer_total_space) {
         (Some(free), Some(total)) if total > 0 => ((free as f64 / total as f64) * 100.0) as i32,
         _ => 0,
     };
     item.peer_uptime = SharedString::from(
-        status.peer_uptime
-            .map(|secs| croh_core::format_uptime(secs))
-            .unwrap_or_default()
+        status
+            .peer_uptime
+            .map(croh_core::format_uptime)
+            .unwrap_or_default(),
     );
     item.peer_active_transfers = status.peer_active_transfers.unwrap_or(0) as i32;
 }
@@ -8081,32 +8669,39 @@ async fn update_peers_ui_with_status(
                 revoked: bool,
                 we_revoked: bool,
             }
-            let mut ui_states: std::collections::HashMap<String, PeerUiState> = std::collections::HashMap::new();
+            let mut ui_states: std::collections::HashMap<String, PeerUiState> =
+                std::collections::HashMap::new();
             for i in 0..current_model.row_count() {
                 if let Some(peer) = current_model.row_data(i) {
-                    ui_states.insert(peer.id.to_string(), PeerUiState {
-                        expanded: peer.expanded,
-                        connected: peer.connected,
-                        revoked: peer.revoked,
-                        we_revoked: peer.we_revoked,
-                    });
+                    ui_states.insert(
+                        peer.id.to_string(),
+                        PeerUiState {
+                            expanded: peer.expanded,
+                            connected: peer.connected,
+                            revoked: peer.revoked,
+                            we_revoked: peer.we_revoked,
+                        },
+                    );
                 }
             }
 
             // Apply preserved UI states to new items
-            let items_with_state: Vec<PeerItem> = new_items.into_iter().map(|mut item| {
-                if let Some(state) = ui_states.get(&item.id.to_string()) {
-                    item.expanded = state.expanded;
-                    item.connected = state.connected;
-                    item.revoked = state.revoked;
-                    item.we_revoked = state.we_revoked;
-                    // If disconnected by user or we revoked, show as offline regardless of actual status
-                    if !state.connected || state.we_revoked {
-                        item.status = SharedString::from("offline");
+            let items_with_state: Vec<PeerItem> = new_items
+                .into_iter()
+                .map(|mut item| {
+                    if let Some(state) = ui_states.get(&item.id.to_string()) {
+                        item.expanded = state.expanded;
+                        item.connected = state.connected;
+                        item.revoked = state.revoked;
+                        item.we_revoked = state.we_revoked;
+                        // If disconnected by user or we revoked, show as offline regardless of actual status
+                        if !state.connected || state.we_revoked {
+                            item.status = SharedString::from("offline");
+                        }
                     }
-                }
-                item
-            }).collect();
+                    item
+                })
+                .collect();
 
             // Update the peers model by replacing it
             // Note: This creates a fresh model, but preserves all UI states from above
@@ -8164,7 +8759,10 @@ async fn wait_for_trust_handshake(
         } => {
             // Verify the nonce
             if nonce != expected_nonce {
-                warn!("Invalid nonce from {}: expected {}, got {}", remote_id, expected_nonce, nonce);
+                warn!(
+                    "Invalid nonce from {}: expected {}, got {}",
+                    remote_id, expected_nonce, nonce
+                );
                 let response = ControlMessage::TrustRevoke {
                     reason: "invalid nonce".to_string(),
                 };
@@ -8172,7 +8770,10 @@ async fn wait_for_trust_handshake(
                 return Err(croh_core::Error::Trust("invalid nonce".to_string()));
             }
 
-            info!("Valid TrustConfirm from {} ({})", their_peer_info.name, remote_id);
+            info!(
+                "Valid TrustConfirm from {} ({})",
+                their_peer_info.name, remote_id
+            );
             if their_peer_info.relay_url.is_some() {
                 info!("Peer relay URL: {:?}", their_peer_info.relay_url);
             }
@@ -8189,8 +8790,8 @@ async fn wait_for_trust_handshake(
             let peer = TrustedPeer::new_with_relay(
                 their_peer_info.endpoint_id.clone(),
                 their_peer_info.name.clone(),
-                Permissions::all(), // We grant all permissions
-                their_permissions,  // Their permissions to us
+                Permissions::all(),                // We grant all permissions
+                their_permissions,                 // Their permissions to us
                 their_peer_info.relay_url.clone(), // Store their relay URL
             );
 
@@ -8262,7 +8863,11 @@ fn update_session_stats_ui(
         // We need to use try_read to avoid blocking
         let (uploaded, downloaded, count) = {
             if let Ok(stats) = session_stats.try_read() {
-                (stats.bytes_uploaded, stats.bytes_downloaded, stats.transfers_completed)
+                (
+                    stats.bytes_uploaded,
+                    stats.bytes_downloaded,
+                    stats.transfers_completed,
+                )
             } else {
                 return;
             }

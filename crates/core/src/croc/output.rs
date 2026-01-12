@@ -116,34 +116,37 @@ pub fn detect_error(line: &str) -> Option<String> {
     }
 
     // Common error patterns - be more specific than just "error"
-    if lower.contains("error:") || lower.contains("error connecting") || lower.contains("transfer error") {
+    if lower.contains("error:")
+        || lower.contains("error connecting")
+        || lower.contains("transfer error")
+    {
         return Some(line.to_string());
     }
-    
+
     if lower.contains("could not connect") {
         return Some("Could not connect to relay".to_string());
     }
-    
+
     if lower.contains("incorrect code phrase") || lower.contains("bad code") {
         return Some("Incorrect code phrase".to_string());
     }
-    
+
     if lower.contains("timeout") {
         return Some("Connection timed out".to_string());
     }
-    
+
     if lower.contains("cancelled") || lower.contains("canceled") {
         return Some("Transfer cancelled".to_string());
     }
-    
+
     if lower.contains("file exists") {
         return Some("File already exists".to_string());
     }
-    
+
     if lower.contains("no such file") || lower.contains("not found") {
         return Some("File not found".to_string());
     }
-    
+
     if lower.contains("permission denied") {
         return Some("Permission denied".to_string());
     }
@@ -178,13 +181,13 @@ pub fn parse_file_info(line: &str) -> Option<(String, u64)> {
     // Match patterns like "Sending 'filename.txt' (1.2 MB)"
     let re = Regex::new(r"Sending\s+'([^']+)'\s+\(([^)]+)\)").ok()?;
     let caps = re.captures(line)?;
-    
+
     let filename = caps.get(1)?.as_str().to_string();
     let size_str = caps.get(2)?.as_str();
-    
+
     // Parse size string like "1.2 MB" to bytes
     let size = parse_size_string(size_str)?;
-    
+
     Some((filename, size))
 }
 
@@ -194,10 +197,10 @@ fn parse_size_string(s: &str) -> Option<u64> {
     let s = s.trim().to_uppercase();
     let re = Regex::new(r"([\d.]+)\s*([KMGT]?B?)").ok()?;
     let caps = re.captures(&s)?;
-    
+
     let value: f64 = caps.get(1)?.as_str().parse().ok()?;
     let unit = caps.get(2).map(|m| m.as_str()).unwrap_or("B");
-    
+
     let multiplier: u64 = match unit {
         "KB" | "K" => 1024,
         "MB" | "M" => 1024 * 1024,
@@ -205,7 +208,7 @@ fn parse_size_string(s: &str) -> Option<u64> {
         "TB" | "T" => 1024 * 1024 * 1024 * 1024,
         _ => 1,
     };
-    
+
     Some((value * multiplier as f64) as u64)
 }
 
@@ -245,12 +248,20 @@ mod tests {
         assert!(!detect_completion("sending file..."));
 
         // Test 100% progress with matching byte counts
-        assert!(detect_completion("croh-trust-c13292c2.json 100% || (462/462 B, 910 kB/s)"));
-        assert!(detect_completion("file.txt 100% |████████████| (1024/1024 B, 1.2 MB/s)"));
+        assert!(detect_completion(
+            "croh-trust-c13292c2.json 100% || (462/462 B, 910 kB/s)"
+        ));
+        assert!(detect_completion(
+            "file.txt 100% |████████████| (1024/1024 B, 1.2 MB/s)"
+        ));
 
         // Should not trigger on partial progress
-        assert!(!detect_completion("file.txt 50% |████░░░░| (256/512 B, 1.2 MB/s)"));
-        assert!(!detect_completion("file.txt 100% |████████████| (512/1024 B, 1.2 MB/s)"));
+        assert!(!detect_completion(
+            "file.txt 50% |████░░░░| (256/512 B, 1.2 MB/s)"
+        ));
+        assert!(!detect_completion(
+            "file.txt 100% |████████████| (512/1024 B, 1.2 MB/s)"
+        ));
     }
 
     #[test]
@@ -268,7 +279,10 @@ mod tests {
         assert!(detect_error("sending file...").is_none());
 
         // Debug lines should be ignored even if they contain "error"
-        assert!(detect_error("[debug] 15:26:50 compress.go:50: error copying data: unexpected EOF").is_none());
+        assert!(detect_error(
+            "[debug] 15:26:50 compress.go:50: error copying data: unexpected EOF"
+        )
+        .is_none());
         assert!(detect_error("[debug] croc.go:1506: problem with decoding").is_none());
     }
 
@@ -280,4 +294,3 @@ mod tests {
         assert_eq!(parse_size_string("2 GB"), Some(2147483648));
     }
 }
-

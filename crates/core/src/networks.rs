@@ -124,8 +124,7 @@ impl PeerNetwork {
         }
 
         // Check max size
-        if self.settings.max_members > 0
-            && self.members.len() >= self.settings.max_members as usize
+        if self.settings.max_members > 0 && self.members.len() >= self.settings.max_members as usize
         {
             return Err(Error::Network(format!(
                 "Network {} has reached maximum size of {}",
@@ -307,11 +306,7 @@ impl NetworkStore {
     }
 
     /// Update network settings.
-    pub fn update_settings(
-        &mut self,
-        network_id: &str,
-        settings: NetworkSettings,
-    ) -> Result<()> {
+    pub fn update_settings(&mut self, network_id: &str, settings: NetworkSettings) -> Result<()> {
         let network = self
             .find_by_id_mut(network_id)
             .ok_or_else(|| Error::Network(format!("Network {} not found", network_id)))?;
@@ -323,7 +318,11 @@ impl NetworkStore {
     /// Rename a network.
     pub fn rename(&mut self, network_id: &str, new_name: String) -> Result<()> {
         // Check for duplicate name
-        if self.networks.iter().any(|n| n.name == new_name && n.id != network_id) {
+        if self
+            .networks
+            .iter()
+            .any(|n| n.name == new_name && n.id != network_id)
+        {
             return Err(Error::Network(format!(
                 "Network with name '{}' already exists",
                 new_name
@@ -365,10 +364,8 @@ mod tests {
 
     #[test]
     fn test_network_with_description() {
-        let network = PeerNetwork::new_with_description(
-            "Work".to_string(),
-            "Colleagues at work".to_string(),
-        );
+        let network =
+            PeerNetwork::new_with_description("Work".to_string(), "Colleagues at work".to_string());
         assert_eq!(network.name, "Work");
         assert_eq!(network.description, Some("Colleagues at work".to_string()));
     }

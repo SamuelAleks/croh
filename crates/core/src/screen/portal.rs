@@ -162,16 +162,20 @@ impl PortalCapture {
     async fn create_and_start_portal_session(&mut self) -> Result<(u32, OwnedFd)> {
         tracing::info!("Creating Portal screencast session");
 
-        let screencast = Screencast::new().await.map_err(|e| {
-            Error::Screen(format!("Failed to create Screencast proxy: {}", e))
-        })?;
+        let screencast = Screencast::new()
+            .await
+            .map_err(|e| Error::Screen(format!("Failed to create Screencast proxy: {}", e)))?;
 
-        let session = screencast.create_session().await.map_err(|e| {
-            Error::Screen(format!("Failed to create Portal session: {}", e))
-        })?;
+        let session = screencast
+            .create_session()
+            .await
+            .map_err(|e| Error::Screen(format!("Failed to create Portal session: {}", e)))?;
 
         let restore_token_ref = self.restore_token.as_deref();
-        tracing::debug!("Selecting sources with restore_token: {}", restore_token_ref.is_some());
+        tracing::debug!(
+            "Selecting sources with restore_token: {}",
+            restore_token_ref.is_some()
+        );
 
         let source_types: BitFlags<SourceType> = SourceType::Monitor.into();
 
@@ -258,11 +262,7 @@ impl PortalCapture {
     }
 
     /// Start the PipeWire capture thread
-    fn start_pipewire_thread(
-        &mut self,
-        node_id: u32,
-        pipewire_fd: OwnedFd,
-    ) -> Result<()> {
+    fn start_pipewire_thread(&mut self, node_id: u32, pipewire_fd: OwnedFd) -> Result<()> {
         let (frame_tx, frame_rx) = mpsc::channel();
         let (cmd_tx, cmd_rx) = mpsc::channel();
 
@@ -356,14 +356,15 @@ impl ScreenCapture for PortalCapture {
             return Err(Error::Screen("Not streaming".into()));
         }
 
-        let receiver = self.frame_receiver.as_ref().ok_or_else(|| {
-            Error::Screen("No frame receiver available".into())
-        })?;
+        let receiver = self
+            .frame_receiver
+            .as_ref()
+            .ok_or_else(|| Error::Screen("No frame receiver available".into()))?;
 
         // Lock the receiver and try to get the latest frame (non-blocking)
-        let rx = receiver.lock().map_err(|e| {
-            Error::Screen(format!("Failed to lock frame receiver: {}", e))
-        })?;
+        let rx = receiver
+            .lock()
+            .map_err(|e| Error::Screen(format!("Failed to lock frame receiver: {}", e)))?;
 
         match rx.try_recv() {
             Ok(frame) => {
@@ -654,9 +655,18 @@ fn run_pipewire_capture(
             Choice,
             Range,
             Rectangle,
-            spa::utils::Rectangle { width: 1920, height: 1080 },
-            spa::utils::Rectangle { width: 1, height: 1 },
-            spa::utils::Rectangle { width: 8192, height: 8192 }
+            spa::utils::Rectangle {
+                width: 1920,
+                height: 1080
+            },
+            spa::utils::Rectangle {
+                width: 1,
+                height: 1
+            },
+            spa::utils::Rectangle {
+                width: 8192,
+                height: 8192
+            }
         ),
         spa::pod::property!(
             spa::param::format::FormatProperties::VideoFramerate,
@@ -665,7 +675,10 @@ fn run_pipewire_capture(
             Fraction,
             spa::utils::Fraction { num: 60, denom: 1 },
             spa::utils::Fraction { num: 0, denom: 1 },
-            spa::utils::Fraction { num: 1000, denom: 1 }
+            spa::utils::Fraction {
+                num: 1000,
+                denom: 1
+            }
         ),
     );
 
@@ -686,8 +699,7 @@ fn run_pipewire_capture(
         .connect(
             spa::utils::Direction::Input,
             Some(node_id),
-            pw::stream::StreamFlags::AUTOCONNECT
-                | pw::stream::StreamFlags::MAP_BUFFERS,
+            pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
             &mut params,
         )
         .map_err(|e| Error::Screen(format!("Failed to connect PipeWire stream: {}", e)))?;
@@ -700,7 +712,8 @@ fn run_pipewire_capture(
     let timer_count = std::sync::atomic::AtomicU64::new(0);
     let timer = mainloop.loop_().add_timer(move |_| {
         let count = timer_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        if count % 30 == 0 {  // Log every ~1 second
+        if count.is_multiple_of(30) {
+            // Log every ~1 second
             tracing::info!("PipeWire timer tick #{}", count + 1);
         }
 
@@ -747,7 +760,10 @@ fn run_pipewire_capture(
     // Update timer to fire at ~30fps (33ms) for responsive capture
     use std::time::Duration;
     timer
-        .update_timer(Some(Duration::from_millis(33)), Some(Duration::from_millis(33)))
+        .update_timer(
+            Some(Duration::from_millis(33)),
+            Some(Duration::from_millis(33)),
+        )
         .into_result()
         .map_err(|e| Error::Screen(format!("Failed to set timer: {}", e)))?;
 
@@ -803,12 +819,27 @@ mod tests {
     fn test_spa_format_to_pixel_format() {
         use pipewire::spa::param::video::VideoFormat;
 
-        assert_eq!(spa_format_to_pixel_format(VideoFormat::RGBA), PixelFormat::Rgba8);
-        assert_eq!(spa_format_to_pixel_format(VideoFormat::BGRA), PixelFormat::Bgra8);
-        assert_eq!(spa_format_to_pixel_format(VideoFormat::RGBx), PixelFormat::Rgbx8);
-        assert_eq!(spa_format_to_pixel_format(VideoFormat::BGRx), PixelFormat::Bgrx8);
+        assert_eq!(
+            spa_format_to_pixel_format(VideoFormat::RGBA),
+            PixelFormat::Rgba8
+        );
+        assert_eq!(
+            spa_format_to_pixel_format(VideoFormat::BGRA),
+            PixelFormat::Bgra8
+        );
+        assert_eq!(
+            spa_format_to_pixel_format(VideoFormat::RGBx),
+            PixelFormat::Rgbx8
+        );
+        assert_eq!(
+            spa_format_to_pixel_format(VideoFormat::BGRx),
+            PixelFormat::Bgrx8
+        );
         // Unknown formats should default to Bgra8
-        assert_eq!(spa_format_to_pixel_format(VideoFormat::YUY2), PixelFormat::Bgra8);
+        assert_eq!(
+            spa_format_to_pixel_format(VideoFormat::YUY2),
+            PixelFormat::Bgra8
+        );
     }
 
     #[test]
