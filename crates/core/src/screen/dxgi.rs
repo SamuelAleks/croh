@@ -21,13 +21,10 @@ use super::{CapturedFrame, Display, PixelFormat, ScreenCapture};
 #[cfg(target_os = "windows")]
 use crate::error::{Error, Result};
 #[cfg(target_os = "windows")]
-use std::ptr;
-#[cfg(target_os = "windows")]
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 #[cfg(target_os = "windows")]
 use windows::{
     core::Interface,
-    Win32::Foundation::RECT,
     Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE,
     Win32::Graphics::Direct3D11::{
         D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
@@ -35,9 +32,9 @@ use windows::{
         D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
     },
     Win32::Graphics::Dxgi::{
-        Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_MODE_ROTATION},
+        Common::DXGI_FORMAT_B8G8R8A8_UNORM,
         CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGIOutput1,
-        IDXGIOutputDuplication, IDXGISurface, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC,
+        IDXGIOutputDuplication, DXGI_OUTDUPL_FRAME_INFO,
     },
 };
 
@@ -257,9 +254,9 @@ impl DxgiCapture {
                     Quality: 0,
                 },
                 Usage: D3D11_USAGE_STAGING,
-                BindFlags: windows::Win32::Graphics::Direct3D11::D3D11_BIND_FLAG(0),
-                CPUAccessFlags: D3D11_CPU_ACCESS_READ,
-                MiscFlags: windows::Win32::Graphics::Direct3D11::D3D11_RESOURCE_MISC_FLAG(0),
+                BindFlags: 0,
+                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                MiscFlags: 0,
             };
 
             let mut staging: Option<ID3D11Texture2D> = None;

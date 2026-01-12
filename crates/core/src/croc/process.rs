@@ -13,9 +13,6 @@ use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
 /// Events emitted by a croc process.
 #[derive(Debug, Clone)]
 pub enum CrocEvent {
