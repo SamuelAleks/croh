@@ -655,6 +655,7 @@ async fn run_capture_loop(
             }
             Ok(None) => {
                 // No new frame available (screen unchanged)
+                tracing::trace!("No frame available from capture backend");
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
             Err(e) => {

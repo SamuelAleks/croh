@@ -486,6 +486,11 @@ fn run_pipewire_capture(
     let stream = pw::stream::StreamBox::new(&core, "portal-video-capture", props)
         .map_err(|e| Error::Screen(format!("Failed to create PipeWire stream: {}", e)))?;
 
+    // Store raw pointer for trigger_process() calls from timer
+    // Safety: The stream lives for the duration of the mainloop, and we only
+    // call trigger_process() while the stream is valid
+    let stream_ptr = stream.as_raw_ptr();
+
     // Track video format - shared between callbacks via Arc
     let format_info = Arc::new(std::sync::Mutex::new(VideoFormatInfo::default()));
     let format_info_for_param = format_info.clone();
@@ -500,11 +505,15 @@ fn run_pipewire_capture(
     let _listener = stream
         .add_local_listener_with_user_data(())
         .state_changed(move |_stream, _user_data, old, new| {
-            tracing::debug!("PipeWire stream state: {:?} -> {:?}", old, new);
+            tracing::info!("PipeWire stream state: {:?} -> {:?}", old, new);
             // Check for error state
             if let pw::stream::StreamState::Error(ref msg) = new {
                 tracing::error!("PipeWire stream error: {}", msg);
                 stream_error_for_state.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            // Log when we reach streaming state
+            if matches!(new, pw::stream::StreamState::Streaming) {
+                tracing::info!("PipeWire stream is now STREAMING - frames should start arriving");
             }
         })
         .param_changed(move |_stream, _user_data, id, param| {
@@ -545,48 +554,87 @@ fn run_pipewire_capture(
             }
         })
         .process(move |stream, _user_data| {
+            tracing::info!("PipeWire: process callback invoked");
             let Some(mut buffer) = stream.dequeue_buffer() else {
+                tracing::info!("PipeWire: no buffer available in process callback");
                 return;
             };
+            tracing::info!("PipeWire: got buffer from dequeue");
 
             let datas = buffer.datas_mut();
+            tracing::info!("PipeWire: buffer has {} data planes", datas.len());
             if datas.is_empty() {
+                tracing::warn!("PipeWire: buffer has no data planes");
                 return;
             }
 
             let data = &mut datas[0];
+            let chunk = data.chunk();
+            let chunk_size = chunk.size() as usize;
+            let chunk_offset = chunk.offset() as usize;
+            let chunk_stride = chunk.stride() as u32;
+            tracing::info!("PipeWire: chunk size={}, offset={}, stride={}", chunk_size, chunk_offset, chunk_stride);
+
             let Some(slice) = data.data() else {
+                tracing::warn!("PipeWire: data plane has no mapped memory");
                 return;
             };
+            tracing::info!("PipeWire: mapped memory slice len={}", slice.len());
 
+            tracing::info!("PipeWire: about to lock format_info");
             let info = format_info_for_process.lock().unwrap();
             let width = info.width;
             let height = info.height;
             let format = info.format;
             drop(info);
+            tracing::info!("PipeWire: format_info: {}x{} {:?}", width, height, format);
 
             if width == 0 || height == 0 {
+                tracing::info!("PipeWire: skipping frame, format not yet set ({}x{})", width, height);
                 return;
             }
 
-            // Calculate stride (bytes per row)
+            // Calculate stride (bytes per row) - prefer chunk stride if available
             let bpp = 4; // All our formats are 4 bytes per pixel
-            let stride = width * bpp;
+            let stride = if chunk_stride > 0 { chunk_stride } else { width * bpp };
 
-            // Copy frame data
-            let frame_size = (stride * height) as usize;
-            if slice.len() >= frame_size {
+            // Copy frame data - use chunk_size if available, otherwise calculate
+            let frame_size = if chunk_size > 0 {
+                chunk_size
+            } else {
+                (stride * height) as usize
+            };
+            tracing::info!("PipeWire: calculated stride={}, frame_size={}", stride, frame_size);
+
+            // Apply chunk offset to get the actual data start
+            let data_start = chunk_offset;
+            let data_end = data_start + frame_size;
+
+            if data_end <= slice.len() && frame_size > 0 {
+                tracing::info!(
+                    "PipeWire: captured frame {}x{} ({} bytes at offset {})",
+                    width, height, frame_size, data_start
+                );
+
                 let frame = PipeWireFrame {
                     width,
                     height,
                     format,
-                    data: slice[..frame_size].to_vec(),
+                    data: slice[data_start..data_end].to_vec(),
                     stride,
                     timestamp: Instant::now(),
                 };
 
                 // Send frame (blocking send is fine since we're on dedicated thread)
-                let _ = frame_tx_clone.send(frame);
+                match frame_tx_clone.send(frame) {
+                    Ok(()) => tracing::info!("PipeWire: frame sent to channel"),
+                    Err(_) => tracing::warn!("PipeWire: frame channel closed"),
+                }
+            } else {
+                tracing::warn!(
+                    "PipeWire: buffer too small: have {} bytes, need {} (offset {} + size {}) for {}x{}",
+                    slice.len(), data_end, data_start, frame_size, width, height
+                );
             }
         })
         .register()
@@ -648,21 +696,30 @@ fn run_pipewire_capture(
     let mut params = [Pod::from_bytes(&values).unwrap()];
 
     // Connect to the portal's PipeWire node
+    // We try without DRIVER first - let the portal source push frames when screen changes.
+    // If that doesn't work, we may need to be the driver and call trigger_process().
     stream
         .connect(
             spa::utils::Direction::Input,
             Some(node_id),
-            pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
+            pw::stream::StreamFlags::AUTOCONNECT
+                | pw::stream::StreamFlags::MAP_BUFFERS,
             &mut params,
         )
         .map_err(|e| Error::Screen(format!("Failed to connect PipeWire stream: {}", e)))?;
 
     tracing::info!("PipeWire stream connected to node {}", node_id);
 
-    // Set up a timer to check for stop command and stream errors
+    // Set up a timer to trigger frame processing and check for stop command
     let mainloop_weak = mainloop.downgrade();
     let stream_error_for_timer = stream_error.clone();
+    let timer_count = std::sync::atomic::AtomicU64::new(0);
     let timer = mainloop.loop_().add_timer(move |_| {
+        let count = timer_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if count % 30 == 0 {  // Log every ~1 second
+            tracing::info!("PipeWire timer tick #{}", count + 1);
+        }
+
         // Check for stream error
         if stream_error_for_timer.load(std::sync::atomic::Ordering::SeqCst) {
             tracing::warn!("Stream error detected, quitting PipeWire mainloop");
@@ -679,6 +736,7 @@ fn run_pipewire_capture(
                 if let Some(ml) = mainloop_weak.upgrade() {
                     ml.quit();
                 }
+                return;
             }
             Err(mpsc::TryRecvError::Empty) => {
                 // No command, continue
@@ -688,14 +746,24 @@ fn run_pipewire_capture(
                 if let Some(ml) = mainloop_weak.upgrade() {
                     ml.quit();
                 }
+                return;
             }
+        }
+
+        // Trigger frame processing - this is required when using DRIVER flag
+        // Safety: stream_ptr is valid for the lifetime of the mainloop
+        let result = unsafe { pw::sys::pw_stream_trigger_process(stream_ptr) };
+        if result < 0 {
+            tracing::warn!("trigger_process failed: {}", result);
+        } else {
+            tracing::trace!("trigger_process called successfully");
         }
     });
 
-    // Update timer to fire every 100ms
+    // Update timer to fire at ~30fps (33ms) for responsive capture
     use std::time::Duration;
     timer
-        .update_timer(Some(Duration::from_millis(100)), Some(Duration::from_millis(100)))
+        .update_timer(Some(Duration::from_millis(33)), Some(Duration::from_millis(33)))
         .into_result()
         .map_err(|e| Error::Screen(format!("Failed to set timer: {}", e)))?;
 
@@ -744,6 +812,82 @@ mod tests {
             Err(e) => {
                 println!("Portal not available: {}", e);
             }
+        }
+    }
+
+    #[test]
+    fn test_spa_format_to_pixel_format() {
+        use pipewire::spa::param::video::VideoFormat;
+
+        assert_eq!(spa_format_to_pixel_format(VideoFormat::RGBA), PixelFormat::Rgba8);
+        assert_eq!(spa_format_to_pixel_format(VideoFormat::BGRA), PixelFormat::Bgra8);
+        assert_eq!(spa_format_to_pixel_format(VideoFormat::RGBx), PixelFormat::Rgbx8);
+        assert_eq!(spa_format_to_pixel_format(VideoFormat::BGRx), PixelFormat::Bgrx8);
+        // Unknown formats should default to Bgra8
+        assert_eq!(spa_format_to_pixel_format(VideoFormat::YUY2), PixelFormat::Bgra8);
+    }
+
+    #[test]
+    fn test_session_state_transitions() {
+        // Test state enum equality
+        assert_eq!(SessionState::Created, SessionState::Created);
+        assert_ne!(SessionState::Created, SessionState::Streaming);
+        assert_ne!(SessionState::Streaming, SessionState::Stopped);
+    }
+
+    #[test]
+    fn test_video_format_info_default() {
+        let info = VideoFormatInfo::default();
+        assert_eq!(info.width, 0);
+        assert_eq!(info.height, 0);
+        assert_eq!(info.format, PixelFormat::Bgra8);
+    }
+
+    #[test]
+    fn test_backend_info() {
+        // Can't create PortalCapture without async, but we can test BackendInfo
+        let info = BackendInfo {
+            name: "Portal",
+            requires_privileges: false,
+            supports_cursor: true,
+            supports_region: false,
+        };
+        assert_eq!(info.name, "Portal");
+        assert!(!info.requires_privileges);
+        assert!(info.supports_cursor);
+        assert!(!info.supports_region);
+    }
+
+    #[tokio::test]
+    async fn test_list_displays_returns_placeholder() {
+        // Skip if not on Wayland (can't create PortalCapture)
+        if std::env::var("XDG_SESSION_TYPE").unwrap_or_default() != "wayland" {
+            println!("Skipping test - not on Wayland");
+            return;
+        }
+
+        let result = PortalCapture::new(None).await;
+        if let Ok(capture) = result {
+            let displays = capture.list_displays().await.unwrap();
+            assert!(!displays.is_empty());
+            // Before start(), should return placeholder
+            assert_eq!(displays[0].id, "portal-default");
+            assert_eq!(displays[0].name, "Screen (Portal)");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_capture_frame_without_start_fails() {
+        if std::env::var("XDG_SESSION_TYPE").unwrap_or_default() != "wayland" {
+            println!("Skipping test - not on Wayland");
+            return;
+        }
+
+        let result = PortalCapture::new(None).await;
+        if let Ok(mut capture) = result {
+            // Should fail because we haven't started
+            let frame_result = capture.capture_frame().await;
+            assert!(frame_result.is_err());
         }
     }
 }

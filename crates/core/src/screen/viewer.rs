@@ -60,14 +60,15 @@ impl Default for ViewerState {
 
 impl std::fmt::Display for ViewerState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Note: lowercase strings match Slint UI expectations
         match self {
-            Self::Disconnected => write!(f, "Disconnected"),
-            Self::Connecting => write!(f, "Connecting"),
-            Self::WaitingForFrame => write!(f, "Waiting"),
-            Self::Streaming => write!(f, "Streaming"),
-            Self::Paused => write!(f, "Paused"),
-            Self::Disconnecting => write!(f, "Disconnecting"),
-            Self::Error => write!(f, "Error"),
+            Self::Disconnected => write!(f, "disconnected"),
+            Self::Connecting => write!(f, "connecting"),
+            Self::WaitingForFrame => write!(f, "waiting"),
+            Self::Streaming => write!(f, "streaming"),
+            Self::Paused => write!(f, "paused"),
+            Self::Disconnecting => write!(f, "disconnecting"),
+            Self::Error => write!(f, "error"),
         }
     }
 }

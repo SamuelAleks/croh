@@ -1208,6 +1208,10 @@ pub async fn stream_screen_from_peer(
             msg_result = conn.recv() => {
                 match msg_result {
                     Ok(ControlMessage::ScreenFrame { stream_id: frame_stream_id, metadata }) => {
+                        tracing::info!(
+                            "Receiving frame seq={}: {}x{}, {} bytes",
+                            metadata.sequence, metadata.width, metadata.height, metadata.size
+                        );
                         // Read the frame data
                         let mut frame_data = vec![0u8; metadata.size as usize];
                         if let Err(e) = conn.recv_raw(&mut frame_data).await {
@@ -1215,6 +1219,7 @@ pub async fn stream_screen_from_peer(
                             let _ = event_tx.send(ScreenStreamEvent::Error(format!("frame receive error: {}", e))).await;
                             continue;
                         }
+                        tracing::info!("Frame data received, {} bytes", frame_data.len());
 
                         // Send frame to event channel
                         let _ = event_tx.send(ScreenStreamEvent::FrameReceived {
@@ -1222,6 +1227,7 @@ pub async fn stream_screen_from_peer(
                             metadata: metadata.clone(),
                             data: frame_data,
                         }).await;
+                        tracing::info!("Frame event sent to channel");
 
                         // Send ACK periodically for flow control
                         frames_since_ack += 1;
@@ -1406,7 +1412,13 @@ pub async fn handle_screen_stream_request(
 
         // Capture frame
         let frame = match capture.capture_frame().await {
-            Ok(Some(f)) => f,
+            Ok(Some(f)) => {
+                tracing::info!(
+                    "Captured frame {}x{} {:?} ({} bytes)",
+                    f.width, f.height, f.format, f.data.len()
+                );
+                f
+            }
             Ok(None) => {
                 // No frame available, try again
                 continue;
@@ -1425,7 +1437,13 @@ pub async fn handle_screen_stream_request(
 
         // Encode frame
         let encoded = match encoder.encode(&frame) {
-            Ok(e) => e,
+            Ok(e) => {
+                tracing::info!(
+                    "Encoded frame seq={}: {}x{}, {} bytes (compressed from {})",
+                    sequence, e.width, e.height, e.data.len(), e.original_size
+                );
+                e
+            }
             Err(e) => {
                 error!("Encode error: {}", e);
                 continue;

@@ -118,6 +118,7 @@ The `screen/` module provides remote desktop/screen sharing functionality:
 **Module Structure:**
 - `types.rs` - Core types: `Display`, `CapturedFrame`, `PixelFormat`, `ScreenCapture` trait
 - `drm.rs` - Linux DRM/KMS capture backend (requires `CAP_SYS_ADMIN`)
+- `portal.rs` - Linux XDG Portal capture backend for Wayland (see below)
 - `x11.rs` - Linux X11 SHM capture backend (fallback for X11 sessions)
 - `dxgi.rs` - Windows DXGI Desktop Duplication backend
 - `encoder.rs` - Frame encoders: Raw, PNG, Zstd (with `FrameEncoder` trait)
@@ -152,6 +153,34 @@ sudo setcap cap_sys_admin+ep ./target/release/croh-daemon
 sudo usermod -aG input $USER
 # Create udev rule: /etc/udev/rules.d/99-uinput.rules
 # KERNEL=="uinput", MODE="0660", GROUP="input"
+```
+
+**Portal Capture (Wayland):**
+
+The `portal.rs` module implements screen capture via XDG Desktop Portal for Wayland compositors (KDE Plasma, GNOME). Key features:
+
+- **No root required** - Works without CAP_SYS_ADMIN
+- **Restore tokens** - After first approval, subsequent sessions skip the dialog
+- **PipeWire integration** - Receives video frames via PipeWire stream
+
+Architecture:
+- Portal session created via `ashpd` crate (D-Bus bindings)
+- PipeWire mainloop runs on dedicated thread
+- Frames sent via mpsc channel to async context
+- Format negotiation for BGRx, RGBx, BGRA, RGBA
+
+Backend selection order (auto-detect):
+1. DRM/KMS (if CAP_SYS_ADMIN available)
+2. Portal (if Wayland + xdg-desktop-portal available)
+3. X11 SHM (if X11 session)
+
+Config storage for restore token:
+```json
+{
+  "screen_stream": {
+    "portal_restore_token": "..."
+  }
+}
 ```
 
 ## Reference Files

@@ -23,6 +23,7 @@ SKIP_BUILD=false
 CLEAN_CONFIGS=false
 TILE_WINDOWS=false
 NUM_INSTANCES=2
+LOG_LEVEL="info"
 
 # Instance names for display (A-Z)
 INSTANCE_NAMES=(
@@ -73,6 +74,18 @@ while [[ $# -gt 0 ]]; do
             TILE_WINDOWS=true
             shift
             ;;
+        --debug)
+            LOG_LEVEL="debug"
+            shift
+            ;;
+        --trace)
+            LOG_LEVEL="trace"
+            shift
+            ;;
+        --log)
+            LOG_LEVEL="$2"
+            shift 2
+            ;;
         -n|--instances)
             NUM_INSTANCES="$2"
             if ! [[ "$NUM_INSTANCES" =~ ^[0-9]+$ ]] || [ "$NUM_INSTANCES" -lt 1 ]; then
@@ -86,7 +99,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --help|-h)
-            echo "Usage: $0 [-n NUM] [--release] [--no-build] [--clean] [--tile]"
+            echo "Usage: $0 [-n NUM] [--release] [--no-build] [--clean] [--tile] [--debug] [--trace] [--log LEVEL]"
             echo ""
             echo "Launch multiple Croh instances for testing Iroh peer-to-peer functionality."
             echo ""
@@ -96,6 +109,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --no-build           Skip cargo build"
             echo "  --clean              Delete all config/data files before launching (fresh start)"
             echo "  --tile               Tile windows side-by-side on current monitor (KDE Wayland only)"
+            echo "  --debug              Set log level to debug"
+            echo "  --trace              Set log level to trace"
+            echo "  --log LEVEL          Set custom log level (e.g., 'croh=debug,croh_core=trace')"
             echo ""
             echo "Instance directories:"
             echo "  Instance 1 (Alice): Default (~/.config/croh, ~/.local/share/croh)"
@@ -413,9 +429,9 @@ KWINSCRIPT
 }
 
 # Launch primary instance (default config)
-echo "Launching ${INSTANCE_NAMES[0]}..."
+echo "Launching ${INSTANCE_NAMES[0]} (log level: $LOG_LEVEL)..."
 CROH_INSTANCE_NAME="${INSTANCE_NAMES[0]}" \
-RUST_LOG=info "$BINARY" &
+RUST_LOG="$LOG_LEVEL" "$BINARY" &
 PIDS+=($!)
 
 # Launch secondary instances with isolated configs
@@ -426,12 +442,12 @@ for ((i=1; i<NUM_INSTANCES; i++)); do
     name_lower=$(echo "$name" | tr '[:upper:]' '[:lower:]')
     instance_dir="/tmp/croh-$name_lower"
 
-    echo "Launching $name..."
+    echo "Launching $name (log level: $LOG_LEVEL)..."
     CROH_INSTANCE_NAME="$name" \
     CROH_CONFIG_DIR="$instance_dir/config" \
     CROH_DATA_DIR="$instance_dir/data" \
     CROH_DOWNLOAD_DIR="$instance_dir/downloads" \
-    RUST_LOG=info "$BINARY" &
+    RUST_LOG="$LOG_LEVEL" "$BINARY" &
     PIDS+=($!)
 done
 
