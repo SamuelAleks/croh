@@ -40,7 +40,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 slint = "1.9"
 
 # File dialogs
-rfd = "0.15"
+rfd = "0.17"
 
 # UUID generation
 uuid = { version = "1.11", features = ["v4"] }
