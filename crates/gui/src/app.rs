@@ -6838,7 +6838,7 @@ impl App {
                         let (event_tx, mut event_rx) = viewer_event_channel(256);
 
                         // Create viewer command channel
-                        let (cmd_tx, cmd_rx) = viewer_command_channel(64);
+                        let (cmd_tx, mut cmd_rx) = viewer_command_channel(64);
 
                         // Store command sender for UI callbacks
                         {
@@ -6986,12 +6986,15 @@ impl App {
                         // Create stream event channel
                         let (stream_event_tx, mut stream_event_rx) = tokio::sync::mpsc::channel::<ScreenStreamEvent>(256);
 
+                        // Create input event channel for forwarding mouse/keyboard to remote
+                        let (input_tx, input_rx) = tokio::sync::mpsc::channel::<Vec<croh_core::iroh::protocol::InputEvent>>(64);
+
                         // Clone for the streaming task
                         let peer_clone = peer.clone();
 
                         // Spawn the streaming task
                         let stream_task = tokio::spawn(async move {
-                            match stream_screen_from_peer(&endpoint, &peer_clone, None, stream_event_tx, cancel_rx).await {
+                            match stream_screen_from_peer(&endpoint, &peer_clone, None, stream_event_tx, cancel_rx, input_rx).await {
                                 Ok(stream_id) => {
                                     info!("Screen stream {} ended normally", stream_id);
                                 }
@@ -6999,6 +7002,62 @@ impl App {
                                     error!("Screen stream error: {}", e);
                                 }
                             }
+                        });
+
+                        // Spawn task to handle viewer commands (including input)
+                        let input_tx_clone = input_tx.clone();
+                        tokio::spawn(async move {
+                            info!("Viewer command handler task started");
+                            while let Some(cmd) = cmd_rx.recv().await {
+                                match cmd {
+                                    ViewerCommand::SendInput(event) => {
+                                        debug!("Received SendInput command: {:?}", event);
+                                        // Convert RemoteInputEvent to protocol InputEvent
+                                        let input_event = match event {
+                                            RemoteInputEvent::MouseMove { x, y, .. } => {
+                                                croh_core::iroh::protocol::InputEvent::MouseMove { x, y }
+                                            }
+                                            RemoteInputEvent::MouseButton { button, pressed } => {
+                                                let btn = match button {
+                                                    croh_core::screen::MouseButton::Left => 0,
+                                                    croh_core::screen::MouseButton::Right => 1,
+                                                    croh_core::screen::MouseButton::Middle => 2,
+                                                    croh_core::screen::MouseButton::Back => 3,
+                                                    croh_core::screen::MouseButton::Forward => 4,
+                                                    croh_core::screen::MouseButton::Other(n) => n,
+                                                };
+                                                croh_core::iroh::protocol::InputEvent::MouseButton { button: btn, pressed }
+                                            }
+                                            RemoteInputEvent::MouseScroll { dx, dy } => {
+                                                croh_core::iroh::protocol::InputEvent::MouseScroll { delta_x: dx, delta_y: dy }
+                                            }
+                                            RemoteInputEvent::Key { pressed, .. } => {
+                                                // Key events need proper mapping - for now just log
+                                                debug!("Key event not yet fully implemented");
+                                                continue;
+                                            }
+                                            RemoteInputEvent::TextInput { .. } => {
+                                                debug!("Text input not yet implemented");
+                                                continue;
+                                            }
+                                        };
+                                        // Send as a batch of one event
+                                        debug!("Sending input event to input_tx: {:?}", input_event);
+                                        if let Err(e) = input_tx_clone.send(vec![input_event]).await {
+                                            warn!("Failed to send input event to channel: {}", e);
+                                        }
+                                    }
+                                    ViewerCommand::Disconnect => {
+                                        info!("Viewer disconnect command received");
+                                        break;
+                                    }
+                                    _ => {
+                                        // Other commands like AdjustQuality, SwitchDisplay, etc.
+                                        debug!("Viewer command not yet implemented: {:?}", cmd);
+                                    }
+                                }
+                            }
+                            info!("Viewer command handler task ending");
                         });
 
                         // Process stream events and update viewer
@@ -7197,7 +7256,7 @@ impl App {
             let window_weak = window_weak.clone();
 
             move || {
-                debug!("Toggling screen viewer input");
+                info!("Toggling screen viewer input forwarding");
 
                 let window_weak = window_weak.clone();
                 let _ = slint::invoke_from_event_loop(move || {
@@ -7205,7 +7264,7 @@ impl App {
                         let logic = window.global::<AppLogic>();
                         let is_enabled = logic.get_screen_viewer_input_enabled();
                         logic.set_screen_viewer_input_enabled(!is_enabled);
-                        debug!("Input enabled: {}", !is_enabled);
+                        info!("Input forwarding enabled: {}", !is_enabled);
                     }
                 });
             }
@@ -7294,6 +7353,8 @@ impl App {
 
             move |event_type, x, y, data| {
                 // event_type: 0=mouse_move, 1=mouse_down, 2=mouse_up, 3=scroll, 4=key_down, 5=key_up
+                // data for button events: 0=left, 1=right, 2=middle (from UI)
+                debug!("Input event: type={}, x={}, y={}, data={}", event_type, x, y, data);
                 let screen_viewer_cmd = screen_viewer_cmd.clone();
 
                 std::thread::spawn(move || {
@@ -7310,21 +7371,21 @@ impl App {
                                 absolute: true,
                             },
                             1 => {
-                                // Mouse button down
+                                // Mouse button down - UI sends 0=left, 1=right, 2=middle
                                 let button = match data {
-                                    1 => croh_core::screen::MouseButton::Left,
-                                    2 => croh_core::screen::MouseButton::Right,
-                                    3 => croh_core::screen::MouseButton::Middle,
+                                    0 => croh_core::screen::MouseButton::Left,
+                                    1 => croh_core::screen::MouseButton::Right,
+                                    2 => croh_core::screen::MouseButton::Middle,
                                     _ => croh_core::screen::MouseButton::Left,
                                 };
                                 RemoteInputEvent::MouseButton { button, pressed: true }
                             }
                             2 => {
-                                // Mouse button up
+                                // Mouse button up - UI sends 0=left, 1=right, 2=middle
                                 let button = match data {
-                                    1 => croh_core::screen::MouseButton::Left,
-                                    2 => croh_core::screen::MouseButton::Right,
-                                    3 => croh_core::screen::MouseButton::Middle,
+                                    0 => croh_core::screen::MouseButton::Left,
+                                    1 => croh_core::screen::MouseButton::Right,
+                                    2 => croh_core::screen::MouseButton::Middle,
                                     _ => croh_core::screen::MouseButton::Left,
                                 };
                                 RemoteInputEvent::MouseButton { button, pressed: false }
@@ -7339,7 +7400,12 @@ impl App {
 
                         let cmd_guard = screen_viewer_cmd.read().await;
                         if let Some(ref cmd_tx) = *cmd_guard {
-                            let _ = cmd_tx.send(ViewerCommand::SendInput(event)).await;
+                            debug!("Sending input event to viewer command channel");
+                            if let Err(e) = cmd_tx.send(ViewerCommand::SendInput(event)).await {
+                                warn!("Failed to send input command: {}", e);
+                            }
+                        } else {
+                            warn!("No screen viewer command channel available");
                         }
                     });
                 });

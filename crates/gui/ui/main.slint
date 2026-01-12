@@ -4372,11 +4372,6 @@ component ScreenViewerPanel inherits Rectangle {
         height: status-bar-height;
         background: #000000EE;
 
-        // TouchArea to capture clicks on status bar (prevents pass-through)
-        TouchArea {
-            // Just consume events, actual buttons have their own handlers
-        }
-
         HorizontalLayout {
             padding: Theme.spacing-sm;
             spacing: Theme.spacing-sm;

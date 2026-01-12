@@ -7,7 +7,7 @@ use crate::error::{Error, Result};
 use crate::iroh::blobs::{hash_file, verify_file_hash};
 use crate::iroh::browse::{browse_directory, get_browsable_roots, resolve_browse_path, validate_path};
 use crate::iroh::endpoint::IrohEndpoint;
-use crate::iroh::protocol::{ControlMessage, DirectoryEntry, FileInfo, FileRequest};
+use crate::iroh::protocol::{ControlMessage, DirectoryEntry, FileInfo, FileRequest, InputEvent};
 use crate::peers::TrustedPeer;
 use crate::transfer::TransferId;
 use iroh::NodeId;
@@ -1087,6 +1087,7 @@ pub enum ScreenStreamEvent {
 /// * `display_id` - Optional display to stream (None = primary)
 /// * `event_tx` - Channel to send stream events to
 /// * `cancel_rx` - Channel to receive cancellation signals
+/// * `input_rx` - Channel to receive input events to forward to remote
 ///
 /// # Returns
 /// The stream ID on success, or an error.
@@ -1096,6 +1097,7 @@ pub async fn stream_screen_from_peer(
     display_id: Option<String>,
     event_tx: mpsc::Sender<ScreenStreamEvent>,
     mut cancel_rx: mpsc::Receiver<()>,
+    mut input_rx: mpsc::Receiver<Vec<InputEvent>>,
 ) -> Result<String> {
     // Check permissions
     if !peer.their_permissions.screen_view {
@@ -1202,6 +1204,22 @@ pub async fn stream_screen_from_peer(
                 }).await;
                 let _ = conn.close().await;
                 return Ok(stream_id);
+            }
+
+            // Send input events to remote
+            Some(events) = input_rx.recv() => {
+                if !events.is_empty() {
+                    debug!("Sending {} input events to remote peer", events.len());
+                    let input_msg = ControlMessage::ScreenInput {
+                        stream_id: stream_id.clone(),
+                        events,
+                    };
+                    if let Err(e) = conn.send(&input_msg).await {
+                        warn!("Failed to send input events: {}", e);
+                    } else {
+                        debug!("Input events sent successfully");
+                    }
+                }
             }
 
             // Receive next message
@@ -1394,82 +1412,197 @@ pub async fn handle_screen_stream_request(
     let fps = target_fps.min(screen_settings.max_fps).max(1);
     let frame_interval = std::time::Duration::from_millis(1000 / fps as u64);
     let mut sequence = 0u64;
-    let mut last_frame_time = Instant::now();
 
-    // Frame sending loop
-    loop {
-        // Wait for next frame time
-        let elapsed = last_frame_time.elapsed();
-        if elapsed < frame_interval {
-            tokio::time::sleep(frame_interval - elapsed).await;
-        }
-        last_frame_time = Instant::now();
-
-        // Capture frame - record timestamp immediately
-        let capture_timestamp = chrono::Utc::now().timestamp_millis();
-        let frame = match capture.capture_frame().await {
-            Ok(Some(f)) => f,
-            Ok(None) => {
-                // No frame available, try again
-                continue;
+    // Create input injector if peer has control permission
+    let mut input_handler: Option<Box<dyn crate::screen::InputInjector>> = None;
+    if peer.permissions_granted.screen_control {
+        match crate::screen::create_input_injector() {
+            Ok(mut handler) => {
+                if let Err(e) = handler.init() {
+                    warn!("Failed to initialize input handler: {}", e);
+                } else {
+                    info!("Input injection enabled for screen control");
+                    input_handler = Some(handler);
+                }
             }
             Err(e) => {
-                error!("Capture error: {}", e);
-                // Send stop message
-                let stop = ControlMessage::ScreenStreamStop {
-                    stream_id: stream_id.clone(),
-                    reason: format!("Capture error: {}", e),
-                };
-                let _ = conn.send(&stop).await;
-                return Err(e);
+                warn!("Failed to create input backend: {}", e);
             }
-        };
-
-        // Encode frame
-        let encoded = match encoder.encode(&frame) {
-            Ok(e) => e,
-            Err(e) => {
-                error!("Encode error: {}", e);
-                continue;
-            }
-        };
-
-        // Send frame header - use capture timestamp for accurate latency measurement
-        let metadata = FrameMetadata {
-            sequence,
-            width: encoded.width,
-            height: encoded.height,
-            captured_at: capture_timestamp,
-            compression: actual_compression.clone(),
-            is_keyframe: true, // All frames are keyframes for now
-            size: encoded.data.len() as u32,
-        };
-
-        let frame_msg = ControlMessage::ScreenFrame {
-            stream_id: stream_id.clone(),
-            metadata,
-        };
-
-        if let Err(e) = conn.send(&frame_msg).await {
-            info!("Connection closed during screen stream: {}", e);
-            break;
         }
-
-        // Send frame data
-        if let Err(e) = conn.send_raw(&encoded.data).await {
-            info!("Connection closed during frame data send: {}", e);
-            break;
-        }
-
-        sequence += 1;
-
-        // Check for incoming messages (ACKs, stop requests) non-blocking
-        // For now, we just send frames continuously
-        // TODO: Add proper bidirectional message handling with select!
     }
 
+    // Frame sending and message handling loop
+    let mut frame_timer = tokio::time::interval(frame_interval);
+    frame_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            // Frame capture timer
+            _ = frame_timer.tick() => {
+                // Capture frame - record timestamp immediately
+                let capture_timestamp = chrono::Utc::now().timestamp_millis();
+                let frame = match capture.capture_frame().await {
+                    Ok(Some(f)) => f,
+                    Ok(None) => {
+                        // No frame available, try again
+                        continue;
+                    }
+                    Err(e) => {
+                        error!("Capture error: {}", e);
+                        // Send stop message
+                        let stop = ControlMessage::ScreenStreamStop {
+                            stream_id: stream_id.clone(),
+                            reason: format!("Capture error: {}", e),
+                        };
+                        let _ = conn.send(&stop).await;
+                        capture.stop().await?;
+                        return Err(e);
+                    }
+                };
+
+                // Encode frame
+                let encoded = match encoder.encode(&frame) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        error!("Encode error: {}", e);
+                        continue;
+                    }
+                };
+
+                // Send frame header - use capture timestamp for accurate latency measurement
+                let metadata = FrameMetadata {
+                    sequence,
+                    width: encoded.width,
+                    height: encoded.height,
+                    captured_at: capture_timestamp,
+                    compression: actual_compression.clone(),
+                    is_keyframe: true, // All frames are keyframes for now
+                    size: encoded.data.len() as u32,
+                };
+
+                let frame_msg = ControlMessage::ScreenFrame {
+                    stream_id: stream_id.clone(),
+                    metadata,
+                };
+
+                if let Err(e) = conn.send(&frame_msg).await {
+                    info!("Connection closed during screen stream: {}", e);
+                    break;
+                }
+
+                // Send frame data
+                if let Err(e) = conn.send_raw(&encoded.data).await {
+                    info!("Connection closed during frame data send: {}", e);
+                    break;
+                }
+
+                sequence += 1;
+            }
+
+            // Handle incoming messages
+            msg_result = conn.recv() => {
+                match msg_result {
+                    Ok(ControlMessage::ScreenInput { events, .. }) => {
+                        // Process input events
+                        info!("Received {} input events from viewer", events.len());
+                        if let Some(ref mut handler) = input_handler {
+                            for event in &events {
+                                debug!("Injecting input event: {:?}", event);
+                                if let Err(e) = inject_input_event(handler.as_mut(), event) {
+                                    warn!("Failed to inject input event: {}", e);
+                                }
+                            }
+                        } else {
+                            warn!("Received input events but input injection not enabled (no handler)");
+                        }
+                    }
+                    Ok(ControlMessage::ScreenFrameAck { up_to_sequence, .. }) => {
+                        // ACKs can be used for flow control - currently just logged
+                        debug!("Received ACK up to sequence {}", up_to_sequence);
+                    }
+                    Ok(ControlMessage::ScreenStreamStop { reason, .. }) => {
+                        info!("Stream stop requested by viewer: {}", reason);
+                        break;
+                    }
+                    Ok(ControlMessage::ScreenStreamAdjust { quality, target_fps, request_keyframe, .. }) => {
+                        // Handle quality adjustment requests
+                        debug!("Quality adjustment: {:?}, fps: {:?}, keyframe: {}", quality, target_fps, request_keyframe);
+                        // TODO: Apply quality/fps changes
+                    }
+                    Ok(other) => {
+                        debug!("Ignoring unexpected message during stream: {:?}", other);
+                    }
+                    Err(e) => {
+                        info!("Connection error during screen stream: {}", e);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Cleanup
+    if let Some(mut handler) = input_handler {
+        let _ = handler.shutdown();
+    }
     capture.stop().await?;
     Ok(())
+}
+
+/// Inject a single input event using the platform backend.
+fn inject_input_event(
+    handler: &mut dyn crate::screen::InputInjector,
+    event: &InputEvent,
+) -> crate::error::Result<()> {
+    use crate::screen::{RemoteInputEvent, MouseButton, KeyCode, KeyModifiers};
+
+    let remote_event = match event {
+        InputEvent::MouseMove { x, y } => {
+            RemoteInputEvent::MouseMove {
+                x: *x,
+                y: *y,
+                absolute: true,
+            }
+        }
+        InputEvent::MouseButton { button, pressed } => {
+            let btn = match button {
+                0 => MouseButton::Left,
+                1 => MouseButton::Right,
+                2 => MouseButton::Middle,
+                n => MouseButton::Other(*n),
+            };
+            RemoteInputEvent::MouseButton { button: btn, pressed: *pressed }
+        }
+        InputEvent::MouseScroll { delta_x, delta_y } => {
+            RemoteInputEvent::MouseScroll { dx: *delta_x, dy: *delta_y }
+        }
+        InputEvent::Key { code, pressed, modifiers } => {
+            // Convert USB HID code to our KeyCode enum
+            // This is a simplified mapping - a full implementation would need
+            // a comprehensive HID code table
+            let key = match code {
+                0x04..=0x1D => KeyCode::Unknown(*code as u32), // A-Z would need mapping
+                0x1E..=0x27 => KeyCode::Unknown(*code as u32), // 1-0
+                0x28 => KeyCode::Return,
+                0x29 => KeyCode::Escape,
+                0x2A => KeyCode::Backspace,
+                0x2B => KeyCode::Tab,
+                0x2C => KeyCode::Space,
+                _ => KeyCode::Unknown(*code as u32),
+            };
+            let mods = KeyModifiers {
+                shift: (modifiers & 0x01) != 0,
+                control: (modifiers & 0x02) != 0,
+                alt: (modifiers & 0x04) != 0,
+                super_key: (modifiers & 0x08) != 0,
+                caps_lock: false,
+                num_lock: false,
+            };
+            RemoteInputEvent::Key { key, pressed: *pressed, modifiers: mods }
+        }
+    };
+
+    handler.inject(&remote_event)
 }
 
 #[cfg(test)]
