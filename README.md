@@ -19,6 +19,14 @@ Croh combines two transfer modes:
 - **Remote browsing**: Browse a trusted peer's filesystem and select files to pull
 - **Speed testing**: Test connection speed between peers
 
+### Screen Streaming (Remote Desktop)
+- **View peer screens**: Stream a trusted peer's display in real-time
+- **Remote control**: Send mouse and keyboard input to control peer's screen
+- **Multiple backends**: DRM/KMS, Portal (Wayland), X11 SHM, DXGI (Windows)
+- **Hardware acceleration**: Optional FFmpeg support for H.264 encoding
+- **Adaptive quality**: Automatic adjustment based on bandwidth
+- **Permission-based**: Separate permissions for view-only vs control access
+
 ### Trusted Peers
 - **Trust establishment**: Secure handshake using croc for initial key exchange
 - **Persistent connections**: Iroh handles NAT traversal and reconnection automatically
@@ -48,6 +56,15 @@ Croh combines two transfer modes:
 ## Requirements
 
 - [croc](https://github.com/schollz/croc) installed and available in PATH (for ad-hoc transfers)
+
+### Optional Dependencies
+
+**Linux (for screen streaming):**
+- `libpipewire-0.3-dev` - Required for Portal/Wayland screen capture
+- `CAP_SYS_ADMIN` capability - For DRM/KMS capture backend (best performance)
+
+**FFmpeg support (optional):**
+- `ffmpeg` development libraries for H.264 hardware encoding
 
 ## Installation
 
@@ -157,6 +174,39 @@ nssm start croh-daemon
 nssm stop croh-daemon
 ```
 
+### Screen Streaming Setup (Linux)
+
+Screen streaming requires additional setup depending on the capture backend:
+
+**Portal/Wayland (Recommended for desktop use)**
+```bash
+# Install PipeWire development libraries
+sudo apt install libpipewire-0.3-dev  # Debian/Ubuntu
+sudo pacman -S pipewire               # Arch
+
+# No additional setup needed - Portal prompts for permission on first use
+# Restore tokens are cached so subsequent sessions skip the dialog
+```
+
+**DRM/KMS (Best performance, requires privileges)**
+```bash
+# Grant CAP_SYS_ADMIN capability to the binary
+sudo setcap cap_sys_admin+ep /usr/local/bin/croh-daemon
+```
+
+**Input Injection (for remote control)**
+```bash
+# Add user to input group
+sudo usermod -aG input $USER
+
+# Create udev rule for uinput access
+echo 'KERNEL=="uinput", MODE="0660", GROUP="input"' | \
+  sudo tee /etc/udev/rules.d/99-uinput.rules
+sudo udevadm control --reload-rules
+
+# Log out and back in for group changes to take effect
+```
+
 ## Architecture
 
 ```
@@ -171,6 +221,15 @@ croh/
 │   │   │   ├── transfer.rs # Push/pull file transfers
 │   │   │   ├── browse.rs   # Remote directory browsing
 │   │   │   └── speedtest.rs# Connection speed testing
+│   │   ├── screen/         # Screen capture & streaming
+│   │   │   ├── drm.rs      # Linux DRM/KMS backend
+│   │   │   ├── portal.rs   # Linux Portal/Wayland backend
+│   │   │   ├── x11.rs      # Linux X11 SHM backend
+│   │   │   ├── dxgi.rs     # Windows DXGI backend
+│   │   │   ├── encoder.rs  # Frame encoding (PNG, Zstd)
+│   │   │   ├── ffmpeg/     # H.264 encoding (optional)
+│   │   │   ├── viewer.rs   # Client-side frame buffer
+│   │   │   └── input.rs    # Remote input injection
 │   │   ├── chat/           # Peer-to-peer messaging
 │   │   ├── config.rs       # Configuration management
 │   │   ├── peers.rs        # Trusted peer storage
@@ -261,6 +320,7 @@ Croh uses a custom protocol over Iroh's QUIC connections:
 - Chat: `ChatMessage`, `ChatDelivered`, `ChatRead`, `ChatTyping`
 - Guest: `ExtensionRequest`, `PromotionRequest`
 - Network: `IntroductionOffer`, `IntroductionRequest`, `IntroductionComplete`
+- Screen: `ScreenStreamRequest`, `ScreenStreamResponse`, `ScreenFrame`, `ScreenInput`
 
 ## Debugging
 
@@ -292,6 +352,9 @@ VS Code/Cursor debug configurations are provided in `.vscode/launch.json`.
 - Guest peers with expiry
 - 10+ color themes
 - Security posture presets
+- Screen streaming with multiple capture backends
+- Remote input handling (mouse/keyboard)
+- FFmpeg integration for hardware-accelerated encoding
 
 ### In Progress
 - Connection status indicators
