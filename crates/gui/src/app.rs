@@ -6995,10 +6995,6 @@ impl App {
                                         break;
                                     }
                                     ScreenStreamEvent::FrameReceived { metadata, data, .. } => {
-                                        info!(
-                                            "GUI received frame seq={}: {}x{}, {} bytes",
-                                            metadata.sequence, metadata.width, metadata.height, data.len()
-                                        );
                                         // Record latency from capture timestamp
                                         viewer.record_latency(metadata.captured_at);
 
@@ -7013,10 +7009,6 @@ impl App {
                                             let width = frame.width;
                                             let height = frame.height;
                                             let rgba_data = frame.data.clone();
-                                            info!(
-                                                "Pushing frame to UI: {}x{}, {} bytes RGBA",
-                                                width, height, rgba_data.len()
-                                            );
 
                                             // Update UI with the frame image
                                             let window_weak_frame = window_weak_stream.clone();
@@ -7036,8 +7028,6 @@ impl App {
                                                     logic.set_screen_viewer_height(height as i32);
                                                 }
                                             });
-                                        } else {
-                                            warn!("No frame available from viewer after decode");
                                         }
 
                                         // Emit stats periodically

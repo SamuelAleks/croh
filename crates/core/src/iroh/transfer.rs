@@ -1208,10 +1208,6 @@ pub async fn stream_screen_from_peer(
             msg_result = conn.recv() => {
                 match msg_result {
                     Ok(ControlMessage::ScreenFrame { stream_id: frame_stream_id, metadata }) => {
-                        tracing::info!(
-                            "Receiving frame seq={}: {}x{}, {} bytes",
-                            metadata.sequence, metadata.width, metadata.height, metadata.size
-                        );
                         // Read the frame data
                         let mut frame_data = vec![0u8; metadata.size as usize];
                         if let Err(e) = conn.recv_raw(&mut frame_data).await {
@@ -1219,7 +1215,6 @@ pub async fn stream_screen_from_peer(
                             let _ = event_tx.send(ScreenStreamEvent::Error(format!("frame receive error: {}", e))).await;
                             continue;
                         }
-                        tracing::info!("Frame data received, {} bytes", frame_data.len());
 
                         // Send frame to event channel
                         let _ = event_tx.send(ScreenStreamEvent::FrameReceived {
@@ -1227,7 +1222,6 @@ pub async fn stream_screen_from_peer(
                             metadata: metadata.clone(),
                             data: frame_data,
                         }).await;
-                        tracing::info!("Frame event sent to channel");
 
                         // Send ACK periodically for flow control
                         frames_since_ack += 1;
@@ -1391,8 +1385,9 @@ pub async fn handle_screen_stream_request(
     conn.send(&response).await?;
     info!("Screen stream {} accepted, starting capture on {}", stream_id, target_display);
 
-    // Create encoder - use Zstd for efficient compression
-    // The decoder auto-detects format based on magic bytes
+    // Create encoder - use Zstd for good compression with reasonable speed
+    // ~160KB per frame at 2560x1440 = ~40 Mbps at 30fps
+    // TODO: Add H.264/H.265 hardware encoding for lower latency and better compression
     let mut encoder: Box<dyn FrameEncoder> = Box::new(ZstdEncoder::new());
 
     // Calculate frame interval
@@ -1410,15 +1405,10 @@ pub async fn handle_screen_stream_request(
         }
         last_frame_time = Instant::now();
 
-        // Capture frame
+        // Capture frame - record timestamp immediately
+        let capture_timestamp = chrono::Utc::now().timestamp_millis();
         let frame = match capture.capture_frame().await {
-            Ok(Some(f)) => {
-                tracing::info!(
-                    "Captured frame {}x{} {:?} ({} bytes)",
-                    f.width, f.height, f.format, f.data.len()
-                );
-                f
-            }
+            Ok(Some(f)) => f,
             Ok(None) => {
                 // No frame available, try again
                 continue;
@@ -1437,25 +1427,19 @@ pub async fn handle_screen_stream_request(
 
         // Encode frame
         let encoded = match encoder.encode(&frame) {
-            Ok(e) => {
-                tracing::info!(
-                    "Encoded frame seq={}: {}x{}, {} bytes (compressed from {})",
-                    sequence, e.width, e.height, e.data.len(), e.original_size
-                );
-                e
-            }
+            Ok(e) => e,
             Err(e) => {
                 error!("Encode error: {}", e);
                 continue;
             }
         };
 
-        // Send frame header
+        // Send frame header - use capture timestamp for accurate latency measurement
         let metadata = FrameMetadata {
             sequence,
             width: encoded.width,
             height: encoded.height,
-            captured_at: chrono::Utc::now().timestamp_millis(),
+            captured_at: capture_timestamp,
             compression: actual_compression.clone(),
             is_keyframe: true, // All frames are keyframes for now
             size: encoded.data.len() as u32,

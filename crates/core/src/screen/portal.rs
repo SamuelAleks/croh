@@ -554,15 +554,11 @@ fn run_pipewire_capture(
             }
         })
         .process(move |stream, _user_data| {
-            tracing::info!("PipeWire: process callback invoked");
             let Some(mut buffer) = stream.dequeue_buffer() else {
-                tracing::info!("PipeWire: no buffer available in process callback");
                 return;
             };
-            tracing::info!("PipeWire: got buffer from dequeue");
 
             let datas = buffer.datas_mut();
-            tracing::info!("PipeWire: buffer has {} data planes", datas.len());
             if datas.is_empty() {
                 tracing::warn!("PipeWire: buffer has no data planes");
                 return;
@@ -573,24 +569,19 @@ fn run_pipewire_capture(
             let chunk_size = chunk.size() as usize;
             let chunk_offset = chunk.offset() as usize;
             let chunk_stride = chunk.stride() as u32;
-            tracing::info!("PipeWire: chunk size={}, offset={}, stride={}", chunk_size, chunk_offset, chunk_stride);
 
             let Some(slice) = data.data() else {
                 tracing::warn!("PipeWire: data plane has no mapped memory");
                 return;
             };
-            tracing::info!("PipeWire: mapped memory slice len={}", slice.len());
 
-            tracing::info!("PipeWire: about to lock format_info");
             let info = format_info_for_process.lock().unwrap();
             let width = info.width;
             let height = info.height;
             let format = info.format;
             drop(info);
-            tracing::info!("PipeWire: format_info: {}x{} {:?}", width, height, format);
 
             if width == 0 || height == 0 {
-                tracing::info!("PipeWire: skipping frame, format not yet set ({}x{})", width, height);
                 return;
             }
 
@@ -604,18 +595,12 @@ fn run_pipewire_capture(
             } else {
                 (stride * height) as usize
             };
-            tracing::info!("PipeWire: calculated stride={}, frame_size={}", stride, frame_size);
 
             // Apply chunk offset to get the actual data start
             let data_start = chunk_offset;
             let data_end = data_start + frame_size;
 
             if data_end <= slice.len() && frame_size > 0 {
-                tracing::info!(
-                    "PipeWire: captured frame {}x{} ({} bytes at offset {})",
-                    width, height, frame_size, data_start
-                );
-
                 let frame = PipeWireFrame {
                     width,
                     height,
@@ -626,9 +611,8 @@ fn run_pipewire_capture(
                 };
 
                 // Send frame (blocking send is fine since we're on dedicated thread)
-                match frame_tx_clone.send(frame) {
-                    Ok(()) => tracing::info!("PipeWire: frame sent to channel"),
-                    Err(_) => tracing::warn!("PipeWire: frame channel closed"),
+                if frame_tx_clone.send(frame).is_err() {
+                    tracing::warn!("PipeWire: frame channel closed");
                 }
             } else {
                 tracing::warn!(
