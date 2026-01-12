@@ -6933,7 +6933,36 @@ impl App {
                                             }
                                         });
                                     }
-                                    _ => {}
+                                    ViewerEvent::DisplaysReceived(displays) => {
+                                        // Convert displays to string names (Vec<String> is Send)
+                                        let display_names: Vec<String> = displays
+                                            .iter()
+                                            .map(|d| format!("{} ({}x{})", d.name, d.width, d.height))
+                                            .collect();
+                                        let _ = slint::invoke_from_event_loop(move || {
+                                            if let Some(window) = window_weak.upgrade() {
+                                                let logic = window.global::<AppLogic>();
+                                                // Create model inside UI thread (Rc is not Send)
+                                                let shared_names: Vec<SharedString> = display_names
+                                                    .into_iter()
+                                                    .map(SharedString::from)
+                                                    .collect();
+                                                let display_model = std::rc::Rc::new(slint::VecModel::from(shared_names));
+                                                logic.set_screen_viewer_displays(slint::ModelRc::from(display_model));
+                                                logic.set_screen_viewer_current_display(0);
+                                            }
+                                        });
+                                    }
+                                    ViewerEvent::StreamAccepted { compression, .. } => {
+                                        // Show encoder/compression type
+                                        let encoder_name = format!("{:?}", compression);
+                                        let _ = slint::invoke_from_event_loop(move || {
+                                            if let Some(window) = window_weak.upgrade() {
+                                                let logic = window.global::<AppLogic>();
+                                                logic.set_screen_viewer_encoder(SharedString::from(&encoder_name));
+                                            }
+                                        });
+                                    }
                                 }
                             }
                         });
@@ -7158,6 +7187,63 @@ impl App {
                         let logic = window.global::<AppLogic>();
                         let is_fullscreen = logic.get_screen_viewer_fullscreen();
                         logic.set_screen_viewer_fullscreen(!is_fullscreen);
+                    }
+                });
+            }
+        });
+
+        // Toggle input forwarding callback
+        window.global::<AppLogic>().on_screen_viewer_toggle_input({
+            let window_weak = window_weak.clone();
+
+            move || {
+                debug!("Toggling screen viewer input");
+
+                let window_weak = window_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(window) = window_weak.upgrade() {
+                        let logic = window.global::<AppLogic>();
+                        let is_enabled = logic.get_screen_viewer_input_enabled();
+                        logic.set_screen_viewer_input_enabled(!is_enabled);
+                        debug!("Input enabled: {}", !is_enabled);
+                    }
+                });
+            }
+        });
+
+        // Switch display callback
+        window.global::<AppLogic>().on_screen_viewer_switch_display({
+            let screen_viewer_cmd = screen_viewer_cmd.clone();
+            let window_weak = window_weak.clone();
+
+            move |display_index| {
+                debug!("Switching to display index: {}", display_index);
+
+                let screen_viewer_cmd = screen_viewer_cmd.clone();
+                let window_weak = window_weak.clone();
+                // Use index as display_id (common convention)
+                let display_id = display_index.to_string();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        let cmd_guard = screen_viewer_cmd.read().await;
+                        if let Some(ref cmd_tx) = *cmd_guard {
+                            let _ = cmd_tx.send(ViewerCommand::SwitchDisplay {
+                                display_id,
+                            }).await;
+                        }
+                    });
+                });
+
+                // Update the UI immediately
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(window) = window_weak.upgrade() {
+                        window.global::<AppLogic>().set_screen_viewer_current_display(display_index);
                     }
                 });
             }

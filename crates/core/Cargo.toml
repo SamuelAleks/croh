@@ -9,6 +9,8 @@ description = "Core library for Croh - shared functionality for croc wrapper and
 default = []
 # Enable local relay server for comprehensive integration testing
 test-relay = ["iroh/test-utils"]
+# Enable FFmpeg-based video encoding (H.264, etc.) with hardware acceleration
+ffmpeg = ["dep:ffmpeg-the-third"]
 
 [dependencies]
 # Async runtime
@@ -65,6 +67,13 @@ async-trait = "0.1"
 # Frame encoding
 png = "0.17"
 zstd = "0.13"
+
+# Video encoding via FFmpeg (optional, for hardware acceleration)
+ffmpeg-the-third = { version = "4.0", optional = true, default-features = false, features = [
+    "codec",
+    "format",
+    "software-scaling",
+] }
 
 # Platform-specific disk space queries
 [target.'cfg(unix)'.dependencies]

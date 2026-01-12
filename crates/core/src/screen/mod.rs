@@ -70,6 +70,10 @@ mod decoder;
 mod viewer;
 mod input;
 
+// FFmpeg video encoding (optional feature)
+#[cfg(feature = "ffmpeg")]
+pub mod ffmpeg;
+
 // Backend modules - conditionally compiled
 #[cfg(target_os = "linux")]
 mod drm;

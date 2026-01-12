@@ -596,8 +596,10 @@ export global AppLogic {
     callback close-screen-viewer();               // close screen viewer
     callback screen-viewer-disconnect();          // disconnect from stream
     callback screen-viewer-toggle-fullscreen();   // toggle fullscreen mode
+    callback screen-viewer-toggle-input();        // toggle input forwarding
     callback screen-viewer-adjust-quality(string);  // "fast", "balanced", "quality"
     callback screen-viewer-send-input(int, int, int, int);  // type, x, y, data (mouse/key events)
+    callback screen-viewer-switch-display(int);   // switch to display by index
 
     // Screen viewer state
     in property <bool> screen-viewer-open: false;
@@ -613,6 +615,9 @@ export global AppLogic {
     in property <int> screen-viewer-latency-ms: 0;
     in property <bool> screen-viewer-input-enabled: false;
     in property <string> screen-viewer-error: "";
+    in property <string> screen-viewer-encoder: "";  // encoder name (e.g. "H.264 (NVENC)")
+    in property <[string]> screen-viewer-displays: [];  // available displays
+    in property <int> screen-viewer-current-display: 0;  // current display index
 }
 
 // ============================================================================
@@ -4247,120 +4252,134 @@ component ScreenViewerPanel inherits Rectangle {
     background: #000000;
 
     // Status bar height
-    property <length> status-bar-height: 40px;
+    property <length> status-bar-height: 48px;
     // Always show controls - avoids flickering from rapid hover state changes
     property <bool> show-controls: true;
     property <bool> streaming: AppLogic.screen-viewer-status == "streaming";
+    // Display selector popup
+    property <bool> show-display-selector: false;
 
-    // Main touch area for input capture
-    touch := TouchArea {
-        mouse-cursor: streaming && AppLogic.screen-viewer-input-enabled ? none : default;
+    // Frame display area (below status bar)
+    Rectangle {
+        x: 0;
+        y: status-bar-height;
+        width: parent.width;
+        height: parent.height - status-bar-height;
 
-        // Capture mouse events for input forwarding
-        moved => {
-            if streaming && AppLogic.screen-viewer-input-enabled {
-                // type=0 for mouse move, x, y, data=0
-                AppLogic.screen-viewer-send-input(0, self.mouse-x / 1px, self.mouse-y / 1px, 0);
-            }
-        }
+        // Touch area for input capture - only covers frame area, not status bar
+        TouchArea {
+            mouse-cursor: streaming && AppLogic.screen-viewer-input-enabled ? none : default;
 
-        pointer-event(e) => {
-            if streaming && AppLogic.screen-viewer-input-enabled {
-                if e.kind == PointerEventKind.down {
-                    // type=1 for mouse down
-                    AppLogic.screen-viewer-send-input(1, self.mouse-x / 1px, self.mouse-y / 1px,
-                        e.button == PointerEventButton.left ? 0 :
-                        e.button == PointerEventButton.right ? 1 : 2);
-                } else if e.kind == PointerEventKind.up {
-                    // type=2 for mouse up
-                    AppLogic.screen-viewer-send-input(2, self.mouse-x / 1px, self.mouse-y / 1px,
-                        e.button == PointerEventButton.left ? 0 :
-                        e.button == PointerEventButton.right ? 1 : 2);
+            // Capture mouse events for input forwarding
+            moved => {
+                if streaming && AppLogic.screen-viewer-input-enabled {
+                    // type=0 for mouse move, x, y, data=0
+                    // Offset y by status bar height for correct coordinates
+                    AppLogic.screen-viewer-send-input(0, self.mouse-x / 1px, self.mouse-y / 1px, 0);
                 }
             }
-        }
 
-        scroll-event(e) => {
-            if streaming && AppLogic.screen-viewer-input-enabled {
-                // type=3 for scroll, data = delta
-                AppLogic.screen-viewer-send-input(3, e.delta-x / 1px, e.delta-y / 1px, 0);
+            pointer-event(e) => {
+                if streaming && AppLogic.screen-viewer-input-enabled {
+                    if e.kind == PointerEventKind.down {
+                        // type=1 for mouse down
+                        AppLogic.screen-viewer-send-input(1, self.mouse-x / 1px, self.mouse-y / 1px,
+                            e.button == PointerEventButton.left ? 0 :
+                            e.button == PointerEventButton.right ? 1 : 2);
+                    } else if e.kind == PointerEventKind.up {
+                        // type=2 for mouse up
+                        AppLogic.screen-viewer-send-input(2, self.mouse-x / 1px, self.mouse-y / 1px,
+                            e.button == PointerEventButton.left ? 0 :
+                            e.button == PointerEventButton.right ? 1 : 2);
+                    }
+                }
             }
-            accept
+
+            scroll-event(e) => {
+                if streaming && AppLogic.screen-viewer-input-enabled {
+                    // type=3 for scroll, data = delta
+                    AppLogic.screen-viewer-send-input(3, e.delta-x / 1px, e.delta-y / 1px, 0);
+                }
+                accept
+            }
+        }
+
+        // Frame display
+        if streaming: Image {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            source: AppLogic.screen-viewer-frame;
+            image-fit: contain;
+            width: min(parent.width, AppLogic.screen-viewer-width * 1px);
+            height: min(parent.height, AppLogic.screen-viewer-height * 1px);
+        }
+
+        // Loading/connecting state
+        if AppLogic.screen-viewer-status == "connecting": VerticalLayout {
+            alignment: center;
+            spacing: Theme.spacing-md;
+
+            Text {
+                text: "Connecting to " + AppLogic.screen-viewer-peer-name + "...";
+                font-size: 18px;
+                color: Theme.text;
+                horizontal-alignment: center;
+            }
+
+            // Simple loading indicator
+            Rectangle {
+                width: 40px;
+                height: 40px;
+                border-radius: 20px;
+                border-width: 3px;
+                border-color: Theme.accent;
+                horizontal-stretch: 0;
+            }
+        }
+
+        // Error state
+        if AppLogic.screen-viewer-status == "error": VerticalLayout {
+            alignment: center;
+            spacing: Theme.spacing-md;
+
+            Text {
+                text: "Connection Error";
+                font-size: 18px;
+                font-weight: 600;
+                color: Theme.error;
+                horizontal-alignment: center;
+            }
+
+            Text {
+                text: AppLogic.screen-viewer-error;
+                font-size: 14px;
+                color: Theme.text-muted;
+                horizontal-alignment: center;
+            }
+
+            CompactButton {
+                label: "Close";
+                clicked => { AppLogic.close-screen-viewer(); }
+            }
         }
     }
 
-    // Frame display
-    if streaming: Image {
-        x: (parent.width - self.width) / 2;
-        y: status-bar-height + (parent.height - status-bar-height - self.height) / 2;
-        source: AppLogic.screen-viewer-frame;
-        image-fit: contain;
-        width: min(parent.width, AppLogic.screen-viewer-width * 1px);
-        height: min(parent.height - status-bar-height, AppLogic.screen-viewer-height * 1px);
-    }
-
-    // Loading/connecting state
-    if AppLogic.screen-viewer-status == "connecting": VerticalLayout {
-        alignment: center;
-        spacing: Theme.spacing-md;
-
-        Text {
-            text: "Connecting to " + AppLogic.screen-viewer-peer-name + "...";
-            font-size: 18px;
-            color: Theme.text;
-            horizontal-alignment: center;
-        }
-
-        // Simple loading animation
-        Rectangle {
-            width: 40px;
-            height: 40px;
-            border-radius: 20px;
-            border-width: 3px;
-            border-color: Theme.accent;
-            horizontal-stretch: 0;
-        }
-    }
-
-    // Error state
-    if AppLogic.screen-viewer-status == "error": VerticalLayout {
-        alignment: center;
-        spacing: Theme.spacing-md;
-
-        Text {
-            text: "Connection Error";
-            font-size: 18px;
-            font-weight: 600;
-            color: Theme.error;
-            horizontal-alignment: center;
-        }
-
-        Text {
-            text: AppLogic.screen-viewer-error;
-            font-size: 14px;
-            color: Theme.text-muted;
-            horizontal-alignment: center;
-        }
-
-        CompactButton {
-            label: "Close";
-            clicked => { AppLogic.close-screen-viewer(); }
-        }
-    }
-
-    // Status bar (top)
+    // Status bar (top) - rendered last so it's on top and receives clicks
     Rectangle {
         x: 0;
         y: 0;
         width: parent.width;
         height: status-bar-height;
-        background: show-controls ? #000000CC : transparent;
+        background: #000000EE;
 
-        animate background { duration: 200ms; }
+        // TouchArea to capture clicks on status bar (prevents pass-through)
+        TouchArea {
+            // Just consume events, actual buttons have their own handlers
+        }
 
-        if show-controls: HorizontalLayout {
+        HorizontalLayout {
             padding: Theme.spacing-sm;
-            spacing: Theme.spacing-md;
+            spacing: Theme.spacing-sm;
             alignment: stretch;
 
             // Close button
@@ -4400,18 +4419,26 @@ component ScreenViewerPanel inherits Rectangle {
                 }
             }
 
+            // Encoder info (when streaming)
+            if streaming && AppLogic.screen-viewer-encoder != "": Text {
+                vertical-alignment: center;
+                text: "[" + AppLogic.screen-viewer-encoder + "]";
+                font-size: 11px;
+                color: Theme.accent;
+            }
+
             // Spacer
             Rectangle { horizontal-stretch: 1; }
 
-            // Stats
+            // Stats (when streaming)
             if streaming: HorizontalLayout {
-                spacing: Theme.spacing-md;
+                spacing: Theme.spacing-sm;
 
                 // FPS
                 Text {
                     vertical-alignment: center;
                     text: Math.round(AppLogic.screen-viewer-fps) + " fps";
-                    font-size: 12px;
+                    font-size: 11px;
                     color: Theme.text-muted;
                 }
 
@@ -4419,7 +4446,7 @@ component ScreenViewerPanel inherits Rectangle {
                 Text {
                     vertical-alignment: center;
                     text: AppLogic.screen-viewer-width + "x" + AppLogic.screen-viewer-height;
-                    font-size: 12px;
+                    font-size: 11px;
                     color: Theme.text-muted;
                 }
 
@@ -4427,7 +4454,7 @@ component ScreenViewerPanel inherits Rectangle {
                 Text {
                     vertical-alignment: center;
                     text: AppLogic.screen-viewer-bitrate-kbps + " kbps";
-                    font-size: 12px;
+                    font-size: 11px;
                     color: Theme.text-muted;
                 }
 
@@ -4435,22 +4462,35 @@ component ScreenViewerPanel inherits Rectangle {
                 Text {
                     vertical-alignment: center;
                     text: AppLogic.screen-viewer-latency-ms + " ms";
-                    font-size: 12px;
+                    font-size: 11px;
                     color: AppLogic.screen-viewer-latency-ms < 50 ? Theme.success :
                            AppLogic.screen-viewer-latency-ms < 150 ? Theme.warning :
                            Theme.error;
                 }
             }
 
+            // Display selector (when multiple displays available)
+            if streaming && AppLogic.screen-viewer-displays.length > 1: CompactButton {
+                label: "Display " + (AppLogic.screen-viewer-current-display + 1) + "/" + AppLogic.screen-viewer-displays.length;
+                small: true;
+                clicked => {
+                    // Cycle to next display
+                    AppLogic.screen-viewer-switch-display(
+                        mod(AppLogic.screen-viewer-current-display + 1, AppLogic.screen-viewer-displays.length)
+                    );
+                }
+            }
+
             // Input toggle
             if streaming: CompactButton {
-                label: AppLogic.screen-viewer-input-enabled ? "Input: On" : "Input: Off";
+                label: AppLogic.screen-viewer-input-enabled ? "Input: ON" : "Input: OFF";
                 small: true;
+                clicked => { AppLogic.screen-viewer-toggle-input(); }
             }
 
             // Fullscreen toggle
             ImageIconBtn {
-                icon: Icons.zap;  // TODO: Add proper fullscreen icon
+                icon: Icons.zap;
                 icon-color: Theme.text;
                 clicked => { AppLogic.screen-viewer-toggle-fullscreen(); }
             }

@@ -268,10 +268,14 @@ impl FrameDecoder for ZstdDecoder {
 }
 
 /// Auto-detecting decoder that selects the appropriate decoder based on data.
+///
+/// When the `ffmpeg` feature is enabled, this also supports H.264 decoding.
 pub struct AutoDecoder {
     raw: RawDecoder,
     png: PngDecoder,
     zstd: ZstdDecoder,
+    #[cfg(feature = "ffmpeg")]
+    h264: Option<super::ffmpeg::FfmpegDecoder>,
 }
 
 impl AutoDecoder {
@@ -281,11 +285,34 @@ impl AutoDecoder {
             raw: RawDecoder::new(),
             png: PngDecoder::new(),
             zstd: ZstdDecoder::new(),
+            #[cfg(feature = "ffmpeg")]
+            h264: super::ffmpeg::FfmpegDecoder::new().ok(),
         }
+    }
+
+    /// Check if H.264 decoding is available.
+    #[cfg(feature = "ffmpeg")]
+    pub fn has_h264_support(&self) -> bool {
+        self.h264.is_some()
+    }
+
+    /// Check if H.264 decoding is available.
+    #[cfg(not(feature = "ffmpeg"))]
+    pub fn has_h264_support(&self) -> bool {
+        false
     }
 
     /// Detect the format and decode.
     pub fn decode(&mut self, data: &[u8], width: u32, height: u32) -> Result<DecodedFrame> {
+        // Try H.264 first if available (check for NAL start codes)
+        #[cfg(feature = "ffmpeg")]
+        if let Some(ref mut decoder) = self.h264 {
+            if decoder.can_decode(data) {
+                return decoder.decode(data, width, height);
+            }
+        }
+
+        // Fall back to other decoders
         if self.zstd.can_decode(data) {
             self.zstd.decode(data, width, height)
         } else if self.png.can_decode(data) {
@@ -297,6 +324,13 @@ impl AutoDecoder {
 
     /// Detect the compression format from data.
     pub fn detect_format(&self, data: &[u8]) -> &'static str {
+        #[cfg(feature = "ffmpeg")]
+        if let Some(ref decoder) = self.h264 {
+            if decoder.can_decode(data) {
+                return "H.264";
+            }
+        }
+
         if self.zstd.can_decode(data) {
             "Zstd"
         } else if self.png.can_decode(data) {
@@ -314,11 +348,35 @@ impl Default for AutoDecoder {
 }
 
 /// Create a decoder for the specified compression format.
+///
+/// When the `ffmpeg` feature is enabled and H.264 is requested, this will
+/// create an FFmpeg decoder. Falls back to Zstd for other formats.
 pub fn create_decoder(compression: ScreenCompression) -> Box<dyn FrameDecoder> {
     match compression {
         ScreenCompression::Raw => Box::new(RawDecoder::new()),
-        // For other formats, we use the auto decoder since the actual
-        // compression might differ from what was requested
+
+        ScreenCompression::H264 => {
+            #[cfg(feature = "ffmpeg")]
+            {
+                match super::ffmpeg::FfmpegDecoder::new() {
+                    Ok(dec) => {
+                        tracing::debug!("Created FFmpeg H.264 decoder");
+                        Box::new(dec)
+                    }
+                    Err(e) => {
+                        tracing::warn!("FFmpeg H.264 decoder unavailable: {}", e);
+                        Box::new(ZstdDecoder::new())
+                    }
+                }
+            }
+            #[cfg(not(feature = "ffmpeg"))]
+            {
+                tracing::debug!("FFmpeg feature not enabled, using Zstd fallback");
+                Box::new(ZstdDecoder::new())
+            }
+        }
+
+        // Other formats use Zstd
         _ => Box::new(ZstdDecoder::new()),
     }
 }

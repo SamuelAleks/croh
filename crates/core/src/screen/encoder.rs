@@ -327,15 +327,60 @@ impl FrameEncoder for ZstdEncoder {
 }
 
 /// Create an encoder based on the compression setting.
+///
+/// When the `ffmpeg` feature is enabled and H.264 is requested, this will
+/// attempt to create an FFmpeg encoder with hardware acceleration. Falls
+/// back to Zstd if FFmpeg is unavailable or fails.
 pub fn create_encoder(compression: ScreenCompression, quality: ScreenQuality) -> Box<dyn FrameEncoder> {
+    create_encoder_with_size(compression, quality, 1920, 1080)
+}
+
+/// Create an encoder with specific frame dimensions.
+///
+/// This variant is preferred when the frame size is known, as it allows
+/// FFmpeg encoders to pre-allocate buffers correctly.
+#[allow(unused_variables)]
+pub fn create_encoder_with_size(
+    compression: ScreenCompression,
+    quality: ScreenQuality,
+    width: u32,
+    height: u32,
+) -> Box<dyn FrameEncoder> {
     let mut encoder: Box<dyn FrameEncoder> = match compression {
         ScreenCompression::Raw => Box::new(RawEncoder::new()),
-        // For other formats, use Zstd as a good general-purpose encoder
-        // until we implement proper video codecs
-        ScreenCompression::WebP |
-        ScreenCompression::H264 |
-        ScreenCompression::Vp9 |
-        ScreenCompression::Av1 => Box::new(ZstdEncoder::new()),
+
+        ScreenCompression::H264 => {
+            #[cfg(feature = "ffmpeg")]
+            {
+                match super::ffmpeg::FfmpegEncoder::new(width, height, quality) {
+                    Ok(enc) => {
+                        tracing::info!(
+                            "Created FFmpeg H.264 encoder: {} ({})",
+                            enc.name(),
+                            enc.encoder_name()
+                        );
+                        Box::new(enc)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "FFmpeg H.264 encoder unavailable: {}. Falling back to Zstd.",
+                            e
+                        );
+                        Box::new(ZstdEncoder::new())
+                    }
+                }
+            }
+            #[cfg(not(feature = "ffmpeg"))]
+            {
+                tracing::debug!("FFmpeg feature not enabled, using Zstd fallback for H.264");
+                Box::new(ZstdEncoder::new())
+            }
+        }
+
+        // Other video codecs fall back to Zstd for now
+        ScreenCompression::WebP | ScreenCompression::Vp9 | ScreenCompression::Av1 => {
+            Box::new(ZstdEncoder::new())
+        }
     };
 
     encoder.set_quality(quality);
@@ -343,9 +388,34 @@ pub fn create_encoder(compression: ScreenCompression, quality: ScreenQuality) ->
 }
 
 /// Select the best available encoder for the given settings.
+///
+/// Prefers H.264 with hardware acceleration when available, falls back to Zstd.
 pub fn auto_select_encoder(quality: ScreenQuality) -> Box<dyn FrameEncoder> {
-    // For auto-selection, use Zstd as it provides good compression
-    // with very fast encode/decode speeds
+    auto_select_encoder_with_size(quality, 1920, 1080)
+}
+
+/// Select the best available encoder with specific frame dimensions.
+#[allow(unused_variables)]
+pub fn auto_select_encoder_with_size(quality: ScreenQuality, width: u32, height: u32) -> Box<dyn FrameEncoder> {
+    #[cfg(feature = "ffmpeg")]
+    {
+        // Try H.264 first for best compression
+        match super::ffmpeg::FfmpegEncoder::new(width, height, quality) {
+            Ok(enc) => {
+                tracing::info!(
+                    "Auto-selected FFmpeg H.264 encoder: {} ({})",
+                    enc.name(),
+                    enc.encoder_name()
+                );
+                return Box::new(enc);
+            }
+            Err(e) => {
+                tracing::debug!("FFmpeg encoder unavailable: {}, using Zstd", e);
+            }
+        }
+    }
+
+    // Fall back to Zstd
     let mut encoder = Box::new(ZstdEncoder::new());
     encoder.set_quality(quality);
     encoder
