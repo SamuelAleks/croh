@@ -258,6 +258,150 @@ impl SecurityPosture {
     }
 }
 
+// ==================== Screen Streaming Settings ====================
+
+/// Capture backend preference for screen streaming.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureBackend {
+    /// Auto-detect best backend for platform
+    #[default]
+    Auto,
+    /// DRM/KMS direct framebuffer (Linux, requires CAP_SYS_ADMIN)
+    Drm,
+    /// wlroots screencopy protocol (Sway, Hyprland - no prompts)
+    WlrScreencopy,
+    /// XDG Desktop Portal (may prompt on first use)
+    Portal,
+    /// X11 SHM (X11 sessions only)
+    X11,
+    /// DXGI Desktop Duplication (Windows)
+    Dxgi,
+}
+
+impl CaptureBackend {
+    /// Convert to UI string.
+    pub fn to_ui_string(&self) -> &'static str {
+        match self {
+            CaptureBackend::Auto => "auto",
+            CaptureBackend::Drm => "drm",
+            CaptureBackend::WlrScreencopy => "wlr-screencopy",
+            CaptureBackend::Portal => "portal",
+            CaptureBackend::X11 => "x11",
+            CaptureBackend::Dxgi => "dxgi",
+        }
+    }
+
+    /// Parse from UI string.
+    pub fn from_ui_string(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "drm" => CaptureBackend::Drm,
+            "wlr-screencopy" | "wlroots" => CaptureBackend::WlrScreencopy,
+            "portal" | "xdg" => CaptureBackend::Portal,
+            "x11" => CaptureBackend::X11,
+            "dxgi" => CaptureBackend::Dxgi,
+            _ => CaptureBackend::Auto,
+        }
+    }
+}
+
+/// Screen streaming settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScreenStreamSettings {
+    /// Enable screen streaming functionality.
+    /// When false, all screen streaming requests are rejected.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Maximum FPS to stream (0 = use system default, typically 60).
+    #[serde(default = "default_max_fps")]
+    pub max_fps: u32,
+
+    /// Minimum bitrate in Kbps (quality floor).
+    #[serde(default = "default_min_bitrate")]
+    pub min_bitrate_kbps: u32,
+
+    /// Maximum bitrate in Kbps (bandwidth cap).
+    #[serde(default = "default_max_bitrate")]
+    pub max_bitrate_kbps: u32,
+
+    /// Allow input control (keyboard/mouse) from viewers.
+    #[serde(default = "default_true")]
+    pub allow_input: bool,
+
+    /// Require confirmation dialog for each stream request.
+    #[serde(default)]
+    pub require_confirmation: bool,
+
+    /// Lock screen when streaming ends (security feature).
+    #[serde(default)]
+    pub lock_on_disconnect: bool,
+
+    /// Capture backend preference.
+    #[serde(default)]
+    pub capture_backend: CaptureBackend,
+
+    /// Show cursor in captured frames.
+    #[serde(default = "default_true")]
+    pub show_cursor: bool,
+
+    /// Highlight cursor clicks (visual feedback for viewers).
+    #[serde(default)]
+    pub highlight_clicks: bool,
+
+    /// Maximum frames to buffer before applying backpressure.
+    #[serde(default = "default_max_buffer_frames")]
+    pub max_buffer_frames: u32,
+
+    /// XDG Portal restore token for persistent unattended screen capture.
+    ///
+    /// This token allows bypassing the permission dialog on subsequent screen
+    /// capture sessions. The token is single-use and updated after each session.
+    ///
+    /// Note: Only used on Linux with the Portal capture backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portal_restore_token: Option<String>,
+}
+
+fn default_max_buffer_frames() -> u32 {
+    10 // Maximum frames in-flight before backpressure
+}
+
+fn default_max_fps() -> u32 {
+    60
+}
+
+fn default_min_bitrate() -> u32 {
+    500 // 500 Kbps
+}
+
+fn default_max_bitrate() -> u32 {
+    20000 // 20 Mbps
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for ScreenStreamSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false, // Opt-in by default for security
+            max_fps: 60,
+            min_bitrate_kbps: 500,
+            max_bitrate_kbps: 20000,
+            allow_input: true,
+            require_confirmation: false,
+            lock_on_disconnect: false,
+            capture_backend: CaptureBackend::Auto,
+            show_cursor: true,
+            highlight_clicks: false,
+            max_buffer_frames: 10,
+            portal_restore_token: None,
+        }
+    }
+}
+
 /// Guest peer policy settings.
 ///
 /// These settings control how temporary guest peers are handled.
@@ -370,6 +514,10 @@ pub struct Config {
     /// Relay connection preference for peer-to-peer connections.
     #[serde(default)]
     pub relay_preference: RelayPreference,
+
+    /// Screen streaming settings.
+    #[serde(default)]
+    pub screen_stream: ScreenStreamSettings,
 }
 
 fn default_keep_completed_transfers() -> bool {
@@ -397,6 +545,7 @@ impl Default for Config {
             security_posture: SecurityPosture::default(),
             guest_policy: GuestPolicy::default(),
             relay_preference: RelayPreference::default(),
+            screen_stream: ScreenStreamSettings::default(),
         }
     }
 }

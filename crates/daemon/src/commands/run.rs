@@ -3,14 +3,18 @@
 use anyhow::Result;
 use croh_core::{platform, Config, TransferManager};
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tokio::sync::{mpsc, RwLock};
+use tracing::{debug, error, info, warn};
+
+use crate::handlers::ScreenHandler;
 
 /// Daemon state shared across the service.
 pub struct DaemonState {
     #[allow(dead_code)] // Used for future features
     pub config: Config,
     pub transfer_manager: TransferManager,
+    /// Screen streaming handler (optional, depends on config).
+    pub screen_handler: Option<Arc<ScreenHandler>>,
     pub running: bool,
 }
 
@@ -31,10 +35,36 @@ pub async fn execute(config_path: Option<String>) -> Result<()> {
     std::fs::create_dir_all(&config.download_dir)?;
     std::fs::create_dir_all(platform::data_dir())?;
 
+    // Initialize screen streaming handler if enabled
+    let screen_handler = if config.screen_stream.enabled {
+        let (event_tx, mut event_rx) = mpsc::channel(256);
+        let handler = Arc::new(ScreenHandler::new(config.screen_stream.clone(), event_tx));
+
+        // Spawn event handler task
+        tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                debug!("Screen stream event: {:?}", event);
+                // Events can be used for monitoring/logging
+                // In the future, these could be forwarded to connected clients
+            }
+        });
+
+        info!(
+            "Screen streaming enabled (max {}fps, input: {})",
+            config.screen_stream.max_fps,
+            if config.screen_stream.allow_input { "allowed" } else { "disabled" }
+        );
+        Some(handler)
+    } else {
+        debug!("Screen streaming disabled");
+        None
+    };
+
     // Initialize daemon state
     let state = Arc::new(RwLock::new(DaemonState {
         config,
         transfer_manager: TransferManager::new(),
+        screen_handler,
         running: true,
     }));
 
@@ -119,6 +149,18 @@ pub async fn execute(config_path: Option<String>) -> Result<()> {
         if !active.is_empty() {
             warn!("Cancelling {} active transfer(s)", active.len());
             // In a real implementation, we'd properly cancel each transfer
+        }
+    }
+
+    // Stop any active screen streaming sessions
+    {
+        let state_guard = state.read().await;
+        if let Some(ref screen_handler) = state_guard.screen_handler {
+            let stream_count = screen_handler.active_stream_count().await;
+            if stream_count > 0 {
+                info!("Stopping {} active screen stream(s)", stream_count);
+            }
+            screen_handler.stop_all().await;
         }
     }
 

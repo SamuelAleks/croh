@@ -59,9 +59,40 @@ sled = "0.34"
 # Hostname detection
 hostname = "0.4"
 
+# Async traits
+async-trait = "0.1"
+
+# Frame encoding
+png = "0.17"
+zstd = "0.13"
+
 # Platform-specific disk space queries
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Linux screen capture dependencies
+[target.'cfg(target_os = "linux")'.dependencies]
+# DRM/KMS for direct framebuffer access (requires CAP_SYS_ADMIN)
+drm = "0.14"
+drm-ffi = "0.9"
+# X11 SHM for X11 session capture
+x11rb = { version = "0.13", features = ["shm", "randr"] }
+# XDG Desktop Portal for Wayland screen capture (works on KDE, GNOME)
+# tokio feature is enabled by default in 0.12+
+ashpd = "0.12"
+# PipeWire bindings for receiving portal video streams
+pipewire = "0.9"
+
+# Windows screen capture dependencies
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D",
+    "Win32_Foundation",
+    "Win32_Security",
+] }
 
 [dev-dependencies]
 tempfile = "3.14"

@@ -35,6 +35,12 @@ pub struct Permissions {
     /// Can send/receive chat messages with this peer
     #[serde(default = "default_chat_permission")]
     pub chat: bool,
+    /// Can view this peer's screen (receive stream)
+    #[serde(default)]
+    pub screen_view: bool,
+    /// Can control this peer's screen (send input events)
+    #[serde(default)]
+    pub screen_control: bool,
 }
 
 /// Default value for chat permission (true for backwards compatibility).
@@ -51,6 +57,8 @@ impl Permissions {
             browse: true,
             status: true,
             chat: true,
+            screen_view: true,
+            screen_control: true,
         }
     }
 
@@ -67,6 +75,8 @@ impl Permissions {
             browse: false,
             status: true,
             chat: true,
+            screen_view: false,
+            screen_control: false,
         }
     }
 
@@ -80,6 +90,8 @@ impl Permissions {
                 Capability::Browse => perms.browse = true,
                 Capability::Status => perms.status = true,
                 Capability::Chat => perms.chat = true,
+                Capability::ScreenView => perms.screen_view = true,
+                Capability::ScreenControl => perms.screen_control = true,
             }
         }
         perms
@@ -103,7 +115,32 @@ impl Permissions {
         if self.chat {
             caps.push(Capability::Chat);
         }
+        if self.screen_view {
+            caps.push(Capability::ScreenView);
+        }
+        if self.screen_control {
+            caps.push(Capability::ScreenControl);
+        }
         caps
+    }
+
+    /// Create permissions for remote desktop (view + control, plus status).
+    pub fn remote_desktop() -> Self {
+        Self {
+            screen_view: true,
+            screen_control: true,
+            status: true,
+            ..Default::default()
+        }
+    }
+
+    /// Create permissions for view-only remote desktop (no control).
+    pub fn screen_view_only() -> Self {
+        Self {
+            screen_view: true,
+            status: true,
+            ..Default::default()
+        }
     }
 }
 

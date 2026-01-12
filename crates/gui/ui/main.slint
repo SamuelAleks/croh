@@ -300,6 +300,9 @@ export struct AppSettings {
     security-posture: string,     // "relaxed", "balanced", "cautious"
     // Network/Relay settings
     relay-preference: string,     // "normal", "direct-preferred", "relay-only", "disabled"
+    // Screen streaming settings
+    screen-streaming-enabled: bool,   // allow peers to view our screen
+    screen-allow-input: bool,         // allow peers to control our screen (mouse/keyboard)
 }
 
 export struct PeerItem {
@@ -315,10 +318,12 @@ export struct PeerItem {
     can-push: bool,          // we can push files to this peer
     can-pull: bool,          // we can pull files from this peer
     can-browse: bool,        // we can browse this peer's filesystem
+    can-screen-view: bool,   // we can view this peer's screen
     // Permissions WE grant to THEM (what they can do to us)
     allow-push: bool,        // they can push files to us
     allow-pull: bool,        // they can pull files from us
     allow-browse: bool,      // they can browse our filesystem
+    allow-screen-view: bool, // they can view our screen
     // Connection status details
     latency-ms: int,              // current ping latency (-1 if unknown)
     avg-latency-ms: int,          // rolling average latency
@@ -450,6 +455,8 @@ export global AppLogic {
     callback set-security-posture(string);
     // set-relay-preference: preference ("normal", "direct-preferred", "relay-only", "disabled")
     callback set-relay-preference(string);
+    // set-screen-streaming: enabled, allow-input
+    callback set-screen-streaming(bool, bool);
     // set-device-nickname: nickname (empty = use hostname)
     callback set-device-nickname(string);
 
@@ -468,8 +475,8 @@ export global AppLogic {
     callback connect-peer(string);     // peer id - resume connections to/from peer
     callback push-to-peer(string); // peer id - push selected files to peer
     callback pull-from-peer(string); // peer id - open browse dialog for peer
-    // peer id, allow-push, allow-pull, allow-browse
-    callback update-peer-permissions(string, bool, bool, bool);
+    // peer id, allow-push, allow-pull, allow-browse, allow-screen-view
+    callback update-peer-permissions(string, bool, bool, bool, bool);
     // peer id, expanded state
     callback set-peer-expanded(string, bool);
     // Refresh peer status (trigger immediate ping)
@@ -582,6 +589,30 @@ export global AppLogic {
     in property <bool> chat-loading: false;
     in property <bool> chat-has-more: false;        // more older messages available
     in property <int> total-unread-count: 0;        // badge for all conversations
+
+    // ==================== Screen Viewer ====================
+    // Screen viewer callbacks
+    callback open-screen-viewer(string);          // peer_id - request to view peer's screen
+    callback close-screen-viewer();               // close screen viewer
+    callback screen-viewer-disconnect();          // disconnect from stream
+    callback screen-viewer-toggle-fullscreen();   // toggle fullscreen mode
+    callback screen-viewer-adjust-quality(string);  // "fast", "balanced", "quality"
+    callback screen-viewer-send-input(int, int, int, int);  // type, x, y, data (mouse/key events)
+
+    // Screen viewer state
+    in property <bool> screen-viewer-open: false;
+    in property <string> screen-viewer-peer-id: "";
+    in property <string> screen-viewer-peer-name: "";
+    in property <string> screen-viewer-status: "disconnected";  // connecting, streaming, paused, error
+    in property <bool> screen-viewer-fullscreen: false;
+    in property <image> screen-viewer-frame;      // current frame
+    in property <int> screen-viewer-width: 0;
+    in property <int> screen-viewer-height: 0;
+    in property <float> screen-viewer-fps: 0.0;
+    in property <int> screen-viewer-bitrate-kbps: 0;
+    in property <int> screen-viewer-latency-ms: 0;
+    in property <bool> screen-viewer-input-enabled: false;
+    in property <string> screen-viewer-error: "";
 }
 
 // ============================================================================
@@ -1601,11 +1632,12 @@ component PeerCard inherits Rectangle {
     callback push-clicked();
     callback browse-clicked();
     callback chat-clicked();  // open chat with this peer
+    callback screen-view-clicked();  // view peer's screen
     callback refresh-clicked();
     callback speed-test-clicked();
     callback rename-clicked(string);  // new name
     callback revoke-clicked();  // revoke trust (send notification to peer)
-    callback permissions-changed(bool, bool, bool); // allow-push, allow-pull, allow-browse
+    callback permissions-changed(bool, bool, bool, bool); // allow-push, allow-pull, allow-browse, allow-screen-view
     callback expanded-changed(bool); // notify when expanded state changes
 
     background: peer.revoked || peer.we-revoked ? Theme.bg-hover : Theme.bg-card;
@@ -1808,6 +1840,13 @@ component PeerCard inherits Rectangle {
                 label: "Browse";
                 small: true;
                 clicked => { root.browse-clicked(); }
+            }
+
+            // Screen view button - only if peer grants screen_view permission and is online
+            if !peer.revoked && !peer.we-revoked && peer.can-screen-view && peer.status == "online": CompactButton {
+                label: "Screen";
+                small: true;
+                clicked => { root.screen-view-clicked(); }
             }
 
             // Chat button with unread badge - always available for trusted peers
@@ -2179,19 +2218,25 @@ component PeerCard inherits Rectangle {
                             MiniToggle {
                                 label: "Push";
                                 checked: peer.allow-push;
-                                toggled => { root.permissions-changed(!peer.allow-push, peer.allow-pull, peer.allow-browse); }
+                                toggled => { root.permissions-changed(!peer.allow-push, peer.allow-pull, peer.allow-browse, peer.allow-screen-view); }
                             }
 
                             MiniToggle {
                                 label: "Pull";
                                 checked: peer.allow-pull;
-                                toggled => { root.permissions-changed(peer.allow-push, !peer.allow-pull, peer.allow-browse); }
+                                toggled => { root.permissions-changed(peer.allow-push, !peer.allow-pull, peer.allow-browse, peer.allow-screen-view); }
                             }
 
                             MiniToggle {
                                 label: "Browse";
                                 checked: peer.allow-browse;
-                                toggled => { root.permissions-changed(peer.allow-push, peer.allow-pull, !peer.allow-browse); }
+                                toggled => { root.permissions-changed(peer.allow-push, peer.allow-pull, !peer.allow-browse, peer.allow-screen-view); }
+                            }
+
+                            MiniToggle {
+                                label: "Screen";
+                                checked: peer.allow-screen-view;
+                                toggled => { root.permissions-changed(peer.allow-push, peer.allow-pull, peer.allow-browse, !peer.allow-screen-view); }
                             }
                         }
                     }
@@ -2987,12 +3032,13 @@ component PeersPanel inherits Rectangle {
                         push-clicked => { AppLogic.push-to-peer(peer.id); }
                         browse-clicked => { AppLogic.browse-peer(peer.id); }
                         chat-clicked => { AppLogic.open-chat(peer.id); }
+                        screen-view-clicked => { AppLogic.open-screen-viewer(peer.id); }
                         refresh-clicked => { AppLogic.refresh-peer-status(peer.id); }
                         speed-test-clicked => { AppLogic.run-speed-test(peer.id); }
                         rename-clicked(new-name) => { AppLogic.rename-peer(peer.id, new-name); }
                         revoke-clicked => { AppLogic.revoke-peer(peer.id); }
-                        permissions-changed(push, pull, browse) => {
-                            AppLogic.update-peer-permissions(peer.id, push, pull, browse);
+                        permissions-changed(push, pull, browse, screen) => {
+                            AppLogic.update-peer-permissions(peer.id, push, pull, browse, screen);
                         }
                         expanded-changed(expanded) => {
                             AppLogic.set-peer-expanded(peer.id, expanded);
@@ -3563,6 +3609,88 @@ component SettingsPanel inherits Rectangle {
                 }
             }
 
+            // Screen Sharing
+            Section {
+                title: "Screen Sharing";
+
+                SettingRow {
+                    label: "Allow Screen Viewing";
+                    sublabel: AppLogic.settings.screen-streaming-enabled ?
+                              "Peers with permission can view your screen" :
+                              "Screen viewing is disabled";
+
+                    Rectangle {
+                        width: 40px;
+                        height: 22px;
+                        border-radius: 11px;
+                        background: AppLogic.settings.screen-streaming-enabled ? Theme.accent : Theme.bg-hover;
+                        border-width: 1px;
+                        border-color: Theme.border;
+
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppLogic.set-screen-streaming(
+                                    !AppLogic.settings.screen-streaming-enabled,
+                                    AppLogic.settings.screen-allow-input
+                                );
+                            }
+                        }
+
+                        Rectangle {
+                            x: AppLogic.settings.screen-streaming-enabled ? parent.width - self.width - 2px : 2px;
+                            y: 2px;
+                            width: 18px;
+                            height: 18px;
+                            border-radius: 9px;
+                            background: #ffffff;
+
+                            animate x { duration: 150ms; easing: ease-out; }
+                        }
+                    }
+                }
+
+                SettingRow {
+                    label: "Allow Remote Control";
+                    sublabel: AppLogic.settings.screen-allow-input ?
+                              "Peers can control mouse and keyboard" :
+                              "View only (no input)";
+
+                    Rectangle {
+                        width: 40px;
+                        height: 22px;
+                        border-radius: 11px;
+                        background: AppLogic.settings.screen-allow-input ? Theme.accent : Theme.bg-hover;
+                        border-width: 1px;
+                        border-color: Theme.border;
+                        opacity: AppLogic.settings.screen-streaming-enabled ? 1.0 : 0.5;
+
+                        TouchArea {
+                            mouse-cursor: AppLogic.settings.screen-streaming-enabled ? pointer : default;
+                            clicked => {
+                                if AppLogic.settings.screen-streaming-enabled {
+                                    AppLogic.set-screen-streaming(
+                                        AppLogic.settings.screen-streaming-enabled,
+                                        !AppLogic.settings.screen-allow-input
+                                    );
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            x: AppLogic.settings.screen-allow-input ? parent.width - self.width - 2px : 2px;
+                            y: 2px;
+                            width: 18px;
+                            height: 18px;
+                            border-radius: 9px;
+                            background: #ffffff;
+
+                            animate x { duration: 150ms; easing: ease-out; }
+                        }
+                    }
+                }
+            }
+
             // Appearance
             Section {
                 title: "Appearance";
@@ -4112,6 +4240,221 @@ component ChatPanel inherits Rectangle {
 }
 
 // ============================================================================
+// Screen Viewer Panel (Full-screen overlay)
+// ============================================================================
+
+component ScreenViewerPanel inherits Rectangle {
+    background: #000000;
+
+    // Status bar height
+    property <length> status-bar-height: 40px;
+    property <bool> show-controls: touch.has-hover || !streaming;
+    property <bool> streaming: AppLogic.screen-viewer-status == "streaming";
+
+    // Main touch area for input capture
+    touch := TouchArea {
+        mouse-cursor: streaming && AppLogic.screen-viewer-input-enabled ? none : default;
+
+        // Capture mouse events for input forwarding
+        moved => {
+            if streaming && AppLogic.screen-viewer-input-enabled {
+                // type=0 for mouse move, x, y, data=0
+                AppLogic.screen-viewer-send-input(0, self.mouse-x / 1px, self.mouse-y / 1px, 0);
+            }
+        }
+
+        pointer-event(e) => {
+            if streaming && AppLogic.screen-viewer-input-enabled {
+                if e.kind == PointerEventKind.down {
+                    // type=1 for mouse down
+                    AppLogic.screen-viewer-send-input(1, self.mouse-x / 1px, self.mouse-y / 1px,
+                        e.button == PointerEventButton.left ? 0 :
+                        e.button == PointerEventButton.right ? 1 : 2);
+                } else if e.kind == PointerEventKind.up {
+                    // type=2 for mouse up
+                    AppLogic.screen-viewer-send-input(2, self.mouse-x / 1px, self.mouse-y / 1px,
+                        e.button == PointerEventButton.left ? 0 :
+                        e.button == PointerEventButton.right ? 1 : 2);
+                }
+            }
+        }
+
+        scroll-event(e) => {
+            if streaming && AppLogic.screen-viewer-input-enabled {
+                // type=3 for scroll, data = delta
+                AppLogic.screen-viewer-send-input(3, e.delta-x / 1px, e.delta-y / 1px, 0);
+            }
+            accept
+        }
+    }
+
+    // Frame display
+    if streaming: Image {
+        x: (parent.width - self.width) / 2;
+        y: status-bar-height + (parent.height - status-bar-height - self.height) / 2;
+        source: AppLogic.screen-viewer-frame;
+        image-fit: contain;
+        width: min(parent.width, AppLogic.screen-viewer-width * 1px);
+        height: min(parent.height - status-bar-height, AppLogic.screen-viewer-height * 1px);
+    }
+
+    // Loading/connecting state
+    if AppLogic.screen-viewer-status == "connecting": VerticalLayout {
+        alignment: center;
+        spacing: Theme.spacing-md;
+
+        Text {
+            text: "Connecting to " + AppLogic.screen-viewer-peer-name + "...";
+            font-size: 18px;
+            color: Theme.text;
+            horizontal-alignment: center;
+        }
+
+        // Simple loading animation
+        Rectangle {
+            width: 40px;
+            height: 40px;
+            border-radius: 20px;
+            border-width: 3px;
+            border-color: Theme.accent;
+            horizontal-stretch: 0;
+        }
+    }
+
+    // Error state
+    if AppLogic.screen-viewer-status == "error": VerticalLayout {
+        alignment: center;
+        spacing: Theme.spacing-md;
+
+        Text {
+            text: "Connection Error";
+            font-size: 18px;
+            font-weight: 600;
+            color: Theme.error;
+            horizontal-alignment: center;
+        }
+
+        Text {
+            text: AppLogic.screen-viewer-error;
+            font-size: 14px;
+            color: Theme.text-muted;
+            horizontal-alignment: center;
+        }
+
+        CompactButton {
+            label: "Close";
+            clicked => { AppLogic.close-screen-viewer(); }
+        }
+    }
+
+    // Status bar (top)
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: status-bar-height;
+        background: show-controls ? #000000CC : transparent;
+
+        animate background { duration: 200ms; }
+
+        if show-controls: HorizontalLayout {
+            padding: Theme.spacing-sm;
+            spacing: Theme.spacing-md;
+            alignment: stretch;
+
+            // Close button
+            ImageIconBtn {
+                icon: Icons.x;
+                icon-color: Theme.text;
+                clicked => { AppLogic.close-screen-viewer(); }
+            }
+
+            // Peer name
+            Text {
+                vertical-alignment: center;
+                text: AppLogic.screen-viewer-peer-name;
+                font-size: 14px;
+                font-weight: 600;
+                color: Theme.text;
+            }
+
+            // Status indicator
+            HorizontalLayout {
+                spacing: 4px;
+                alignment: center;
+
+                Rectangle {
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 4px;
+                    background: streaming ? Theme.success :
+                               AppLogic.screen-viewer-status == "connecting" ? Theme.warning :
+                               Theme.error;
+                }
+
+                Text {
+                    text: AppLogic.screen-viewer-status;
+                    font-size: 12px;
+                    color: Theme.text-muted;
+                }
+            }
+
+            // Spacer
+            Rectangle { horizontal-stretch: 1; }
+
+            // Stats
+            if streaming: HorizontalLayout {
+                spacing: Theme.spacing-md;
+
+                // FPS
+                Text {
+                    vertical-alignment: center;
+                    text: Math.round(AppLogic.screen-viewer-fps) + " fps";
+                    font-size: 12px;
+                    color: Theme.text-muted;
+                }
+
+                // Resolution
+                Text {
+                    vertical-alignment: center;
+                    text: AppLogic.screen-viewer-width + "x" + AppLogic.screen-viewer-height;
+                    font-size: 12px;
+                    color: Theme.text-muted;
+                }
+
+                // Bitrate
+                Text {
+                    vertical-alignment: center;
+                    text: AppLogic.screen-viewer-bitrate-kbps + " kbps";
+                    font-size: 12px;
+                    color: Theme.text-muted;
+                }
+            }
+
+            // Input toggle
+            if streaming: CompactButton {
+                label: AppLogic.screen-viewer-input-enabled ? "Input: On" : "Input: Off";
+                small: true;
+            }
+
+            // Fullscreen toggle
+            ImageIconBtn {
+                icon: Icons.zap;  // TODO: Add proper fullscreen icon
+                icon-color: Theme.text;
+                clicked => { AppLogic.screen-viewer-toggle-fullscreen(); }
+            }
+
+            // Disconnect button
+            if streaming: CompactButton {
+                label: "Disconnect";
+                small: true;
+                clicked => { AppLogic.screen-viewer-disconnect(); }
+            }
+        }
+    }
+}
+
+// ============================================================================
 // File Browser Dialog
 // ============================================================================
 
@@ -4486,4 +4829,7 @@ export component MainWindow inherits Window {
 
     // Chat panel overlay
     if AppLogic.chat-panel-open: ChatPanel {}
+
+    // Screen viewer overlay (fullscreen when active)
+    if AppLogic.screen-viewer-open: ScreenViewerPanel {}
 }

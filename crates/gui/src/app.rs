@@ -8,6 +8,12 @@ use croh_core::{
     TrustedPeer, TrustBundle, push_files, pull_files, handle_incoming_push, handle_incoming_pull, handle_browse_request, browse_remote, default_browsable_paths,
     NodeAddr, NodeId, generate_id, serde_json,
     ChatStore, ChatHandler,
+    stream_screen_from_peer, handle_screen_stream_request, ScreenStreamEvent,
+    screen::{
+        ScreenViewer, ViewerConfig, ViewerCommand, ViewerEvent,
+        viewer_command_channel, viewer_event_channel,
+        ViewerCommandSender, RemoteInputEvent,
+    },
 };
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 use std::collections::HashMap;
@@ -95,6 +101,10 @@ pub struct App {
     active_chat_peer: Arc<RwLock<Option<String>>>,
     /// Debounce timer for typing indicator.
     typing_debounce: Arc<RwLock<Option<std::time::Instant>>>,
+    /// Screen viewer command sender (for controlling the viewer).
+    screen_viewer_cmd: Arc<RwLock<Option<ViewerCommandSender>>>,
+    /// Currently active screen viewer peer ID.
+    active_screen_peer: Arc<RwLock<Option<String>>>,
 }
 
 /// Tracks session statistics for uploads and downloads.
@@ -199,6 +209,8 @@ impl App {
             chat_store: Arc::new(chat_store),
             active_chat_peer: Arc::new(RwLock::new(None)),
             typing_debounce: Arc::new(RwLock::new(None)),
+            screen_viewer_cmd: Arc::new(RwLock::new(None)),
+            active_screen_peer: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -216,6 +228,7 @@ impl App {
         self.setup_browse_callbacks(window);
         self.setup_network_callbacks(window);
         self.setup_chat_callbacks(window);
+        self.setup_screen_viewer_callbacks(window);
 
         // Start background listener for incoming transfers
         self.start_background_listener();
@@ -1092,8 +1105,8 @@ impl App {
                             }
                         }
                         ControlMessage::PermissionsUpdate { permissions } => {
-                            info!("Received permissions update from {}: push={}, pull={}, browse={}",
-                                  peer.name, permissions.push, permissions.pull, permissions.browse);
+                            info!("Received permissions update from {}: push={}, pull={}, browse={}, screen_view={}",
+                                  peer.name, permissions.push, permissions.pull, permissions.browse, permissions.screen_view);
 
                             // Update our record of what they allow us to do
                             {
@@ -1103,6 +1116,8 @@ impl App {
                                     p.their_permissions.pull = permissions.pull;
                                     p.their_permissions.browse = permissions.browse;
                                     p.their_permissions.status = permissions.status;
+                                    p.their_permissions.screen_view = permissions.screen_view;
+                                    p.their_permissions.screen_control = permissions.screen_control;
                                 }) {
                                     error!("Failed to update peer permissions in store: {}", e);
                                 }
@@ -1794,6 +1809,100 @@ impl App {
 
                             let _ = conn.close().await;
                         }
+                        // ==================== Screen Streaming Handlers ====================
+                        ControlMessage::DisplayListRequest => {
+                            debug!("Received display list request from {}", peer.name);
+
+                            // Check permission
+                            if !peer.permissions_granted.screen_view {
+                                warn!("Screen view not allowed from {}", peer.name);
+                                let _ = conn.close().await;
+                                continue;
+                            }
+
+                            // For now, return a simple response (actual implementation in daemon)
+                            // The GUI doesn't serve screen streams, it only views them
+                            let response = ControlMessage::DisplayListResponse {
+                                displays: vec![],
+                                backend: "unsupported".to_string(),
+                            };
+                            let _ = conn.send(&response).await;
+                            let _ = conn.close().await;
+                        }
+                        ControlMessage::ScreenStreamRequest { stream_id, display_id, compression, quality, target_fps } => {
+                            info!("Received screen stream request from {} (stream_id={})", peer.name, stream_id);
+
+                            // Get screen stream settings from config
+                            let cfg = config.read().await;
+                            let screen_settings = cfg.screen_stream.clone();
+                            drop(cfg);
+
+                            // Check if screen streaming is enabled
+                            if !screen_settings.enabled {
+                                warn!("Screen streaming disabled, rejecting request from {}", peer.name);
+                                let response = ControlMessage::ScreenStreamResponse {
+                                    stream_id,
+                                    accepted: false,
+                                    reason: Some("Screen streaming is disabled on this device".into()),
+                                    displays: vec![],
+                                    compression: None,
+                                };
+                                let _ = conn.send(&response).await;
+                                let _ = conn.close().await;
+                                continue;
+                            }
+
+                            // Check if peer has screen_view permission
+                            if !peer.permissions_granted.screen_view {
+                                warn!("Screen view not allowed from {}", peer.name);
+                                let response = ControlMessage::ScreenStreamResponse {
+                                    stream_id,
+                                    accepted: false,
+                                    reason: Some("screen_view permission not granted".into()),
+                                    displays: vec![],
+                                    compression: None,
+                                };
+                                let _ = conn.send(&response).await;
+                                let _ = conn.close().await;
+                                continue;
+                            }
+
+                            // Handle the stream request (this will capture and send frames)
+                            match handle_screen_stream_request(
+                                &mut conn,
+                                stream_id.clone(),
+                                display_id,
+                                compression,
+                                quality,
+                                target_fps,
+                                &peer,
+                                &screen_settings,
+                            ).await {
+                                Ok(()) => {
+                                    info!("Screen stream {} ended normally", stream_id);
+                                }
+                                Err(e) => {
+                                    error!("Screen stream {} error: {}", stream_id, e);
+                                }
+                            }
+                            // Connection is closed by the handler or when stream ends
+                        }
+                        ControlMessage::ScreenFrame { stream_id, metadata } => {
+                            // Received a screen frame - this should be handled by the viewer
+                            // For now, just log it
+                            debug!(
+                                "Received screen frame from {}: stream_id={}, seq={}, {}x{}",
+                                peer.name, stream_id, metadata.sequence, metadata.width, metadata.height
+                            );
+                            // TODO: Forward to active screen viewer if stream_id matches
+                            // This will be implemented when viewer connection is wired up
+                            let _ = conn.close().await;
+                        }
+                        ControlMessage::ScreenStreamStop { stream_id, reason } => {
+                            info!("Received screen stream stop from {}: stream_id={}, reason={}", peer.name, stream_id, reason);
+                            // TODO: Notify viewer that stream has ended
+                            let _ = conn.close().await;
+                        }
                         other => {
                             warn!("Unexpected message type from {}: {:?}", remote_id, other);
                         }
@@ -1862,6 +1971,10 @@ impl App {
                 // Network settings
                 let relay_preference = config_guard.relay_preference.to_ui_string().to_string();
 
+                // Screen streaming settings
+                let screen_streaming_enabled = config_guard.screen_stream.enabled;
+                let screen_allow_input = config_guard.screen_stream.allow_input;
+
                 // Device identity
                 let device_nickname = config_guard.device_nickname.clone().unwrap_or_default();
                 let device_hostname = Config::get_hostname();
@@ -1892,6 +2005,8 @@ impl App {
                             keep_completed_transfers,
                             security_posture: SharedString::from(security_posture),
                             relay_preference: SharedString::from(relay_preference),
+                            screen_streaming_enabled,
+                            screen_allow_input,
                         };
                         window.global::<AppLogic>().set_settings(settings);
                     }
@@ -3018,6 +3133,8 @@ impl App {
                         let keep_completed_transfers = config_guard.keep_completed_transfers;
                         let security_posture = config_guard.security_posture.to_ui_string().to_string();
                         let relay_preference = config_guard.relay_preference.to_ui_string().to_string();
+                        let screen_streaming_enabled = config_guard.screen_stream.enabled;
+                        let screen_allow_input = config_guard.screen_stream.allow_input;
                         let device_nickname = config_guard.device_nickname.clone().unwrap_or_default();
                         let device_hostname = Config::get_hostname();
                         let (croc_path, croc_found) = match find_croc_executable() {
@@ -3049,6 +3166,8 @@ impl App {
                                     keep_completed_transfers,
                                     security_posture: SharedString::from(security_posture),
                                     relay_preference: SharedString::from(relay_preference),
+                                    screen_streaming_enabled,
+                                    screen_allow_input,
                                 };
                                 window.global::<AppLogic>().set_settings(settings);
                             }
@@ -3329,6 +3448,51 @@ impl App {
                         });
 
                         info!("Relay preference set to: {}", preference_str);
+                    });
+                });
+            }
+        });
+
+        // Set screen streaming settings callback
+        window.global::<AppLogic>().on_set_screen_streaming({
+            let config = config.clone();
+            let window_weak = window_weak.clone();
+
+            move |enabled, allow_input| {
+                let config = config.clone();
+                let window_weak = window_weak.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Update config with new screen streaming settings
+                        {
+                            let mut config_guard = config.write().await;
+                            config_guard.screen_stream.enabled = enabled;
+                            config_guard.screen_stream.allow_input = allow_input;
+                            if let Err(e) = config_guard.save() {
+                                error!("Failed to save screen streaming settings: {}", e);
+                            }
+                        }
+
+                        // Update UI
+                        let _ = slint::invoke_from_event_loop({
+                            let window_weak = window_weak.clone();
+                            move || {
+                                if let Some(window) = window_weak.upgrade() {
+                                    let mut settings = window.global::<AppLogic>().get_settings();
+                                    settings.screen_streaming_enabled = enabled;
+                                    settings.screen_allow_input = allow_input;
+                                    window.global::<AppLogic>().set_settings(settings);
+                                }
+                            }
+                        });
+
+                        info!("Screen streaming settings: enabled={}, allow_input={}", enabled, allow_input);
                     });
                 });
             }
@@ -4539,10 +4703,10 @@ impl App {
             let peer_store = peer_store.clone();
             let shared_endpoint = self.shared_endpoint.clone();
 
-            move |id, allow_push, allow_pull, allow_browse| {
+            move |id, allow_push, allow_pull, allow_browse, allow_screen_view| {
                 let id_str = id.to_string();
-                info!("Updating permissions for peer {}: push={}, pull={}, browse={}",
-                      id_str, allow_push, allow_pull, allow_browse);
+                info!("Updating permissions for peer {}: push={}, pull={}, browse={}, screen_view={}",
+                      id_str, allow_push, allow_pull, allow_browse, allow_screen_view);
                 let window_weak_thread = window_weak.clone();
                 let peer_store = peer_store.clone();
                 let shared_endpoint = shared_endpoint.clone();
@@ -4569,6 +4733,7 @@ impl App {
                                 peer.permissions_granted.push = allow_push;
                                 peer.permissions_granted.pull = allow_pull;
                                 peer.permissions_granted.browse = allow_browse;
+                                peer.permissions_granted.screen_view = allow_screen_view;
                             }) {
                                 error!("Failed to update peer permissions: {}", e);
                                 update_status(&window_weak_thread, &format!("Error: {}", e));
@@ -4588,6 +4753,8 @@ impl App {
                                             browse: allow_browse,
                                             status: true, // Always allow status
                                             chat: true,   // Always allow chat
+                                            screen_view: allow_screen_view,
+                                            screen_control: false, // TODO: Add UI control for screen control
                                         };
                                         let msg = ControlMessage::PermissionsUpdate { permissions };
                                         if let Err(e) = conn.send(&msg).await {
@@ -4619,6 +4786,7 @@ impl App {
                                     allow_push,
                                     allow_pull,
                                     allow_browse,
+                                    allow_screen_view,
                                     ..peer
                                 };
                                 model.set_row_data(i, updated_peer);
@@ -6578,6 +6746,517 @@ impl App {
             }
         });
     }
+
+    /// Set up screen viewer callbacks.
+    fn setup_screen_viewer_callbacks(&self, window: &MainWindow) {
+        let window_weak = self.window.clone();
+        let peer_store = self.peer_store.clone();
+        let shared_endpoint = self.shared_endpoint.clone();
+        let screen_viewer_cmd = self.screen_viewer_cmd.clone();
+        let active_screen_peer = self.active_screen_peer.clone();
+        let peer_status = self.peer_status.clone();
+
+        // Open screen viewer callback - opens viewer for a specific peer
+        window.global::<AppLogic>().on_open_screen_viewer({
+            let window_weak = window_weak.clone();
+            let peer_store = peer_store.clone();
+            let shared_endpoint = shared_endpoint.clone();
+            let screen_viewer_cmd = screen_viewer_cmd.clone();
+            let active_screen_peer = active_screen_peer.clone();
+            let peer_status = peer_status.clone();
+
+            move |peer_id| {
+                let peer_id_str = peer_id.to_string();
+                info!("Opening screen viewer for peer: {}", peer_id_str);
+
+                let window_weak = window_weak.clone();
+                let peer_store = peer_store.clone();
+                let shared_endpoint = shared_endpoint.clone();
+                let screen_viewer_cmd = screen_viewer_cmd.clone();
+                let active_screen_peer = active_screen_peer.clone();
+                let peer_status = peer_status.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Get peer info (we receive peer.id from UI)
+                        let peers = peer_store.read().await;
+                        let peer = match peers.find_by_id(&peer_id_str) {
+                            Some(p) => p.clone(),
+                            None => {
+                                error!("Peer not found by id: {}", peer_id_str);
+                                return;
+                            }
+                        };
+                        drop(peers);
+
+                        // Check if peer has granted us screen_view permission
+                        if !peer.their_permissions.screen_view {
+                            warn!("Peer {} does not have screen_view permission", peer.name);
+                            let window_weak = window_weak.clone();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(window) = window_weak.upgrade() {
+                                    let logic = window.global::<AppLogic>();
+                                    logic.set_screen_viewer_error(SharedString::from(
+                                        "Peer has not granted screen viewing permission"
+                                    ));
+                                }
+                            });
+                            return;
+                        }
+
+                        // Check if peer is online (peer_status is keyed by peer.id)
+                        let status = peer_status.read().await;
+                        let is_online = status.get(&peer.id).map(|s| s.online).unwrap_or(false);
+                        drop(status);
+
+                        if !is_online {
+                            warn!("Peer {} is not online", peer.name);
+                            let window_weak = window_weak.clone();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(window) = window_weak.upgrade() {
+                                    let logic = window.global::<AppLogic>();
+                                    logic.set_screen_viewer_error(SharedString::from(
+                                        "Peer is not online"
+                                    ));
+                                }
+                            });
+                            return;
+                        }
+
+                        // Set active screen peer
+                        {
+                            let mut active = active_screen_peer.write().await;
+                            *active = Some(peer.endpoint_id.clone());
+                        }
+
+                        // Create viewer event channel
+                        let (event_tx, mut event_rx) = viewer_event_channel(256);
+
+                        // Create viewer command channel
+                        let (cmd_tx, cmd_rx) = viewer_command_channel(64);
+
+                        // Store command sender for UI callbacks
+                        {
+                            let mut cmd_guard = screen_viewer_cmd.write().await;
+                            *cmd_guard = Some(cmd_tx.clone());
+                        }
+
+                        // Update UI to show viewer is opening
+                        let peer_name = peer.name.clone();
+                        let peer_endpoint_id = peer.endpoint_id.clone();
+                        let window_weak_ui = window_weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(window) = window_weak_ui.upgrade() {
+                                let logic = window.global::<AppLogic>();
+                                logic.set_screen_viewer_open(true);
+                                logic.set_screen_viewer_peer_id(SharedString::from(&peer_endpoint_id));
+                                logic.set_screen_viewer_peer_name(SharedString::from(&peer_name));
+                                logic.set_screen_viewer_status(SharedString::from("connecting"));
+                                logic.set_screen_viewer_error(SharedString::default());
+                            }
+                        });
+
+                        // Create the viewer
+                        let config = ViewerConfig::default();
+                        let mut viewer = ScreenViewer::new(config, event_tx);
+
+                        // Start connection
+                        viewer.start_connect(peer.endpoint_id.clone(), None);
+
+                        // Spawn event handler task
+                        let window_weak_events = window_weak.clone();
+                        let event_handler = tokio::spawn(async move {
+                            while let Some(event) = event_rx.recv().await {
+                                let window_weak = window_weak_events.clone();
+                                match event {
+                                    ViewerEvent::StateChanged { new_state, .. } => {
+                                        let status_str = new_state.to_string();
+                                        let _ = slint::invoke_from_event_loop(move || {
+                                            if let Some(window) = window_weak.upgrade() {
+                                                let logic = window.global::<AppLogic>();
+                                                logic.set_screen_viewer_status(SharedString::from(&status_str));
+                                            }
+                                        });
+                                    }
+                                    ViewerEvent::FrameReady { width, height, .. } => {
+                                        let _ = slint::invoke_from_event_loop(move || {
+                                            if let Some(window) = window_weak.upgrade() {
+                                                let logic = window.global::<AppLogic>();
+                                                logic.set_screen_viewer_width(width as i32);
+                                                logic.set_screen_viewer_height(height as i32);
+                                            }
+                                        });
+                                    }
+                                    ViewerEvent::StatsUpdated(stats) => {
+                                        let fps = stats.current_fps;
+                                        let bitrate = stats.avg_bitrate_kbps;
+                                        let latency = stats.latency_ms;
+                                        let _ = slint::invoke_from_event_loop(move || {
+                                            if let Some(window) = window_weak.upgrade() {
+                                                let logic = window.global::<AppLogic>();
+                                                logic.set_screen_viewer_fps(fps);
+                                                logic.set_screen_viewer_bitrate_kbps(bitrate as i32);
+                                                logic.set_screen_viewer_latency_ms(latency as i32);
+                                            }
+                                        });
+                                    }
+                                    ViewerEvent::StreamRejected { reason, .. } => {
+                                        let _ = slint::invoke_from_event_loop(move || {
+                                            if let Some(window) = window_weak.upgrade() {
+                                                let logic = window.global::<AppLogic>();
+                                                logic.set_screen_viewer_status(SharedString::from("error"));
+                                                logic.set_screen_viewer_error(SharedString::from(&reason));
+                                            }
+                                        });
+                                    }
+                                    ViewerEvent::StreamEnded { reason } => {
+                                        let _ = slint::invoke_from_event_loop(move || {
+                                            if let Some(window) = window_weak.upgrade() {
+                                                let logic = window.global::<AppLogic>();
+                                                logic.set_screen_viewer_status(SharedString::from("disconnected"));
+                                                if !reason.is_empty() && reason != "user request" {
+                                                    logic.set_screen_viewer_error(SharedString::from(&reason));
+                                                }
+                                            }
+                                        });
+                                    }
+                                    ViewerEvent::Error(msg) => {
+                                        let _ = slint::invoke_from_event_loop(move || {
+                                            if let Some(window) = window_weak.upgrade() {
+                                                let logic = window.global::<AppLogic>();
+                                                logic.set_screen_viewer_error(SharedString::from(&msg));
+                                            }
+                                        });
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        });
+
+                        // Get the endpoint for streaming
+                        let endpoint = {
+                            let ep_guard = shared_endpoint.read().await;
+                            match &*ep_guard {
+                                Some(ep) => ep.clone(),
+                                None => {
+                                    error!("Shared endpoint not ready for screen streaming");
+                                    viewer.on_error("Endpoint not ready".to_string());
+                                    return;
+                                }
+                            }
+                        };
+
+                        // Create cancellation channel
+                        let (cancel_tx, cancel_rx) = tokio::sync::mpsc::channel::<()>(1);
+
+                        // Create stream event channel
+                        let (stream_event_tx, mut stream_event_rx) = tokio::sync::mpsc::channel::<ScreenStreamEvent>(256);
+
+                        // Clone for the streaming task
+                        let peer_clone = peer.clone();
+
+                        // Spawn the streaming task
+                        let stream_task = tokio::spawn(async move {
+                            match stream_screen_from_peer(&endpoint, &peer_clone, None, stream_event_tx, cancel_rx).await {
+                                Ok(stream_id) => {
+                                    info!("Screen stream {} ended normally", stream_id);
+                                }
+                                Err(e) => {
+                                    error!("Screen stream error: {}", e);
+                                }
+                            }
+                        });
+
+                        // Process stream events and update viewer
+                        let window_weak_stream = window_weak.clone();
+                        loop {
+                            match stream_event_rx.recv().await {
+                                Some(stream_event) => match stream_event {
+                                    ScreenStreamEvent::Accepted { stream_id, displays, .. } => {
+                                        info!("Stream {} accepted, {} displays available", stream_id, displays.len());
+                                        let display_infos: Vec<_> = displays.iter().map(|d| croh_core::iroh::protocol::DisplayInfo {
+                                            id: d.id.clone(),
+                                            name: d.name.clone(),
+                                            width: d.width,
+                                            height: d.height,
+                                            refresh_rate: d.refresh_rate,
+                                            is_primary: d.is_primary,
+                                        }).collect();
+                                        viewer.on_connected(display_infos);
+                                    }
+                                    ScreenStreamEvent::Rejected { reason, .. } => {
+                                        warn!("Stream rejected: {}", reason);
+                                        viewer.on_stream_rejected(reason);
+                                        break;
+                                    }
+                                    ScreenStreamEvent::FrameReceived { metadata, data, .. } => {
+                                        // Pass frame to viewer for decoding and display
+                                        if let Err(e) = viewer.on_frame_received(&data, metadata.width, metadata.height, metadata.sequence) {
+                                            warn!("Frame processing error: {}", e);
+                                            continue;
+                                        }
+
+                                        // Get the decoded frame and push to UI
+                                        if let Some(frame) = viewer.latest_frame() {
+                                            let width = frame.width;
+                                            let height = frame.height;
+                                            let rgba_data = frame.data.clone();
+
+                                            // Update UI with the frame image
+                                            let window_weak_frame = window_weak_stream.clone();
+                                            let _ = slint::invoke_from_event_loop(move || {
+                                                if let Some(window) = window_weak_frame.upgrade() {
+                                                    // Create a Slint image from RGBA data
+                                                    let pixel_buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                                                        &rgba_data,
+                                                        width,
+                                                        height,
+                                                    );
+                                                    let image = slint::Image::from_rgba8(pixel_buffer);
+
+                                                    let logic = window.global::<AppLogic>();
+                                                    logic.set_screen_viewer_frame(image);
+                                                    logic.set_screen_viewer_width(width as i32);
+                                                    logic.set_screen_viewer_height(height as i32);
+                                                }
+                                            });
+                                        }
+
+                                        // Emit stats periodically
+                                        if metadata.sequence % 30 == 0 {
+                                            viewer.emit_stats();
+                                        }
+                                    }
+                                    ScreenStreamEvent::Ended { reason, .. } => {
+                                        info!("Stream ended: {}", reason);
+                                        viewer.disconnect(reason);
+                                        break;
+                                    }
+                                    ScreenStreamEvent::Error(msg) => {
+                                        error!("Stream error: {}", msg);
+                                        viewer.on_error(msg);
+                                        break;
+                                    }
+                                },
+                                None => {
+                                    // Channel closed, stream ended
+                                    info!("Stream event channel closed");
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Cancel event handler
+                        event_handler.abort();
+
+                        // Wait for stream task to finish
+                        let _ = stream_task.await;
+                    });
+                });
+            }
+        });
+
+        // Close screen viewer callback
+        window.global::<AppLogic>().on_close_screen_viewer({
+            let window_weak = window_weak.clone();
+            let screen_viewer_cmd = screen_viewer_cmd.clone();
+            let active_screen_peer = active_screen_peer.clone();
+
+            move || {
+                info!("Closing screen viewer");
+
+                let window_weak = window_weak.clone();
+                let screen_viewer_cmd = screen_viewer_cmd.clone();
+                let active_screen_peer = active_screen_peer.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        // Send disconnect command if viewer is active
+                        {
+                            let cmd_guard = screen_viewer_cmd.read().await;
+                            if let Some(ref cmd_tx) = *cmd_guard {
+                                let _ = cmd_tx.send(ViewerCommand::Disconnect).await;
+                            }
+                        }
+
+                        // Clear command sender
+                        {
+                            let mut cmd_guard = screen_viewer_cmd.write().await;
+                            *cmd_guard = None;
+                        }
+
+                        // Clear active peer
+                        {
+                            let mut active = active_screen_peer.write().await;
+                            *active = None;
+                        }
+
+                        // Update UI
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(window) = window_weak.upgrade() {
+                                let logic = window.global::<AppLogic>();
+                                logic.set_screen_viewer_open(false);
+                                logic.set_screen_viewer_peer_id(SharedString::default());
+                                logic.set_screen_viewer_peer_name(SharedString::default());
+                                logic.set_screen_viewer_status(SharedString::from("disconnected"));
+                                logic.set_screen_viewer_error(SharedString::default());
+                            }
+                        });
+                    });
+                });
+            }
+        });
+
+        // Disconnect callback (different from close - stays open showing error)
+        window.global::<AppLogic>().on_screen_viewer_disconnect({
+            let screen_viewer_cmd = screen_viewer_cmd.clone();
+
+            move || {
+                info!("Disconnecting screen viewer");
+
+                let screen_viewer_cmd = screen_viewer_cmd.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        let cmd_guard = screen_viewer_cmd.read().await;
+                        if let Some(ref cmd_tx) = *cmd_guard {
+                            let _ = cmd_tx.send(ViewerCommand::Disconnect).await;
+                        }
+                    });
+                });
+            }
+        });
+
+        // Toggle fullscreen callback
+        window.global::<AppLogic>().on_screen_viewer_toggle_fullscreen({
+            let window_weak = window_weak.clone();
+
+            move || {
+                debug!("Toggling screen viewer fullscreen");
+
+                let window_weak = window_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(window) = window_weak.upgrade() {
+                        let logic = window.global::<AppLogic>();
+                        let is_fullscreen = logic.get_screen_viewer_fullscreen();
+                        logic.set_screen_viewer_fullscreen(!is_fullscreen);
+                    }
+                });
+            }
+        });
+
+        // Adjust quality callback
+        window.global::<AppLogic>().on_screen_viewer_adjust_quality({
+            let screen_viewer_cmd = screen_viewer_cmd.clone();
+
+            move |quality_str| {
+                let quality_str = quality_str.to_string();
+                debug!("Adjusting screen viewer quality to: {}", quality_str);
+
+                let screen_viewer_cmd = screen_viewer_cmd.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        use croh_core::iroh::protocol::ScreenQuality;
+
+                        let quality = match quality_str.as_str() {
+                            "fast" => ScreenQuality::Fast,
+                            "balanced" => ScreenQuality::Balanced,
+                            "quality" => ScreenQuality::Quality,
+                            "auto" => ScreenQuality::Auto,
+                            _ => ScreenQuality::Balanced,
+                        };
+
+                        let cmd_guard = screen_viewer_cmd.read().await;
+                        if let Some(ref cmd_tx) = *cmd_guard {
+                            let _ = cmd_tx.send(ViewerCommand::AdjustQuality {
+                                quality,
+                                fps: None,
+                            }).await;
+                        }
+                    });
+                });
+            }
+        });
+
+        // Send input callback (mouse/keyboard events)
+        window.global::<AppLogic>().on_screen_viewer_send_input({
+            let screen_viewer_cmd = screen_viewer_cmd.clone();
+
+            move |event_type, x, y, data| {
+                // event_type: 0=mouse_move, 1=mouse_down, 2=mouse_up, 3=scroll, 4=key_down, 5=key_up
+                let screen_viewer_cmd = screen_viewer_cmd.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(async {
+                        let event = match event_type {
+                            0 => RemoteInputEvent::MouseMove {
+                                x: x as i32,
+                                y: y as i32,
+                                absolute: true,
+                            },
+                            1 => {
+                                // Mouse button down
+                                let button = match data {
+                                    1 => croh_core::screen::MouseButton::Left,
+                                    2 => croh_core::screen::MouseButton::Right,
+                                    3 => croh_core::screen::MouseButton::Middle,
+                                    _ => croh_core::screen::MouseButton::Left,
+                                };
+                                RemoteInputEvent::MouseButton { button, pressed: true }
+                            }
+                            2 => {
+                                // Mouse button up
+                                let button = match data {
+                                    1 => croh_core::screen::MouseButton::Left,
+                                    2 => croh_core::screen::MouseButton::Right,
+                                    3 => croh_core::screen::MouseButton::Middle,
+                                    _ => croh_core::screen::MouseButton::Left,
+                                };
+                                RemoteInputEvent::MouseButton { button, pressed: false }
+                            }
+                            3 => RemoteInputEvent::MouseScroll {
+                                dx: x as i32,
+                                dy: y as i32,
+                            },
+                            // Key events would need additional handling
+                            _ => return,
+                        };
+
+                        let cmd_guard = screen_viewer_cmd.read().await;
+                        if let Some(ref cmd_tx) = *cmd_guard {
+                            let _ = cmd_tx.send(ViewerCommand::SendInput(event)).await;
+                        }
+                    });
+                });
+            }
+        });
+    }
 }
 
 /// Format a timestamp for chat display (e.g., "2:34 PM" or "Yesterday 2:34 PM").
@@ -7045,10 +7724,12 @@ fn trusted_peer_to_item(p: &TrustedPeer) -> PeerItem {
         can_push: p.their_permissions.push,
         can_pull: p.their_permissions.pull,
         can_browse: p.their_permissions.browse,
+        can_screen_view: p.their_permissions.screen_view,
         // What we allow them to do
         allow_push: p.permissions_granted.push,
         allow_pull: p.permissions_granted.pull,
         allow_browse: p.permissions_granted.browse,
+        allow_screen_view: p.permissions_granted.screen_view,
         // Connection status (filled in by apply_status_to_peer_item)
         latency_ms: -1,
         avg_latency_ms: -1,

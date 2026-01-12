@@ -1037,6 +1037,439 @@ pub async fn browse_remote(
     }
 }
 
+// ============================================================================
+// Screen Streaming
+// ============================================================================
+
+use crate::iroh::protocol::{self, FrameMetadata, ScreenCompression, ScreenQuality};
+
+/// Events from a screen streaming session.
+#[derive(Debug, Clone)]
+pub enum ScreenStreamEvent {
+    /// Stream was accepted, now receiving frames.
+    Accepted {
+        stream_id: String,
+        compression: ScreenCompression,
+        displays: Vec<protocol::DisplayInfo>,
+    },
+    /// Stream was rejected.
+    Rejected {
+        stream_id: String,
+        reason: String,
+    },
+    /// A frame was received.
+    FrameReceived {
+        stream_id: String,
+        metadata: FrameMetadata,
+        data: Vec<u8>,
+    },
+    /// Stream ended.
+    Ended {
+        stream_id: String,
+        reason: String,
+    },
+    /// Error occurred.
+    Error(String),
+}
+
+/// Connect to a remote peer and start receiving their screen stream.
+///
+/// This function establishes a connection, sends a ScreenStreamRequest,
+/// and then loops receiving ScreenFrame messages, forwarding them to the
+/// provided event channel.
+///
+/// The function returns when the stream ends (either remotely stopped,
+/// connection lost, or error).
+///
+/// # Arguments
+/// * `endpoint` - The local Iroh endpoint
+/// * `peer` - The trusted peer to connect to
+/// * `display_id` - Optional display to stream (None = primary)
+/// * `event_tx` - Channel to send stream events to
+/// * `cancel_rx` - Channel to receive cancellation signals
+///
+/// # Returns
+/// The stream ID on success, or an error.
+pub async fn stream_screen_from_peer(
+    endpoint: &IrohEndpoint,
+    peer: &TrustedPeer,
+    display_id: Option<String>,
+    event_tx: mpsc::Sender<ScreenStreamEvent>,
+    mut cancel_rx: mpsc::Receiver<()>,
+) -> Result<String> {
+    // Check permissions
+    if !peer.their_permissions.screen_view {
+        return Err(Error::Trust("peer does not allow screen viewing".to_string()));
+    }
+
+    // Parse peer node ID
+    let node_id: NodeId = peer
+        .endpoint_id
+        .parse()
+        .map_err(|e| Error::Iroh(format!("invalid node id: {}", e)))?;
+
+    // Add peer's address information
+    let mut node_addr = iroh::NodeAddr::new(node_id);
+    if let Some(relay_url) = peer.relay_url() {
+        if let Ok(url) = relay_url.parse::<iroh::RelayUrl>() {
+            node_addr = node_addr.with_relay_url(url);
+        }
+    }
+    endpoint.add_node_addr(node_addr)?;
+
+    // Connect to peer
+    info!("Connecting to peer {} for screen streaming", peer.name);
+    let mut conn = endpoint.connect_to_node(node_id).await?;
+    info!("Connected to peer {} for screen streaming", peer.name);
+
+    // Generate stream ID
+    let stream_id = uuid::Uuid::new_v4().to_string();
+
+    // Send screen stream request
+    let request = ControlMessage::ScreenStreamRequest {
+        stream_id: stream_id.clone(),
+        display_id,
+        compression: ScreenCompression::Raw, // Request raw/simple compression
+        quality: ScreenQuality::Balanced,
+        target_fps: 30,
+    };
+    conn.send(&request).await?;
+    info!("Sent screen stream request: {}", stream_id);
+
+    // Wait for response
+    let response = conn.recv().await?;
+    match response {
+        ControlMessage::ScreenStreamResponse {
+            stream_id: resp_id,
+            accepted: true,
+            displays,
+            compression,
+            ..
+        } => {
+            info!("Screen stream accepted: {}", resp_id);
+            let _ = event_tx
+                .send(ScreenStreamEvent::Accepted {
+                    stream_id: resp_id.clone(),
+                    compression: compression.unwrap_or(ScreenCompression::Raw),
+                    displays,
+                })
+                .await;
+        }
+        ControlMessage::ScreenStreamResponse {
+            stream_id: resp_id,
+            accepted: false,
+            reason,
+            ..
+        } => {
+            let reason_str = reason.unwrap_or_else(|| "unknown".to_string());
+            warn!("Screen stream rejected: {}", reason_str);
+            let _ = event_tx
+                .send(ScreenStreamEvent::Rejected {
+                    stream_id: resp_id,
+                    reason: reason_str.clone(),
+                })
+                .await;
+            let _ = conn.close().await;
+            return Err(Error::Screen(reason_str));
+        }
+        other => {
+            let err = format!("unexpected response to screen stream request: {:?}", other);
+            let _ = event_tx.send(ScreenStreamEvent::Error(err.clone())).await;
+            let _ = conn.close().await;
+            return Err(Error::Iroh(err));
+        }
+    }
+
+    // Frame reception loop
+    let mut last_ack_sequence = 0u64;
+    let mut frames_since_ack = 0u32;
+    const ACK_EVERY_N_FRAMES: u32 = 10;
+
+    loop {
+        tokio::select! {
+            // Check for cancellation
+            _ = cancel_rx.recv() => {
+                info!("Screen stream cancelled by user");
+                // Send stop message
+                let stop = ControlMessage::ScreenStreamStop {
+                    stream_id: stream_id.clone(),
+                    reason: "user cancelled".to_string(),
+                };
+                let _ = conn.send(&stop).await;
+                let _ = event_tx.send(ScreenStreamEvent::Ended {
+                    stream_id: stream_id.clone(),
+                    reason: "user cancelled".to_string(),
+                }).await;
+                let _ = conn.close().await;
+                return Ok(stream_id);
+            }
+
+            // Receive next message
+            msg_result = conn.recv() => {
+                match msg_result {
+                    Ok(ControlMessage::ScreenFrame { stream_id: frame_stream_id, metadata }) => {
+                        // Read the frame data
+                        let mut frame_data = vec![0u8; metadata.size as usize];
+                        if let Err(e) = conn.recv_raw(&mut frame_data).await {
+                            error!("Failed to receive frame data: {}", e);
+                            let _ = event_tx.send(ScreenStreamEvent::Error(format!("frame receive error: {}", e))).await;
+                            continue;
+                        }
+
+                        // Send frame to event channel
+                        let _ = event_tx.send(ScreenStreamEvent::FrameReceived {
+                            stream_id: frame_stream_id,
+                            metadata: metadata.clone(),
+                            data: frame_data,
+                        }).await;
+
+                        // Send ACK periodically for flow control
+                        frames_since_ack += 1;
+                        if frames_since_ack >= ACK_EVERY_N_FRAMES {
+                            last_ack_sequence = metadata.sequence;
+                            frames_since_ack = 0;
+                            let ack = ControlMessage::ScreenFrameAck {
+                                stream_id: stream_id.clone(),
+                                up_to_sequence: last_ack_sequence,
+                                estimated_bandwidth: None,
+                                quality_hint: None,
+                            };
+                            if let Err(e) = conn.send(&ack).await {
+                                warn!("Failed to send frame ACK: {}", e);
+                            }
+                        }
+                    }
+                    Ok(ControlMessage::ScreenStreamStop { stream_id: stop_id, reason }) => {
+                        info!("Screen stream stopped by remote: {}", reason);
+                        let _ = event_tx.send(ScreenStreamEvent::Ended {
+                            stream_id: stop_id,
+                            reason,
+                        }).await;
+                        let _ = conn.close().await;
+                        return Ok(stream_id);
+                    }
+                    Ok(other) => {
+                        warn!("Unexpected message during screen stream: {:?}", other);
+                    }
+                    Err(e) => {
+                        error!("Screen stream connection error: {}", e);
+                        let _ = event_tx.send(ScreenStreamEvent::Ended {
+                            stream_id: stream_id.clone(),
+                            reason: format!("connection error: {}", e),
+                        }).await;
+                        return Err(e);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Handle an incoming screen stream request from a peer.
+///
+/// This function is called by the background listener when a ScreenStreamRequest
+/// is received. It validates permissions, starts the screen capture, and sends
+/// frames to the remote peer.
+pub async fn handle_screen_stream_request(
+    conn: &mut crate::iroh::ControlConnection,
+    stream_id: String,
+    display_id: Option<String>,
+    _compression: ScreenCompression,
+    _quality: ScreenQuality,
+    target_fps: u32,
+    peer: &TrustedPeer,
+    screen_settings: &crate::config::ScreenStreamSettings,
+) -> Result<()> {
+    use crate::screen::{
+        create_capture_backend, ZstdEncoder, FrameEncoder,
+    };
+
+    // Check if streaming is enabled
+    if !screen_settings.enabled {
+        let response = ControlMessage::ScreenStreamResponse {
+            stream_id,
+            accepted: false,
+            reason: Some("Screen streaming is disabled".to_string()),
+            displays: vec![],
+            compression: None,
+        };
+        conn.send(&response).await?;
+        return Ok(());
+    }
+
+    // Check peer has permission
+    if !peer.permissions_granted.screen_view {
+        let response = ControlMessage::ScreenStreamResponse {
+            stream_id,
+            accepted: false,
+            reason: Some("screen_view permission not granted".to_string()),
+            displays: vec![],
+            compression: None,
+        };
+        conn.send(&response).await?;
+        return Ok(());
+    }
+
+    // Create capture backend
+    let mut capture = match create_capture_backend(screen_settings).await {
+        Ok(c) => c,
+        Err(e) => {
+            let response = ControlMessage::ScreenStreamResponse {
+                stream_id,
+                accepted: false,
+                reason: Some(format!("Failed to initialize capture: {}", e)),
+                displays: vec![],
+                compression: None,
+            };
+            conn.send(&response).await?;
+            return Ok(());
+        }
+    };
+
+    // List displays
+    let displays = capture.list_displays().await?;
+    let display_infos: Vec<protocol::DisplayInfo> = displays
+        .iter()
+        .map(|d| protocol::DisplayInfo {
+            id: d.id.clone(),
+            name: d.name.clone(),
+            width: d.width,
+            height: d.height,
+            refresh_rate: d.refresh_rate,
+            is_primary: d.is_primary,
+        })
+        .collect();
+
+    // Determine which display to capture
+    let target_display = if let Some(ref id) = display_id {
+        displays.iter().find(|d| d.id == *id).map(|d| d.id.clone())
+    } else {
+        displays
+            .iter()
+            .find(|d| d.is_primary)
+            .or(displays.first())
+            .map(|d| d.id.clone())
+    };
+
+    let target_display = match target_display {
+        Some(id) => id,
+        None => {
+            let response = ControlMessage::ScreenStreamResponse {
+                stream_id,
+                accepted: false,
+                reason: Some("No displays available".to_string()),
+                displays: vec![],
+                compression: None,
+            };
+            conn.send(&response).await?;
+            return Ok(());
+        }
+    };
+
+    // Start capture
+    capture.start(&target_display).await?;
+
+    // Send acceptance response
+    // Note: The protocol uses video codec names, but our implementation uses
+    // simple frame compression (Zstd/PNG). The actual compression format is
+    // indicated by magic bytes in the frame data, so we just acknowledge Raw here.
+    let actual_compression = ScreenCompression::Raw;
+
+    let response = ControlMessage::ScreenStreamResponse {
+        stream_id: stream_id.clone(),
+        accepted: true,
+        reason: None,
+        displays: display_infos,
+        compression: Some(actual_compression.clone()),
+    };
+    conn.send(&response).await?;
+    info!("Screen stream {} accepted, starting capture on {}", stream_id, target_display);
+
+    // Create encoder - use Zstd for efficient compression
+    // The decoder auto-detects format based on magic bytes
+    let mut encoder: Box<dyn FrameEncoder> = Box::new(ZstdEncoder::new());
+
+    // Calculate frame interval
+    let fps = target_fps.min(screen_settings.max_fps).max(1);
+    let frame_interval = std::time::Duration::from_millis(1000 / fps as u64);
+    let mut sequence = 0u64;
+    let mut last_frame_time = Instant::now();
+
+    // Frame sending loop
+    loop {
+        // Wait for next frame time
+        let elapsed = last_frame_time.elapsed();
+        if elapsed < frame_interval {
+            tokio::time::sleep(frame_interval - elapsed).await;
+        }
+        last_frame_time = Instant::now();
+
+        // Capture frame
+        let frame = match capture.capture_frame().await {
+            Ok(Some(f)) => f,
+            Ok(None) => {
+                // No frame available, try again
+                continue;
+            }
+            Err(e) => {
+                error!("Capture error: {}", e);
+                // Send stop message
+                let stop = ControlMessage::ScreenStreamStop {
+                    stream_id: stream_id.clone(),
+                    reason: format!("Capture error: {}", e),
+                };
+                let _ = conn.send(&stop).await;
+                return Err(e);
+            }
+        };
+
+        // Encode frame
+        let encoded = match encoder.encode(&frame) {
+            Ok(e) => e,
+            Err(e) => {
+                error!("Encode error: {}", e);
+                continue;
+            }
+        };
+
+        // Send frame header
+        let metadata = FrameMetadata {
+            sequence,
+            width: encoded.width,
+            height: encoded.height,
+            captured_at: chrono::Utc::now().timestamp_millis(),
+            compression: actual_compression.clone(),
+            is_keyframe: true, // All frames are keyframes for now
+            size: encoded.data.len() as u32,
+        };
+
+        let frame_msg = ControlMessage::ScreenFrame {
+            stream_id: stream_id.clone(),
+            metadata,
+        };
+
+        if let Err(e) = conn.send(&frame_msg).await {
+            info!("Connection closed during screen stream: {}", e);
+            break;
+        }
+
+        // Send frame data
+        if let Err(e) = conn.send_raw(&encoded.data).await {
+            info!("Connection closed during frame data send: {}", e);
+            break;
+        }
+
+        sequence += 1;
+
+        // Check for incoming messages (ACKs, stop requests) non-blocking
+        // For now, we just send frames continuously
+        // TODO: Add proper bidirectional message handling with select!
+    }
+
+    capture.stop().await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

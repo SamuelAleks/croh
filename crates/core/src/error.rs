@@ -72,6 +72,18 @@ pub enum Error {
     /// Chat error
     #[error("chat error: {0}")]
     Chat(String),
+
+    /// Screen capture error
+    #[error("screen capture error: {0}")]
+    Screen(String),
+
+    /// Video encoder error
+    #[error("encoder error: {0}")]
+    Encoder(String),
+
+    /// Input injection error
+    #[error("input error: {0}")]
+    Input(String),
 }
 
 /// Result type alias using our Error type.

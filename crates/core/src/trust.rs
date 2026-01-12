@@ -51,6 +51,12 @@ pub enum Capability {
     Status,
     /// Can send/receive chat messages with this peer
     Chat,
+    /// Can view this peer's screen (receive stream)
+    #[serde(rename = "screen_view")]
+    ScreenView,
+    /// Can control this peer's screen (send input events)
+    #[serde(rename = "screen_control")]
+    ScreenControl,
 }
 
 impl Capability {
@@ -62,6 +68,28 @@ impl Capability {
             Capability::Browse,
             Capability::Status,
             Capability::Chat,
+            Capability::ScreenView,
+            Capability::ScreenControl,
+        ]
+    }
+
+    /// Get standard file transfer capabilities (no screen sharing).
+    pub fn file_transfer() -> Vec<Capability> {
+        vec![
+            Capability::Push,
+            Capability::Pull,
+            Capability::Browse,
+            Capability::Status,
+            Capability::Chat,
+        ]
+    }
+
+    /// Get remote desktop capabilities.
+    pub fn remote_desktop() -> Vec<Capability> {
+        vec![
+            Capability::ScreenView,
+            Capability::ScreenControl,
+            Capability::Status,
         ]
     }
 }

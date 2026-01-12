@@ -111,6 +111,49 @@ The `iroh/` module provides peer-to-peer networking for trusted peer connections
 - Test utilities in `test_support.rs` for relay-disabled endpoint testing
 - Feature `test-relay` enables local relay server for comprehensive testing
 
+### Screen Streaming
+
+The `screen/` module provides remote desktop/screen sharing functionality:
+
+**Module Structure:**
+- `types.rs` - Core types: `Display`, `CapturedFrame`, `PixelFormat`, `ScreenCapture` trait
+- `drm.rs` - Linux DRM/KMS capture backend (requires `CAP_SYS_ADMIN`)
+- `x11.rs` - Linux X11 SHM capture backend (fallback for X11 sessions)
+- `dxgi.rs` - Windows DXGI Desktop Duplication backend
+- `encoder.rs` - Frame encoders: Raw, PNG, Zstd (with `FrameEncoder` trait)
+- `decoder.rs` - Frame decoders: Raw, PNG, Zstd, Auto-detect (with `FrameDecoder` trait)
+- `session.rs` - `StreamSession`, `StreamState`, `StreamStats`
+- `events.rs` - `StreamEvent`, `StreamCommand`, `RemoteInputEvent`
+- `manager.rs` - `ScreenStreamManager` for session lifecycle
+- `input.rs` - `InputInjector` trait, `SecureInputHandler` with rate limiting
+- `uinput.rs` - Linux uinput backend for input injection
+- `windows_input.rs` - Windows SendInput backend for input injection
+- `viewer.rs` - Client-side `ScreenViewer`, `FrameBuffer`, `InputQueue`
+
+**Permissions:**
+- `screen_view` - Permission to view a peer's screen
+- `screen_control` - Permission to control a peer's screen (mouse/keyboard)
+
+**Protocol Messages:**
+- `DisplayListRequest/Response` - Enumerate available displays
+- `ScreenStreamRequest/Response` - Start streaming session
+- `ScreenFrame` - Frame data with metadata
+- `ScreenFrameAck` - Flow control acknowledgment
+- `ScreenStreamAdjust` - Quality/FPS adjustment
+- `ScreenStreamStop` - Stop streaming
+- `ScreenInput` - Mouse/keyboard input events
+
+**Setup (Linux):**
+```bash
+# For DRM capture (best performance, requires capabilities)
+sudo setcap cap_sys_admin+ep ./target/release/croh-daemon
+
+# For uinput (input injection)
+sudo usermod -aG input $USER
+# Create udev rule: /etc/udev/rules.d/99-uinput.rules
+# KERNEL=="uinput", MODE="0660", GROUP="input"
+```
+
 ## Reference Files
 
 The `/misc` directory (gitignored) contains reference files that may be useful for development context.

@@ -11,6 +11,7 @@ use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 mod commands;
+mod handlers;
 
 /// Croh Daemon - Headless file transfer service
 #[derive(Parser)]

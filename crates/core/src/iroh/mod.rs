@@ -36,7 +36,7 @@ pub use handshake::{accept_trust_connections, complete_trust_as_receiver, Handsh
 pub use identity::Identity;
 pub use protocol::{ControlMessage, DirectoryEntry, FileInfo, FileRequest, ALPN_BLOBS, ALPN_CONTROL};
 pub use speedtest::{handle_speed_test_request, run_speed_test, SpeedTestResult, DEFAULT_TEST_SIZE};
-pub use transfer::{browse_remote, handle_browse_request, handle_incoming_pull, handle_incoming_push, pull_files, push_files, TransferEvent};
+pub use transfer::{browse_remote, handle_browse_request, handle_incoming_pull, handle_incoming_push, pull_files, push_files, TransferEvent, stream_screen_from_peer, handle_screen_stream_request, ScreenStreamEvent};
 
 // Re-export iroh types used by the GUI
 pub use iroh::{NodeAddr, NodeId, RelayUrl};

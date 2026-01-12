@@ -48,6 +48,113 @@ pub struct DirectoryEntry {
     pub modified: Option<i64>,
 }
 
+// ==================== Screen Streaming Types ====================
+
+/// Display information for screen streaming.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DisplayInfo {
+    /// Display identifier (e.g., "HDMI-1", "eDP-1", "0")
+    pub id: String,
+    /// Human-readable name
+    pub name: String,
+    /// Width in pixels
+    pub width: u32,
+    /// Height in pixels
+    pub height: u32,
+    /// Refresh rate in Hz (if known)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_rate: Option<u32>,
+    /// Whether this is the primary display
+    pub is_primary: bool,
+}
+
+/// Compression format for screen frames.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenCompression {
+    /// Raw RGBA frames (testing only, very high bandwidth)
+    Raw,
+    /// WebP for low-motion screens (good for text/desktop)
+    WebP,
+    /// H.264/AVC (best compatibility, hardware acceleration)
+    #[default]
+    H264,
+    /// VP9 (better compression, software only)
+    Vp9,
+    /// AV1 (best compression, newer hardware only)
+    Av1,
+}
+
+/// Quality preset for screen streaming.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenQuality {
+    /// Prioritize low latency (lower quality)
+    Fast,
+    /// Balanced latency and quality
+    #[default]
+    Balanced,
+    /// Prioritize quality (higher latency)
+    Quality,
+    /// Auto-adjust based on network conditions
+    Auto,
+}
+
+/// Frame metadata for a single screen frame.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrameMetadata {
+    /// Sequential frame number (monotonically increasing)
+    pub sequence: u64,
+    /// Frame width in pixels
+    pub width: u32,
+    /// Frame height in pixels
+    pub height: u32,
+    /// Capture timestamp (Unix millis)
+    pub captured_at: i64,
+    /// Compression format used
+    pub compression: ScreenCompression,
+    /// Whether this is a keyframe (can be decoded independently)
+    pub is_keyframe: bool,
+    /// Compressed frame size in bytes
+    pub size: u32,
+}
+
+/// Input event from viewer to host.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InputEvent {
+    /// Mouse movement (absolute coordinates, scaled 0-65535)
+    MouseMove {
+        /// X position (0-65535, scaled to display width)
+        x: i32,
+        /// Y position (0-65535, scaled to display height)
+        y: i32,
+    },
+    /// Mouse button press/release
+    MouseButton {
+        /// Button: 0=left, 1=right, 2=middle, 3+=extended
+        button: u8,
+        /// Whether the button is pressed (true) or released (false)
+        pressed: bool,
+    },
+    /// Mouse scroll
+    MouseScroll {
+        /// Horizontal scroll delta (positive = right)
+        delta_x: i32,
+        /// Vertical scroll delta (positive = down)
+        delta_y: i32,
+    },
+    /// Keyboard key press/release
+    Key {
+        /// Platform-independent key code (USB HID usage codes)
+        code: u16,
+        /// Whether the key is pressed (true) or released (false)
+        pressed: bool,
+        /// Modifier state: bit 0=shift, 1=ctrl, 2=alt, 3=meta
+        modifiers: u8,
+    },
+}
+
 /// Control messages exchanged between trusted peers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -449,6 +556,105 @@ pub enum ControlMessage {
         /// Whether there are more messages available
         has_more: bool,
     },
+
+    // ==================== Screen Streaming Messages ====================
+
+    /// Request to start screen streaming.
+    ScreenStreamRequest {
+        /// Unique stream ID
+        stream_id: String,
+        /// Which display to stream (None = primary)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display_id: Option<String>,
+        /// Requested compression format
+        compression: ScreenCompression,
+        /// Quality preset
+        quality: ScreenQuality,
+        /// Target frame rate (0 = max available)
+        target_fps: u32,
+    },
+
+    /// Response to screen stream request.
+    ScreenStreamResponse {
+        /// Stream ID from request
+        stream_id: String,
+        /// Whether streaming is accepted
+        accepted: bool,
+        /// Reason if rejected
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        /// Available displays (for selection)
+        #[serde(default)]
+        displays: Vec<DisplayInfo>,
+        /// Actual compression that will be used
+        #[serde(skip_serializing_if = "Option::is_none")]
+        compression: Option<ScreenCompression>,
+    },
+
+    /// Screen frame header (followed by raw frame data via send_raw).
+    /// After receiving this, read chunks until a zero-length chunk.
+    ScreenFrame {
+        /// Stream ID
+        stream_id: String,
+        /// Frame metadata
+        metadata: FrameMetadata,
+    },
+
+    /// Acknowledge receipt of frames (for flow control).
+    ScreenFrameAck {
+        /// Stream ID
+        stream_id: String,
+        /// Highest sequence number received
+        up_to_sequence: u64,
+        /// Estimated available bandwidth (bytes/sec)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        estimated_bandwidth: Option<u64>,
+        /// Suggested quality adjustment
+        #[serde(skip_serializing_if = "Option::is_none")]
+        quality_hint: Option<ScreenQuality>,
+    },
+
+    /// Request quality/settings change mid-stream.
+    ScreenStreamAdjust {
+        /// Stream ID
+        stream_id: String,
+        /// New quality setting
+        #[serde(skip_serializing_if = "Option::is_none")]
+        quality: Option<ScreenQuality>,
+        /// New target FPS
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_fps: Option<u32>,
+        /// Request keyframe (for recovery after packet loss)
+        #[serde(default)]
+        request_keyframe: bool,
+    },
+
+    /// Stop screen streaming.
+    ScreenStreamStop {
+        /// Stream ID
+        stream_id: String,
+        /// Reason for stopping
+        reason: String,
+    },
+
+    /// Input events from viewer (batched for efficiency).
+    ScreenInput {
+        /// Stream ID
+        stream_id: String,
+        /// Batch of input events
+        events: Vec<InputEvent>,
+    },
+
+    /// Query available displays without starting a stream.
+    DisplayListRequest,
+
+    /// Response with available displays.
+    DisplayListResponse {
+        /// Available displays
+        displays: Vec<DisplayInfo>,
+        /// Current capture backend name
+        backend: String,
+    },
 }
 
 impl ControlMessage {
@@ -669,6 +875,181 @@ mod tests {
                 assert_eq!(introduction_id, "intro123");
                 assert_eq!(peer.name, "Carol's Device");
                 assert!(trust_bundle_json.contains("nonce"));
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_screen_stream_request_serialization() {
+        let msg = ControlMessage::ScreenStreamRequest {
+            stream_id: "stream123".to_string(),
+            display_id: Some("HDMI-1".to_string()),
+            compression: ScreenCompression::H264,
+            quality: ScreenQuality::Balanced,
+            target_fps: 30,
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"screen_stream_request\""));
+        assert!(json.contains("\"stream_id\":\"stream123\""));
+        assert!(json.contains("\"compression\":\"h264\""));
+        assert!(json.contains("\"quality\":\"balanced\""));
+
+        let parsed: ControlMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ControlMessage::ScreenStreamRequest {
+                stream_id,
+                display_id,
+                compression,
+                quality,
+                target_fps,
+            } => {
+                assert_eq!(stream_id, "stream123");
+                assert_eq!(display_id, Some("HDMI-1".to_string()));
+                assert_eq!(compression, ScreenCompression::H264);
+                assert_eq!(quality, ScreenQuality::Balanced);
+                assert_eq!(target_fps, 30);
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_screen_stream_response_serialization() {
+        let msg = ControlMessage::ScreenStreamResponse {
+            stream_id: "stream123".to_string(),
+            accepted: true,
+            reason: None,
+            displays: vec![
+                DisplayInfo {
+                    id: "0".to_string(),
+                    name: "Primary Display".to_string(),
+                    width: 1920,
+                    height: 1080,
+                    refresh_rate: Some(60),
+                    is_primary: true,
+                },
+            ],
+            compression: Some(ScreenCompression::H264),
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"screen_stream_response\""));
+        assert!(json.contains("\"accepted\":true"));
+        assert!(json.contains("\"width\":1920"));
+
+        let parsed: ControlMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ControlMessage::ScreenStreamResponse {
+                stream_id,
+                accepted,
+                displays,
+                ..
+            } => {
+                assert_eq!(stream_id, "stream123");
+                assert!(accepted);
+                assert_eq!(displays.len(), 1);
+                assert_eq!(displays[0].width, 1920);
+                assert!(displays[0].is_primary);
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_screen_frame_serialization() {
+        let msg = ControlMessage::ScreenFrame {
+            stream_id: "stream123".to_string(),
+            metadata: FrameMetadata {
+                sequence: 42,
+                width: 1920,
+                height: 1080,
+                captured_at: 1704067200000,
+                compression: ScreenCompression::H264,
+                is_keyframe: true,
+                size: 65536,
+            },
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"screen_frame\""));
+        assert!(json.contains("\"sequence\":42"));
+        assert!(json.contains("\"is_keyframe\":true"));
+
+        let parsed: ControlMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ControlMessage::ScreenFrame { stream_id, metadata } => {
+                assert_eq!(stream_id, "stream123");
+                assert_eq!(metadata.sequence, 42);
+                assert!(metadata.is_keyframe);
+                assert_eq!(metadata.size, 65536);
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_screen_input_serialization() {
+        let msg = ControlMessage::ScreenInput {
+            stream_id: "stream123".to_string(),
+            events: vec![
+                InputEvent::MouseMove { x: 1000, y: 500 },
+                InputEvent::MouseButton { button: 0, pressed: true },
+                InputEvent::Key { code: 0x04, pressed: true, modifiers: 0 },
+            ],
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"screen_input\""));
+        assert!(json.contains("\"kind\":\"mouse_move\""));
+        assert!(json.contains("\"kind\":\"mouse_button\""));
+        assert!(json.contains("\"kind\":\"key\""));
+
+        let parsed: ControlMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ControlMessage::ScreenInput { stream_id, events } => {
+                assert_eq!(stream_id, "stream123");
+                assert_eq!(events.len(), 3);
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_display_list_response_serialization() {
+        let msg = ControlMessage::DisplayListResponse {
+            displays: vec![
+                DisplayInfo {
+                    id: "0".to_string(),
+                    name: "eDP-1".to_string(),
+                    width: 2560,
+                    height: 1440,
+                    refresh_rate: Some(144),
+                    is_primary: true,
+                },
+                DisplayInfo {
+                    id: "1".to_string(),
+                    name: "HDMI-1".to_string(),
+                    width: 1920,
+                    height: 1080,
+                    refresh_rate: Some(60),
+                    is_primary: false,
+                },
+            ],
+            backend: "drm".to_string(),
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"display_list_response\""));
+        assert!(json.contains("\"backend\":\"drm\""));
+
+        let parsed: ControlMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ControlMessage::DisplayListResponse { displays, backend } => {
+                assert_eq!(displays.len(), 2);
+                assert_eq!(backend, "drm");
+                assert_eq!(displays[0].refresh_rate, Some(144));
             }
             _ => panic!("wrong message type"),
         }

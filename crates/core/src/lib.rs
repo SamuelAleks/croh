@@ -19,12 +19,13 @@ pub mod iroh;
 pub mod networks;
 pub mod peers;
 pub mod platform;
+pub mod screen;
 pub mod transfer;
 pub mod transfer_history;
 pub mod trust;
 
 // Re-export commonly used types
-pub use config::{BrowseSettings, Config, DndMode, GuestPolicy, RelayPreference, SecurityPosture, WindowSize};
+pub use config::{BrowseSettings, CaptureBackend, Config, DndMode, GuestPolicy, RelayPreference, ScreenStreamSettings, SecurityPosture, WindowSize};
 pub use croc::{CrocOptions, CrocProcess, CrocProcessHandle, find_croc_executable, refresh_croc_cache};
 pub use error::{Error, Result};
 pub use files::{format_size, format_duration, format_uptime, format_eta, get_disk_space};
@@ -35,6 +36,7 @@ pub use iroh::{
     browse_directory, default_browsable_paths, get_browsable_roots,
     run_speed_test, handle_speed_test_request, SpeedTestResult, DEFAULT_TEST_SIZE,
     NodeAddr, NodeId, PeerAddress, RelayUrl,
+    stream_screen_from_peer, handle_screen_stream_request, ScreenStreamEvent,
 };
 pub use networks::{NetworkSettings, NetworkStore, PeerNetwork};
 pub use peers::{PeerStore, Permissions, TrustedPeer};
