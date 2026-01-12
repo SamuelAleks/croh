@@ -32,9 +32,8 @@ use windows::{
         D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
     },
     Win32::Graphics::Dxgi::{
-        Common::DXGI_FORMAT_B8G8R8A8_UNORM,
-        CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGIOutput1,
-        IDXGIOutputDuplication, DXGI_OUTDUPL_FRAME_INFO,
+        Common::DXGI_FORMAT_B8G8R8A8_UNORM, CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1,
+        IDXGIOutput, IDXGIOutput1, IDXGIOutputDuplication, DXGI_OUTDUPL_FRAME_INFO,
     },
 };
 
