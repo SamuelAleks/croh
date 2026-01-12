@@ -466,6 +466,8 @@ pub struct ScreenViewer {
     bytes_received: u64,
     /// Last error message.
     last_error: Option<String>,
+    /// Recent latency samples for averaging (in ms).
+    latency_samples: Vec<u32>,
 }
 
 impl ScreenViewer {
@@ -487,6 +489,7 @@ impl ScreenViewer {
             connected_at: None,
             bytes_received: 0,
             last_error: None,
+            latency_samples: Vec::with_capacity(30),
         }
     }
 
@@ -593,6 +596,8 @@ impl ScreenViewer {
     }
 
     /// Handle incoming frame.
+    ///
+    /// `captured_at` is the Unix timestamp (millis) when the frame was captured.
     pub fn on_frame_received(
         &mut self,
         data: &[u8],
@@ -622,6 +627,27 @@ impl ScreenViewer {
                 Err(e)
             }
         }
+    }
+
+    /// Record latency sample from frame capture timestamp.
+    pub fn record_latency(&mut self, captured_at_ms: i64) {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let latency = (now_ms - captured_at_ms).max(0) as u32;
+
+        // Keep last 30 samples for averaging
+        if self.latency_samples.len() >= 30 {
+            self.latency_samples.remove(0);
+        }
+        self.latency_samples.push(latency);
+    }
+
+    /// Get average latency in ms.
+    pub fn avg_latency_ms(&self) -> u32 {
+        if self.latency_samples.is_empty() {
+            return 0;
+        }
+        let sum: u32 = self.latency_samples.iter().sum();
+        sum / self.latency_samples.len() as u32
     }
 
     /// Handle disconnect request.
@@ -691,7 +717,7 @@ impl ScreenViewer {
             avg_decode_time_us: self.frame_buffer.avg_decode_time_us(),
             bytes_received: self.bytes_received,
             avg_bitrate_kbps,
-            latency_ms: 0, // TODO: Measure latency
+            latency_ms: self.avg_latency_ms(),
             input_events_sent: self.input_queue.events_sent(),
             connected_duration,
         }

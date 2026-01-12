@@ -6999,12 +6999,14 @@ impl App {
                                             "GUI received frame seq={}: {}x{}, {} bytes",
                                             metadata.sequence, metadata.width, metadata.height, data.len()
                                         );
+                                        // Record latency from capture timestamp
+                                        viewer.record_latency(metadata.captured_at);
+
                                         // Pass frame to viewer for decoding and display
                                         if let Err(e) = viewer.on_frame_received(&data, metadata.width, metadata.height, metadata.sequence) {
                                             warn!("Frame processing error: {}", e);
                                             continue;
                                         }
-                                        info!("Frame decoded successfully");
 
                                         // Get the decoded frame and push to UI
                                         if let Some(frame) = viewer.latest_frame() {
