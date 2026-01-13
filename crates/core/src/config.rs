@@ -402,6 +402,143 @@ impl Default for ScreenStreamSettings {
     }
 }
 
+// ==================== Screen Viewer Settings ====================
+
+/// Quality preset for screen viewing.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewerQuality {
+    /// Prioritize low latency over quality (lower resolution, higher compression).
+    Fast,
+    /// Balance between quality and latency (default).
+    #[default]
+    Balanced,
+    /// Prioritize visual quality (higher resolution, lower compression).
+    Quality,
+}
+
+impl ViewerQuality {
+    /// Convert to UI string.
+    pub fn to_ui_string(&self) -> &'static str {
+        match self {
+            ViewerQuality::Fast => "fast",
+            ViewerQuality::Balanced => "balanced",
+            ViewerQuality::Quality => "quality",
+        }
+    }
+
+    /// Parse from UI string.
+    pub fn from_ui_string(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "fast" => ViewerQuality::Fast,
+            "quality" => ViewerQuality::Quality,
+            _ => ViewerQuality::Balanced,
+        }
+    }
+}
+
+/// Screen viewer (client) settings.
+///
+/// These settings control how the local viewer displays remote screens.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ViewerSettings {
+    /// Preferred quality preset.
+    #[serde(default)]
+    pub quality: ViewerQuality,
+
+    /// Preferred FPS (0 = match host).
+    #[serde(default = "default_viewer_fps")]
+    pub preferred_fps: u32,
+
+    /// Target latency in milliseconds (viewer tries to stay under this).
+    #[serde(default = "default_target_latency")]
+    pub target_latency_ms: u32,
+
+    /// Maximum latency before dropping frames.
+    #[serde(default = "default_max_latency")]
+    pub max_latency_ms: u32,
+
+    /// Enable adaptive bitrate (auto-adjust quality based on network).
+    #[serde(default = "default_true")]
+    pub adaptive_bitrate: bool,
+
+    /// Show detailed stats overlay in viewer (FPS, latency, loss rate, etc.).
+    #[serde(default)]
+    pub show_stats_overlay: bool,
+
+    /// Enable input forwarding by default when viewing.
+    #[serde(default = "default_true")]
+    pub auto_enable_input: bool,
+
+    /// Scale mode for the viewer.
+    #[serde(default)]
+    pub scale_mode: ViewerScaleMode,
+}
+
+/// How to scale the remote screen in the viewer.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewerScaleMode {
+    /// Fit to window, maintaining aspect ratio (default).
+    #[default]
+    Fit,
+    /// Fill window, may crop edges.
+    Fill,
+    /// Original size, scroll if larger than window.
+    Original,
+    /// Stretch to fill window, ignoring aspect ratio.
+    Stretch,
+}
+
+impl ViewerScaleMode {
+    /// Convert to UI string.
+    pub fn to_ui_string(&self) -> &'static str {
+        match self {
+            ViewerScaleMode::Fit => "fit",
+            ViewerScaleMode::Fill => "fill",
+            ViewerScaleMode::Original => "original",
+            ViewerScaleMode::Stretch => "stretch",
+        }
+    }
+
+    /// Parse from UI string.
+    pub fn from_ui_string(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "fill" => ViewerScaleMode::Fill,
+            "original" => ViewerScaleMode::Original,
+            "stretch" => ViewerScaleMode::Stretch,
+            _ => ViewerScaleMode::Fit,
+        }
+    }
+}
+
+fn default_viewer_fps() -> u32 {
+    30
+}
+
+fn default_target_latency() -> u32 {
+    100 // 100ms target
+}
+
+fn default_max_latency() -> u32 {
+    500 // 500ms max before dropping
+}
+
+impl Default for ViewerSettings {
+    fn default() -> Self {
+        Self {
+            quality: ViewerQuality::default(),
+            preferred_fps: 30,
+            target_latency_ms: 100,
+            max_latency_ms: 500,
+            adaptive_bitrate: true,
+            show_stats_overlay: false,
+            auto_enable_input: true,
+            scale_mode: ViewerScaleMode::default(),
+        }
+    }
+}
+
 /// Guest peer policy settings.
 ///
 /// These settings control how temporary guest peers are handled.
@@ -515,9 +652,13 @@ pub struct Config {
     #[serde(default)]
     pub relay_preference: RelayPreference,
 
-    /// Screen streaming settings.
+    /// Screen streaming settings (host side).
     #[serde(default)]
     pub screen_stream: ScreenStreamSettings,
+
+    /// Screen viewer settings (client side).
+    #[serde(default)]
+    pub viewer: ViewerSettings,
 }
 
 fn default_keep_completed_transfers() -> bool {
@@ -546,6 +687,7 @@ impl Default for Config {
             guest_policy: GuestPolicy::default(),
             relay_preference: RelayPreference::default(),
             screen_stream: ScreenStreamSettings::default(),
+            viewer: ViewerSettings::default(),
         }
     }
 }

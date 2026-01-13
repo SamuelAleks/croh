@@ -207,6 +207,26 @@ impl ClockSync {
         self.offset_ms = offset_ms;
         self.synced = true;
     }
+
+    /// Apply externally computed clock sync values.
+    ///
+    /// This is used when clock sync is performed externally (e.g., by the transfer layer)
+    /// and the offset/RTT values need to be passed to the viewer.
+    ///
+    /// # Arguments
+    /// * `offset_ms` - Clock offset in milliseconds (host_time = local_time + offset)
+    /// * `rtt_ms` - Round-trip time in milliseconds
+    pub fn apply_sync(&mut self, offset_ms: i64, rtt_ms: u32) {
+        self.offset_ms = offset_ms;
+        self.rtt_samples.clear();
+        self.rtt_samples.push(rtt_ms);
+        self.synced = true;
+        tracing::debug!(
+            "Applied external clock sync: offset={}ms, rtt={}ms",
+            offset_ms,
+            rtt_ms
+        );
+    }
 }
 
 #[cfg(test)]

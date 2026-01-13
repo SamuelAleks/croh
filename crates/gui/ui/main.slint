@@ -300,9 +300,14 @@ export struct AppSettings {
     security-posture: string,     // "relaxed", "balanced", "cautious"
     // Network/Relay settings
     relay-preference: string,     // "normal", "direct-preferred", "relay-only", "disabled"
-    // Screen streaming settings
+    // Screen streaming settings (host)
     screen-streaming-enabled: bool,   // allow peers to view our screen
     screen-allow-input: bool,         // allow peers to control our screen (mouse/keyboard)
+    // Screen viewer settings (client)
+    viewer-quality: string,           // "fast", "balanced", "quality"
+    viewer-show-stats: bool,          // show detailed stats overlay
+    viewer-auto-input: bool,          // auto-enable input when viewing
+    viewer-scale-mode: string,        // "fit", "fill", "original", "stretch"
 }
 
 export struct PeerItem {
@@ -601,6 +606,9 @@ export global AppLogic {
     callback screen-viewer-send-input(int, int, int, int);  // type, x, y, data (mouse/key events)
     callback screen-viewer-switch-display(int);   // switch to display by index
     callback screen-viewer-release-capture();     // release cursor capture (Escape key)
+    callback screen-viewer-toggle-stats();        // toggle stats overlay
+    callback screen-viewer-set-scale-mode(string);  // "fit", "fill", "original", "stretch"
+    callback save-viewer-settings(string, bool, bool, string);  // quality, show-stats, auto-input, scale-mode
 
     // Screen viewer state
     in property <bool> screen-viewer-open: false;
@@ -620,6 +628,16 @@ export global AppLogic {
     in property <string> screen-viewer-encoder: "";  // encoder name (e.g. "H.264 (NVENC)")
     in property <[string]> screen-viewer-displays: [];  // available displays
     in property <int> screen-viewer-current-display: 0;  // current display index
+    // Detailed stats (for overlay)
+    in property <int> screen-viewer-frames-received: 0;
+    in property <int> screen-viewer-frames-dropped: 0;
+    in property <float> screen-viewer-packet-loss: 0.0;  // 0.0-1.0
+    in property <bool> screen-viewer-clock-synced: false;
+    in property <int> screen-viewer-clock-offset-ms: 0;
+    in property <int> screen-viewer-rtt-ms: 0;
+    in property <int> screen-viewer-decode-time-us: 0;  // average decode time in microseconds
+    in property <string> screen-viewer-quality: "balanced";  // current quality setting
+    in property <bool> screen-viewer-show-stats: false;  // show stats overlay
 }
 
 // ============================================================================
@@ -4542,11 +4560,173 @@ component ScreenViewerPanel inherits Rectangle {
                 }
             }
 
+            // Stats toggle button
+            if streaming: CompactButton {
+                label: AppLogic.screen-viewer-show-stats ? "Hide Stats" : "Stats";
+                small: true;
+                clicked => { AppLogic.screen-viewer-toggle-stats(); }
+            }
+
+            // Quality selector
+            if streaming: CompactButton {
+                label: "Q: " + AppLogic.screen-viewer-quality;
+                small: true;
+                clicked => {
+                    // Cycle through quality modes
+                    if AppLogic.screen-viewer-quality == "fast" {
+                        AppLogic.screen-viewer-adjust-quality("balanced");
+                    } else if AppLogic.screen-viewer-quality == "balanced" {
+                        AppLogic.screen-viewer-adjust-quality("quality");
+                    } else {
+                        AppLogic.screen-viewer-adjust-quality("fast");
+                    }
+                }
+            }
+
             // Disconnect button
             if streaming: CompactButton {
                 label: "Disconnect";
                 small: true;
                 clicked => { AppLogic.screen-viewer-disconnect(); }
+            }
+        }
+    }
+
+    // Stats overlay (detailed statistics panel)
+    if streaming && AppLogic.screen-viewer-show-stats: Rectangle {
+        x: parent.width - 240px - 10px;
+        y: status-bar-height + 10px;
+        width: 240px;
+        height: 200px;
+        background: #000000DD;
+        border-radius: Theme.radius-md;
+
+        VerticalLayout {
+            padding: Theme.spacing-sm;
+            spacing: 4px;
+
+            Text {
+                text: "Stream Statistics";
+                font-size: 12px;
+                font-weight: 600;
+                color: Theme.accent;
+            }
+
+            Rectangle { height: 4px; }
+
+            // FPS and Frames
+            HorizontalLayout {
+                spacing: Theme.spacing-sm;
+                Text { text: "FPS:"; font-size: 11px; color: Theme.text-muted; }
+                Text {
+                    text: Math.round(AppLogic.screen-viewer-fps * 10) / 10;
+                    font-size: 11px;
+                    color: Theme.text;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Text { text: "Frames:"; font-size: 11px; color: Theme.text-muted; }
+                Text {
+                    text: AppLogic.screen-viewer-frames-received;
+                    font-size: 11px;
+                    color: Theme.text;
+                }
+            }
+
+            // Dropped frames and packet loss
+            HorizontalLayout {
+                spacing: Theme.spacing-sm;
+                Text { text: "Dropped:"; font-size: 11px; color: Theme.text-muted; }
+                Text {
+                    text: AppLogic.screen-viewer-frames-dropped;
+                    font-size: 11px;
+                    color: AppLogic.screen-viewer-frames-dropped > 0 ? Theme.warning : Theme.text;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Text { text: "Loss:"; font-size: 11px; color: Theme.text-muted; }
+                Text {
+                    text: Math.round(AppLogic.screen-viewer-packet-loss * 100) + "%";
+                    font-size: 11px;
+                    color: AppLogic.screen-viewer-packet-loss > 0.05 ? Theme.error :
+                           AppLogic.screen-viewer-packet-loss > 0.01 ? Theme.warning : Theme.text;
+                }
+            }
+
+            // Latency and RTT
+            HorizontalLayout {
+                spacing: Theme.spacing-sm;
+                Text { text: "Latency:"; font-size: 11px; color: Theme.text-muted; }
+                Text {
+                    text: AppLogic.screen-viewer-latency-ms + "ms";
+                    font-size: 11px;
+                    color: AppLogic.screen-viewer-latency-ms < 50 ? Theme.success :
+                           AppLogic.screen-viewer-latency-ms < 150 ? Theme.warning : Theme.error;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Text { text: "RTT:"; font-size: 11px; color: Theme.text-muted; }
+                Text {
+                    text: AppLogic.screen-viewer-rtt-ms + "ms";
+                    font-size: 11px;
+                    color: Theme.text;
+                }
+            }
+
+            // Bitrate and Resolution
+            HorizontalLayout {
+                spacing: Theme.spacing-sm;
+                Text { text: "Bitrate:"; font-size: 11px; color: Theme.text-muted; }
+                Text {
+                    text: AppLogic.screen-viewer-bitrate-kbps + " kbps";
+                    font-size: 11px;
+                    color: Theme.text;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Text { text: "Res:"; font-size: 11px; color: Theme.text-muted; }
+                Text {
+                    text: AppLogic.screen-viewer-width + "x" + AppLogic.screen-viewer-height;
+                    font-size: 11px;
+                    color: Theme.text;
+                }
+            }
+
+            // Decode time
+            HorizontalLayout {
+                spacing: Theme.spacing-sm;
+                Text { text: "Decode:"; font-size: 11px; color: Theme.text-muted; }
+                Text {
+                    text: Math.round(AppLogic.screen-viewer-decode-time-us / 1000 * 100) / 100 + "ms";
+                    font-size: 11px;
+                    color: Theme.text;
+                }
+            }
+
+            // Clock sync status
+            HorizontalLayout {
+                spacing: Theme.spacing-sm;
+                Text { text: "Clock:"; font-size: 11px; color: Theme.text-muted; }
+                Text {
+                    text: AppLogic.screen-viewer-clock-synced ?
+                          "Synced (" + AppLogic.screen-viewer-clock-offset-ms + "ms offset)" :
+                          "Not synced";
+                    font-size: 11px;
+                    color: AppLogic.screen-viewer-clock-synced ? Theme.success : Theme.warning;
+                }
+            }
+
+            // Quality and Encoder
+            HorizontalLayout {
+                spacing: Theme.spacing-sm;
+                Text { text: "Quality:"; font-size: 11px; color: Theme.text-muted; }
+                Text {
+                    text: AppLogic.screen-viewer-quality;
+                    font-size: 11px;
+                    color: Theme.accent;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                if AppLogic.screen-viewer-encoder != "": Text {
+                    text: AppLogic.screen-viewer-encoder;
+                    font-size: 10px;
+                    color: Theme.text-muted;
+                }
             }
         }
     }

@@ -1059,6 +1059,7 @@ mod tests {
                 compression: ScreenCompression::H264,
                 is_keyframe: true,
                 size: 65536,
+                cursor: None,
             },
         };
 

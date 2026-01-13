@@ -30,7 +30,8 @@ pub use chat::{
 };
 pub use config::{
     BrowseSettings, CaptureBackend, Config, DndMode, GuestPolicy, RelayPreference,
-    ScreenStreamSettings, SecurityPosture, WindowSize,
+    ScreenStreamSettings, SecurityPosture, ViewerQuality, ViewerScaleMode, ViewerSettings,
+    WindowSize,
 };
 pub use croc::{
     find_croc_executable, refresh_croc_cache, CrocOptions, CrocProcess, CrocProcessHandle,

@@ -820,6 +820,22 @@ impl ScreenViewer {
         self.clock_sync.is_synced()
     }
 
+    /// Apply externally computed clock sync values.
+    ///
+    /// This is used when clock sync is performed externally (e.g., by the transfer layer)
+    /// and the results need to be passed to the viewer for accurate latency calculation.
+    ///
+    /// # Arguments
+    /// * `offset_ms` - Clock offset in milliseconds (host_time = local_time + offset)
+    /// * `rtt_ms` - Round-trip time in milliseconds
+    pub fn apply_clock_sync(&mut self, offset_ms: i64, rtt_ms: u32) {
+        self.clock_sync.apply_sync(offset_ms, rtt_ms);
+        info!(
+            "External clock sync applied: offset={}ms, rtt={}ms",
+            offset_ms, rtt_ms
+        );
+    }
+
     /// Check if more time sync exchanges are needed.
     pub fn needs_time_sync(&self) -> bool {
         self.clock_sync.needs_more_samples()

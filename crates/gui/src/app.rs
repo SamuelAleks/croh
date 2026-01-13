@@ -2102,9 +2102,15 @@ impl App {
                 // Network settings
                 let relay_preference = config_guard.relay_preference.to_ui_string().to_string();
 
-                // Screen streaming settings
+                // Screen streaming settings (host)
                 let screen_streaming_enabled = config_guard.screen_stream.enabled;
                 let screen_allow_input = config_guard.screen_stream.allow_input;
+
+                // Screen viewer settings (client)
+                let viewer_quality = config_guard.viewer.quality.to_ui_string().to_string();
+                let viewer_show_stats = config_guard.viewer.show_stats_overlay;
+                let viewer_auto_input = config_guard.viewer.auto_enable_input;
+                let viewer_scale_mode = config_guard.viewer.scale_mode.to_ui_string().to_string();
 
                 // Device identity
                 let device_nickname = config_guard.device_nickname.clone().unwrap_or_default();
@@ -2138,6 +2144,10 @@ impl App {
                             relay_preference: SharedString::from(relay_preference),
                             screen_streaming_enabled,
                             screen_allow_input,
+                            viewer_quality: SharedString::from(viewer_quality),
+                            viewer_show_stats,
+                            viewer_auto_input,
+                            viewer_scale_mode: SharedString::from(viewer_scale_mode),
                         };
                         window.global::<AppLogic>().set_settings(settings);
                     }
@@ -3378,6 +3388,10 @@ impl App {
                             config_guard.relay_preference.to_ui_string().to_string();
                         let screen_streaming_enabled = config_guard.screen_stream.enabled;
                         let screen_allow_input = config_guard.screen_stream.allow_input;
+                        let viewer_quality = config_guard.viewer.quality.to_ui_string().to_string();
+                        let viewer_show_stats = config_guard.viewer.show_stats_overlay;
+                        let viewer_auto_input = config_guard.viewer.auto_enable_input;
+                        let viewer_scale_mode = config_guard.viewer.scale_mode.to_ui_string().to_string();
                         let device_nickname =
                             config_guard.device_nickname.clone().unwrap_or_default();
                         let device_hostname = Config::get_hostname();
@@ -3414,6 +3428,10 @@ impl App {
                                     relay_preference: SharedString::from(relay_preference),
                                     screen_streaming_enabled,
                                     screen_allow_input,
+                                    viewer_quality: SharedString::from(viewer_quality),
+                                    viewer_show_stats,
+                                    viewer_auto_input,
+                                    viewer_scale_mode: SharedString::from(viewer_scale_mode),
                                 };
                                 window.global::<AppLogic>().set_settings(settings);
                             }
@@ -7489,6 +7507,13 @@ impl App {
                                         let fps = stats.current_fps;
                                         let bitrate = stats.avg_bitrate_kbps;
                                         let latency = stats.latency_ms;
+                                        let frames_received = stats.frames_received;
+                                        let frames_dropped = stats.frames_dropped;
+                                        let packet_loss = stats.packet_loss;
+                                        let clock_synced = stats.clock_synced;
+                                        let clock_offset_ms = stats.clock_offset_ms;
+                                        let rtt_ms = stats.network_rtt_ms;
+                                        let decode_time_us = stats.avg_decode_time_us;
                                         let _ = slint::invoke_from_event_loop(move || {
                                             if let Some(window) = window_weak.upgrade() {
                                                 let logic = window.global::<AppLogic>();
@@ -7496,6 +7521,21 @@ impl App {
                                                 logic
                                                     .set_screen_viewer_bitrate_kbps(bitrate as i32);
                                                 logic.set_screen_viewer_latency_ms(latency as i32);
+                                                logic.set_screen_viewer_frames_received(
+                                                    frames_received as i32,
+                                                );
+                                                logic.set_screen_viewer_frames_dropped(
+                                                    frames_dropped as i32,
+                                                );
+                                                logic.set_screen_viewer_packet_loss(packet_loss);
+                                                logic.set_screen_viewer_clock_synced(clock_synced);
+                                                logic.set_screen_viewer_clock_offset_ms(
+                                                    clock_offset_ms as i32,
+                                                );
+                                                logic.set_screen_viewer_rtt_ms(rtt_ms as i32);
+                                                logic.set_screen_viewer_decode_time_us(
+                                                    decode_time_us as i32,
+                                                );
                                             }
                                         });
                                     }
@@ -7838,7 +7878,8 @@ impl App {
                                     }
                                     ScreenStreamEvent::ClockSynced { offset_ms, rtt_ms } => {
                                         info!("Clock synced with host: offset={}ms, RTT={}ms", offset_ms, rtt_ms);
-                                        // Clock sync is handled internally by the viewer
+                                        // Pass clock sync to viewer for accurate latency calculation
+                                        viewer.apply_clock_sync(offset_ms, rtt_ms);
                                     }
                                 },
                                 None => {
@@ -8042,12 +8083,26 @@ impl App {
             .global::<AppLogic>()
             .on_screen_viewer_adjust_quality({
                 let screen_viewer_cmd = screen_viewer_cmd.clone();
+                let window_weak = window_weak.clone();
+                let config = self.config.clone();
 
                 move |quality_str| {
                     let quality_str = quality_str.to_string();
                     debug!("Adjusting screen viewer quality to: {}", quality_str);
 
                     let screen_viewer_cmd = screen_viewer_cmd.clone();
+                    let window_weak = window_weak.clone();
+                    let config = config.clone();
+
+                    // Update UI immediately
+                    let quality_str_ui = quality_str.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(window) = window_weak.upgrade() {
+                            window
+                                .global::<AppLogic>()
+                                .set_screen_viewer_quality(SharedString::from(quality_str_ui));
+                        }
+                    });
 
                     std::thread::spawn(move || {
                         let rt = tokio::runtime::Builder::new_current_thread()
@@ -8072,6 +8127,12 @@ impl App {
                                     .send(ViewerCommand::AdjustQuality { quality, fps: None })
                                     .await;
                             }
+
+                            // Save to config
+                            let mut config_guard = config.write().await;
+                            config_guard.viewer.quality =
+                                croh_core::ViewerQuality::from_ui_string(&quality_str);
+                            let _ = config_guard.save();
                         });
                     });
                 }
@@ -8166,6 +8227,101 @@ impl App {
                     });
                 }
             });
+
+        // Toggle stats overlay callback
+        window.global::<AppLogic>().on_screen_viewer_toggle_stats({
+            let window_weak = window_weak.clone();
+            let config = self.config.clone();
+
+            move || {
+                debug!("Toggling screen viewer stats overlay");
+
+                let window_weak = window_weak.clone();
+                let config = config.clone();
+
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(window) = window_weak.upgrade() {
+                        let logic = window.global::<AppLogic>();
+                        let current = logic.get_screen_viewer_show_stats();
+                        let new_value = !current;
+                        logic.set_screen_viewer_show_stats(new_value);
+
+                        // Save to config
+                        std::thread::spawn(move || {
+                            let rt = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .unwrap();
+                            rt.block_on(async {
+                                let mut config_guard = config.write().await;
+                                config_guard.viewer.show_stats_overlay = new_value;
+                                let _ = config_guard.save();
+                            });
+                        });
+                    }
+                });
+            }
+        });
+
+        // Set scale mode callback
+        window
+            .global::<AppLogic>()
+            .on_screen_viewer_set_scale_mode({
+                let config = self.config.clone();
+
+                move |mode_str| {
+                    debug!("Setting screen viewer scale mode to: {}", mode_str);
+
+                    let mode_str = mode_str.to_string();
+                    let config = config.clone();
+
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .unwrap();
+                        rt.block_on(async {
+                            let mut config_guard = config.write().await;
+                            config_guard.viewer.scale_mode =
+                                croh_core::ViewerScaleMode::from_ui_string(&mode_str);
+                            let _ = config_guard.save();
+                        });
+                    });
+                }
+            });
+
+        // Save viewer settings callback
+        window.global::<AppLogic>().on_save_viewer_settings({
+            let config = self.config.clone();
+
+            move |quality, show_stats, auto_input, scale_mode| {
+                debug!(
+                    "Saving viewer settings: quality={}, stats={}, auto_input={}, scale={}",
+                    quality, show_stats, auto_input, scale_mode
+                );
+
+                let quality = quality.to_string();
+                let scale_mode = scale_mode.to_string();
+                let config = config.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    rt.block_on(async {
+                        let mut config_guard = config.write().await;
+                        config_guard.viewer.quality =
+                            croh_core::ViewerQuality::from_ui_string(&quality);
+                        config_guard.viewer.show_stats_overlay = show_stats;
+                        config_guard.viewer.auto_enable_input = auto_input;
+                        config_guard.viewer.scale_mode =
+                            croh_core::ViewerScaleMode::from_ui_string(&scale_mode);
+                        let _ = config_guard.save();
+                    });
+                });
+            }
+        });
     }
 }
 
