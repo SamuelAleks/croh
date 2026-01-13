@@ -1322,11 +1322,19 @@ pub async fn stream_screen_from_peer(
                         }
 
                         // Extract cursor from frame metadata if present
-                        if let Some(cursor) = metadata.cursor.clone() {
+                        if let Some(ref cursor) = metadata.cursor {
+                            if metadata.sequence % 30 == 0 {
+                                debug!(
+                                    "Received cursor: pos=({}, {}), visible={}, has_shape={}",
+                                    cursor.x, cursor.y, cursor.visible, cursor.shape.is_some()
+                                );
+                            }
                             let _ = event_tx.send(ScreenStreamEvent::CursorReceived {
                                 stream_id: frame_stream_id.clone(),
-                                cursor,
+                                cursor: cursor.clone(),
                             }).await;
+                        } else if metadata.sequence == 0 {
+                            debug!("No cursor data in frame metadata");
                         }
 
                         // Send frame to event channel
@@ -1583,26 +1591,47 @@ pub async fn handle_screen_stream_request(
                 };
 
                 // Capture cursor state to bundle with frame
-                let cursor_update = if let Ok(Some(cursor)) = capture.capture_cursor().await {
-                    // Convert backend CursorShape to protocol CursorShape
-                    let proto_shape = cursor.shape.map(|s| protocol::CursorShape {
-                        shape_id: s.shape_id,
-                        width: s.width,
-                        height: s.height,
-                        hotspot_x: s.hotspot_x,
-                        hotspot_y: s.hotspot_y,
-                        format: protocol::CursorFormat::Rgba32,
-                        data: s.data,
-                    });
+                let cursor_update = match capture.capture_cursor().await {
+                    Ok(Some(cursor)) => {
+                        // Convert backend CursorShape to protocol CursorShape
+                        let proto_shape = cursor.shape.map(|s| protocol::CursorShape {
+                            shape_id: s.shape_id,
+                            width: s.width,
+                            height: s.height,
+                            hotspot_x: s.hotspot_x,
+                            hotspot_y: s.hotspot_y,
+                            format: protocol::CursorFormat::Rgba32,
+                            data: s.data,
+                        });
 
-                    Some(CursorUpdate {
-                        x: cursor.x,
-                        y: cursor.y,
-                        visible: cursor.visible,
-                        shape: proto_shape,
-                    })
-                } else {
-                    None
+                        // Log cursor info periodically
+                        if sequence % 30 == 0 {
+                            debug!(
+                                "Cursor captured: pos=({}, {}), visible={}, has_shape={}",
+                                cursor.x, cursor.y, cursor.visible, proto_shape.is_some()
+                            );
+                        }
+
+                        Some(CursorUpdate {
+                            x: cursor.x,
+                            y: cursor.y,
+                            visible: cursor.visible,
+                            shape: proto_shape,
+                        })
+                    }
+                    Ok(None) => {
+                        // Backend doesn't support cursor capture
+                        if sequence == 0 {
+                            debug!("Cursor capture not supported by backend");
+                        }
+                        None
+                    }
+                    Err(e) => {
+                        if sequence % 30 == 0 {
+                            debug!("Cursor capture error: {}", e);
+                        }
+                        None
+                    }
                 };
 
                 // Send frame header with cursor bundled - use capture timestamp for accurate latency measurement
