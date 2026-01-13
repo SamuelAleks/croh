@@ -32,6 +32,18 @@ impl FormatTime for InstancePrefixTime {
 }
 
 fn main() -> Result<()> {
+    // On Windows, ensure we have a console for logging output when run from terminal
+    #[cfg(target_os = "windows")]
+    {
+        // Attach to parent console if available (e.g., when run from cmd/powershell)
+        // This is a no-op if already attached or if there's no parent console
+        unsafe {
+            windows::Win32::System::Console::AttachConsole(
+                windows::Win32::System::Console::ATTACH_PARENT_PROCESS,
+            )
+        };
+    }
+
     // Check for instance name (used by multi-instance test script)
     let instance_name = std::env::var("CROH_INSTANCE_NAME").ok();
 
@@ -45,6 +57,7 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
+        .with_ansi(cfg!(not(target_os = "windows"))) // Disable ANSI on Windows for better compatibility
         .with_timer(InstancePrefixTime {
             instance_name: instance_name.clone(),
         })

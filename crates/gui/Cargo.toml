@@ -31,6 +31,10 @@ chrono = { workspace = true }
 # Clipboard
 arboard = { workspace = true }
 
+# Windows-specific dependencies
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = ["Win32_System_Console"] }
+
 [build-dependencies]
 slint-build = "1.9"
 
