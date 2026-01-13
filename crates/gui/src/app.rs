@@ -7749,17 +7749,29 @@ impl App {
                                         break;
                                     }
                                     ScreenStreamEvent::FrameReceived { metadata, data, .. } => {
-                                        // Record latency from capture timestamp
-                                        viewer.record_latency(metadata.captured_at);
-
-                                        // Pass frame to viewer for decoding and display
-                                        if let Err(e) = viewer.on_frame_received(
+                                        // Pass frame to viewer for latency evaluation and decoding
+                                        // This uses clock-adjusted timestamps to decide whether to
+                                        // drop frames that are too old (realtime catch-up)
+                                        let frame_action = match viewer.on_frame_received_with_metadata(
                                             &data,
                                             metadata.width,
                                             metadata.height,
                                             metadata.sequence,
+                                            metadata.captured_at,
                                         ) {
-                                            warn!("Frame processing error: {}", e);
+                                            Ok(action) => action,
+                                            Err(e) => {
+                                                warn!("Frame processing error: {}", e);
+                                                continue;
+                                            }
+                                        };
+
+                                        // Skip UI update for dropped frames - this enables realtime
+                                        // catch-up by not wasting time rendering stale frames
+                                        use croh_core::screen::FrameAction;
+                                        if matches!(frame_action, FrameAction::Drop | FrameAction::RequestKeyframeFlush) {
+                                            // Frame was dropped due to high latency
+                                            // The viewer already emitted FrameDropped or KeyframeNeeded events
                                             continue;
                                         }
 
