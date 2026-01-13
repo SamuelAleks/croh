@@ -1915,7 +1915,8 @@ impl App {
                         }
                         // ==================== Time Sync Handler ====================
                         ControlMessage::TimeSyncRequest { client_time, sequence } => {
-                            // Respond immediately with server timestamps for clock sync
+                            // Handle time sync sequence - respond and loop for more requests
+                            // until we get the ScreenStreamRequest
                             let server_receive_time = chrono::Utc::now().timestamp_millis();
                             debug!(
                                 "Time sync request from {} (seq={}, client_time={})",
@@ -1928,9 +1929,107 @@ impl App {
                             };
                             if let Err(e) = conn.send(&response).await {
                                 warn!("Failed to send time sync response: {}", e);
+                                continue; // Connection error, go back to accepting new connections
                             }
-                            // Don't close connection - viewer will send more sync requests
-                            // and then proceed with screen streaming
+
+                            // Loop to handle remaining time sync requests and eventual stream request
+                            loop {
+                                let next_msg = match tokio::time::timeout(
+                                    std::time::Duration::from_secs(30),
+                                    conn.recv()
+                                ).await {
+                                    Ok(Ok(msg)) => msg,
+                                    Ok(Err(e)) => {
+                                        debug!("Connection closed during time sync: {}", e);
+                                        break;
+                                    }
+                                    Err(_) => {
+                                        warn!("Timeout waiting for next message during time sync");
+                                        break;
+                                    }
+                                };
+
+                                match next_msg {
+                                    ControlMessage::TimeSyncRequest { client_time, sequence } => {
+                                        let server_receive_time = chrono::Utc::now().timestamp_millis();
+                                        debug!(
+                                            "Time sync request from {} (seq={}, client_time={})",
+                                            peer.name, sequence, client_time
+                                        );
+                                        let response = ControlMessage::TimeSyncResponse {
+                                            client_time,
+                                            server_receive_time,
+                                            server_send_time: chrono::Utc::now().timestamp_millis(),
+                                        };
+                                        if let Err(e) = conn.send(&response).await {
+                                            warn!("Failed to send time sync response: {}", e);
+                                            break;
+                                        }
+                                        // Continue looping for more messages
+                                    }
+                                    ControlMessage::ScreenStreamRequest { stream_id, display_id, compression, quality, target_fps } => {
+                                        // Time sync is complete, handle the stream request
+                                        info!("Received screen stream request from {} after time sync (stream_id={})", peer.name, stream_id);
+
+                                        // Get screen stream settings from config
+                                        let cfg = config.read().await;
+                                        let screen_settings = cfg.screen_stream.clone();
+                                        drop(cfg);
+
+                                        // Check if screen streaming is enabled
+                                        if !screen_settings.enabled {
+                                            warn!("Screen streaming disabled, rejecting request from {}", peer.name);
+                                            let response = ControlMessage::ScreenStreamResponse {
+                                                stream_id,
+                                                accepted: false,
+                                                reason: Some("Screen streaming is disabled on this device".into()),
+                                                displays: vec![],
+                                                compression: None,
+                                            };
+                                            let _ = conn.send(&response).await;
+                                            break;
+                                        }
+
+                                        // Check if peer has screen_view permission
+                                        if !peer.permissions_granted.screen_view {
+                                            warn!("Screen view not allowed from {}", peer.name);
+                                            let response = ControlMessage::ScreenStreamResponse {
+                                                stream_id,
+                                                accepted: false,
+                                                reason: Some("screen_view permission not granted".into()),
+                                                displays: vec![],
+                                                compression: None,
+                                            };
+                                            let _ = conn.send(&response).await;
+                                            break;
+                                        }
+
+                                        // Handle the stream request
+                                        match handle_screen_stream_request(
+                                            &mut conn,
+                                            stream_id.clone(),
+                                            display_id,
+                                            compression,
+                                            quality,
+                                            target_fps,
+                                            &peer,
+                                            &screen_settings,
+                                        ).await {
+                                            Ok(()) => {
+                                                info!("Screen stream {} ended normally", stream_id);
+                                            }
+                                            Err(e) => {
+                                                error!("Screen stream {} error: {}", stream_id, e);
+                                            }
+                                        }
+                                        break; // Stream handler took over, exit loop
+                                    }
+                                    other => {
+                                        debug!("Unexpected message during time sync: {:?}", other);
+                                        break;
+                                    }
+                                }
+                            }
                         }
                         other => {
                             warn!("Unexpected message type from {}: {:?}", remote_id, other);
