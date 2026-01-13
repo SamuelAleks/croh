@@ -8,6 +8,7 @@ Croh combines two transfer modes:
 
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
+[![CI](https://github.com/SamuelAleks/croh/actions/workflows/ci.yml/badge.svg)](https://github.com/SamuelAleks/croh/actions/workflows/ci.yml)
 
 ## Features
 
