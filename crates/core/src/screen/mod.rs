@@ -61,12 +61,14 @@
 //! }
 //! ```
 
+mod adaptive;
 mod decoder;
 mod encoder;
 mod events;
 mod input;
 mod manager;
 mod session;
+mod time_sync;
 mod types;
 mod viewer;
 
@@ -94,12 +96,14 @@ mod dxgi;
 mod windows_input;
 
 // Re-export public types
+pub use adaptive::*;
 pub use decoder::*;
 pub use encoder::*;
 pub use events::*;
 pub use input::*;
 pub use manager::*;
 pub use session::*;
+pub use time_sync::*;
 pub use types::*;
 pub use viewer::*;
 

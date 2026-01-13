@@ -7,8 +7,8 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use tracing::{info, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing::info;
+use tracing_subscriber::EnvFilter;
 
 mod commands;
 mod handlers;
@@ -60,15 +60,20 @@ enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Initialize logging
-    let level = if cli.verbose {
-        Level::DEBUG
-    } else {
-        Level::INFO
-    };
+    // Initialize logging with filtering for noisy iroh IPv6 STUN warnings
+    let base_level = if cli.verbose { "debug" } else { "info" };
 
-    FmtSubscriber::builder()
-        .with_max_level(level)
+    // Filter out IPv6 STUN probe warnings from iroh's net_report module
+    // These occur when IPv6 is unavailable/blocked and are not actionable
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(format!(
+            "{},netwatch::net_report=error,iroh::magicsock::net_report=error",
+            base_level
+        ))
+    });
+
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
         .with_target(false)
         .init();
 

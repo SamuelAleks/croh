@@ -12,6 +12,7 @@ use crate::iroh::endpoint::IrohEndpoint;
 use crate::iroh::protocol::{ControlMessage, DirectoryEntry, FileInfo, FileRequest, InputEvent};
 use crate::peers::TrustedPeer;
 use crate::transfer::TransferId;
+use chrono::Utc;
 use iroh::NodeId;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -1060,6 +1061,13 @@ use crate::iroh::protocol::{self, FrameMetadata, ScreenCompression, ScreenQualit
 /// Events from a screen streaming session.
 #[derive(Debug, Clone)]
 pub enum ScreenStreamEvent {
+    /// Clock synchronization completed.
+    ClockSynced {
+        /// Clock offset from host in ms (positive = host ahead)
+        offset_ms: i64,
+        /// Network round-trip time in ms
+        rtt_ms: u32,
+    },
     /// Stream was accepted, now receiving frames.
     Accepted {
         stream_id: String,
@@ -1133,6 +1141,65 @@ pub async fn stream_screen_from_peer(
     info!("Connecting to peer {} for screen streaming", peer.name);
     let mut conn = endpoint.connect_to_node(node_id).await?;
     info!("Connected to peer {} for screen streaming", peer.name);
+
+    // Perform clock synchronization (5 exchanges)
+    info!("Performing clock synchronization...");
+    let mut clock_sync = crate::screen::ClockSync::new();
+    while clock_sync.needs_more_samples() {
+        let client_time = Utc::now().timestamp_millis();
+        let sequence = clock_sync.next_request_sequence();
+
+        let request = ControlMessage::TimeSyncRequest {
+            client_time,
+            sequence,
+        };
+        conn.send(&request).await?;
+
+        // Wait for response with timeout
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            conn.recv(),
+        )
+        .await
+        .map_err(|_| Error::Iroh("time sync timeout".to_string()))??;
+
+        match response {
+            ControlMessage::TimeSyncResponse {
+                client_time: resp_client_time,
+                server_receive_time,
+                server_send_time,
+            } => {
+                let response_received_time = Utc::now().timestamp_millis();
+                clock_sync.process_response(
+                    resp_client_time,
+                    server_receive_time,
+                    server_send_time,
+                    response_received_time,
+                );
+            }
+            other => {
+                warn!("Unexpected response during time sync: {:?}", other);
+                // Continue anyway - time sync is optional
+                break;
+            }
+        }
+    }
+
+    if clock_sync.is_synced() {
+        info!(
+            "Clock sync complete: offset={}ms, RTT={}ms",
+            clock_sync.offset_ms(),
+            clock_sync.avg_rtt_ms()
+        );
+        let _ = event_tx
+            .send(ScreenStreamEvent::ClockSynced {
+                offset_ms: clock_sync.offset_ms(),
+                rtt_ms: clock_sync.avg_rtt_ms(),
+            })
+            .await;
+    } else {
+        warn!("Clock sync incomplete, latency measurement may be inaccurate");
+    }
 
     // Generate stream ID
     let stream_id = uuid::Uuid::new_v4().to_string();
@@ -1261,6 +1328,9 @@ pub async fn stream_screen_from_peer(
                                 up_to_sequence: last_ack_sequence,
                                 estimated_bandwidth: None,
                                 quality_hint: None,
+                                measured_latency_ms: None,
+                                packet_loss: None,
+                                request_keyframe: false,
                             };
                             if let Err(e) = conn.send(&ack).await {
                                 warn!("Failed to send frame ACK: {}", e);
@@ -1458,7 +1528,7 @@ pub async fn handle_screen_stream_request(
             // Frame capture timer
             _ = frame_timer.tick() => {
                 // Capture frame - record timestamp immediately
-                let capture_timestamp = chrono::Utc::now().timestamp_millis();
+                let capture_timestamp = Utc::now().timestamp_millis();
                 let frame = match capture.capture_frame().await {
                     Ok(Some(f)) => f,
                     Ok(None) => {

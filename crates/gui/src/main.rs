@@ -6,10 +6,10 @@ use slint::{ComponentHandle, LogicalSize, Timer, TimerMode, WindowSize};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Instant;
-use tracing::{error, info, Level};
+use tracing::{error, info};
 use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::time::FormatTime;
-use tracing_subscriber::FmtSubscriber;
+use tracing_subscriber::EnvFilter;
 
 slint::include_modules!();
 
@@ -36,8 +36,14 @@ fn main() -> Result<()> {
     let instance_name = std::env::var("CROH_INSTANCE_NAME").ok();
 
     // Initialize logging with optional instance prefix
-    FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
+    // Filter out IPv6 STUN probe warnings from iroh's net_report module
+    // These occur when IPv6 is unavailable/blocked and are not actionable
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("info,netwatch::net_report=error,iroh::magicsock::net_report=error")
+    });
+
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
         .with_target(false)
         .with_timer(InstancePrefixTime {
             instance_name: instance_name.clone(),

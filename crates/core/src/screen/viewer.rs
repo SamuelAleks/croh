@@ -30,8 +30,10 @@ use tracing::{debug, info, warn};
 use crate::error::Result;
 use crate::iroh::protocol::{DisplayInfo, ScreenCompression, ScreenQuality};
 
+use super::adaptive::{AdaptiveBitrate, FrameAction, FrameSyncState, PacketLossTracker};
 use super::decoder::AutoDecoder;
 use super::events::RemoteInputEvent;
+use super::time_sync::ClockSync;
 
 /// Viewer connection state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -85,12 +87,20 @@ pub struct ViewerStats {
     pub bytes_received: u64,
     /// Average bitrate in kbps.
     pub avg_bitrate_kbps: u64,
-    /// Round-trip latency estimate in ms.
+    /// End-to-end latency (capture to display) in ms.
     pub latency_ms: u32,
+    /// Network RTT in ms (from clock sync).
+    pub network_rtt_ms: u32,
+    /// Packet loss rate (0.0-1.0).
+    pub packet_loss: f32,
     /// Input events sent.
     pub input_events_sent: u64,
     /// Time connected.
     pub connected_duration: Duration,
+    /// Whether clock is synchronized with host.
+    pub clock_synced: bool,
+    /// Clock offset from host in ms.
+    pub clock_offset_ms: i64,
 }
 
 impl ViewerStats {
@@ -126,6 +136,16 @@ pub struct ViewerConfig {
     pub preferred_quality: ScreenQuality,
     /// Target FPS (hint to server).
     pub preferred_fps: u32,
+    /// Target end-to-end latency in ms.
+    pub target_latency_ms: u32,
+    /// Maximum latency before dropping frames in ms.
+    pub max_latency_ms: u32,
+    /// Enable adaptive bitrate.
+    pub enable_adaptive_bitrate: bool,
+    /// Minimum bitrate in kbps (for adaptive).
+    pub min_bitrate_kbps: u32,
+    /// Maximum bitrate in kbps (for adaptive).
+    pub max_bitrate_kbps: u32,
 }
 
 impl Default for ViewerConfig {
@@ -137,6 +157,11 @@ impl Default for ViewerConfig {
             enable_input: true,
             preferred_quality: ScreenQuality::Balanced,
             preferred_fps: 30,
+            target_latency_ms: 100,
+            max_latency_ms: 500,
+            enable_adaptive_bitrate: true,
+            min_bitrate_kbps: 500,
+            max_bitrate_kbps: 20_000,
         }
     }
 }
@@ -172,6 +197,11 @@ pub enum ViewerEvent {
         width: u32,
         height: u32,
     },
+    /// Frame was dropped (too old or decode error).
+    FrameDropped {
+        sequence: u64,
+        reason: String,
+    },
     /// Statistics updated.
     StatsUpdated(ViewerStats),
     /// Available displays received.
@@ -185,6 +215,24 @@ pub enum ViewerEvent {
     StreamRejected { stream_id: String, reason: String },
     /// Stream ended.
     StreamEnded { reason: String },
+    /// Clock synchronized with host.
+    ClockSynced {
+        offset_ms: i64,
+        rtt_ms: u32,
+    },
+    /// Quality adjustment recommended (send to host).
+    QualityAdjustmentNeeded {
+        suggested_quality: ScreenQuality,
+        reason: String,
+    },
+    /// Keyframe needed (send to host).
+    KeyframeNeeded {
+        reason: String,
+    },
+    /// Bitrate adjustment recommended (send to host).
+    BitrateAdjustmentNeeded {
+        suggested_kbps: u32,
+    },
     /// Error occurred.
     Error(String),
 }
@@ -454,6 +502,18 @@ pub struct ScreenViewer {
     last_error: Option<String>,
     /// Recent latency samples for averaging (in ms).
     latency_samples: Vec<u32>,
+    /// Clock synchronization state.
+    clock_sync: ClockSync,
+    /// Frame sync state (latency tracking and decisions).
+    frame_sync: FrameSyncState,
+    /// Packet loss tracker.
+    loss_tracker: PacketLossTracker,
+    /// Adaptive bitrate controller.
+    adaptive_bitrate: AdaptiveBitrate,
+    /// Current quality setting.
+    current_quality: ScreenQuality,
+    /// Frames dropped due to latency.
+    frames_dropped_latency: u64,
 }
 
 impl ScreenViewer {
@@ -461,10 +521,17 @@ impl ScreenViewer {
     pub fn new(config: ViewerConfig, event_tx: ViewerEventSender) -> Self {
         let frame_buffer = FrameBuffer::new(config.max_buffer_frames);
         let input_queue = InputQueue::new(config.max_input_batch_size, config.input_batch_ms);
+        let frame_sync = FrameSyncState::new(config.target_latency_ms, config.max_latency_ms);
+        let loss_tracker = PacketLossTracker::new(60); // 1 second at 60fps
+        let adaptive_bitrate = AdaptiveBitrate::new(
+            config.min_bitrate_kbps,
+            config.max_bitrate_kbps,
+            (config.min_bitrate_kbps + config.max_bitrate_kbps) / 2, // Start at midpoint
+        );
 
         Self {
             state: ViewerState::Disconnected,
-            config,
+            config: config.clone(),
             frame_buffer,
             input_queue,
             event_tx,
@@ -476,6 +543,12 @@ impl ScreenViewer {
             bytes_received: 0,
             last_error: None,
             latency_samples: Vec::with_capacity(30),
+            clock_sync: ClockSync::new(),
+            frame_sync,
+            loss_tracker,
+            adaptive_bitrate,
+            current_quality: config.preferred_quality,
+            frames_dropped_latency: 0,
         }
     }
 
@@ -580,18 +653,92 @@ impl ScreenViewer {
         }
     }
 
-    /// Handle incoming frame.
+    /// Handle incoming frame with full metadata.
     ///
-    /// `captured_at` is the Unix timestamp (millis) when the frame was captured.
-    pub fn on_frame_received(
+    /// This is the main frame reception method that handles:
+    /// - Clock-adjusted latency calculation
+    /// - Frame sync decisions (display/drop/request adjustment)
+    /// - Packet loss tracking
+    /// - Adaptive bitrate updates
+    ///
+    /// # Arguments
+    /// * `data` - Encoded frame data
+    /// * `width` - Frame width
+    /// * `height` - Frame height
+    /// * `sequence` - Frame sequence number
+    /// * `captured_at_ms` - Host's capture timestamp (Unix millis)
+    ///
+    /// # Returns
+    /// The action taken for this frame
+    pub fn on_frame_received_with_metadata(
         &mut self,
         data: &[u8],
         width: u32,
         height: u32,
         sequence: u64,
-    ) -> Result<()> {
+        captured_at_ms: i64,
+    ) -> Result<FrameAction> {
         self.bytes_received += data.len() as u64;
 
+        // Track packet loss
+        let packet_loss = self.loss_tracker.record(sequence);
+
+        // Calculate latency, adjusting for clock offset if synced
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let adjusted_captured_at = if self.clock_sync.is_synced() {
+            self.clock_sync.to_local_time(captured_at_ms)
+        } else {
+            captured_at_ms
+        };
+        let latency_ms = (now_ms - adjusted_captured_at).max(0);
+
+        // Record in legacy latency samples for backwards compatibility
+        if self.latency_samples.len() >= 30 {
+            self.latency_samples.remove(0);
+        }
+        self.latency_samples.push(latency_ms as u32);
+
+        // Evaluate frame timing
+        let action = self.frame_sync.evaluate_frame(adjusted_captured_at, now_ms);
+
+        match action {
+            FrameAction::Drop => {
+                self.frames_dropped_latency += 1;
+                let _ = self.event_tx.try_send(ViewerEvent::FrameDropped {
+                    sequence,
+                    reason: format!("Latency too high: {}ms", latency_ms),
+                });
+                return Ok(FrameAction::Drop);
+            }
+            FrameAction::RequestQualityReduction => {
+                let suggested = self.frame_sync.suggest_quality(self.current_quality);
+                let _ = self.event_tx.try_send(ViewerEvent::QualityAdjustmentNeeded {
+                    suggested_quality: suggested,
+                    reason: format!("Falling behind: {}ms latency", latency_ms),
+                });
+            }
+            FrameAction::RequestKeyframeFlush => {
+                self.frame_buffer.clear();
+                self.frame_sync.reset_after_flush();
+                let _ = self.event_tx.try_send(ViewerEvent::KeyframeNeeded {
+                    reason: format!("Severely behind: {}ms latency, flushing", latency_ms),
+                });
+                return Ok(FrameAction::RequestKeyframeFlush);
+            }
+            FrameAction::Display => {}
+        }
+
+        // Update adaptive bitrate if enabled
+        if self.config.enable_adaptive_bitrate {
+            let rtt = self.clock_sync.avg_rtt_ms();
+            if let Some(new_bitrate) = self.adaptive_bitrate.update(rtt, packet_loss) {
+                let _ = self.event_tx.try_send(ViewerEvent::BitrateAdjustmentNeeded {
+                    suggested_kbps: new_bitrate,
+                });
+            }
+        }
+
+        // Decode and buffer the frame
         match self.frame_buffer.push_frame(data, width, height, sequence) {
             Ok(()) => {
                 // Transition to streaming on first frame
@@ -605,21 +752,104 @@ impl ScreenViewer {
                     height,
                 });
 
-                Ok(())
+                Ok(action)
             }
             Err(e) => {
                 debug!("Frame decode error: {}", e);
+                let _ = self.event_tx.try_send(ViewerEvent::FrameDropped {
+                    sequence,
+                    reason: format!("Decode error: {}", e),
+                });
                 Err(e)
             }
         }
     }
 
-    /// Record latency sample from frame capture timestamp.
+    /// Handle incoming frame (legacy method without timestamp).
+    ///
+    /// Use `on_frame_received_with_metadata` when capture timestamp is available.
+    pub fn on_frame_received(
+        &mut self,
+        data: &[u8],
+        width: u32,
+        height: u32,
+        sequence: u64,
+    ) -> Result<()> {
+        // Use current time as captured_at (no latency calculation possible)
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        self.on_frame_received_with_metadata(data, width, height, sequence, now_ms)?;
+        Ok(())
+    }
+
+    /// Process a time sync response from the host.
+    ///
+    /// # Arguments
+    /// * `client_time` - Original client timestamp from request
+    /// * `server_receive_time` - Host's time when it received request
+    /// * `server_send_time` - Host's time when it sent response
+    ///
+    /// # Returns
+    /// `true` if clock sync is now complete
+    pub fn on_time_sync_response(
+        &mut self,
+        client_time: i64,
+        server_receive_time: i64,
+        server_send_time: i64,
+    ) -> bool {
+        let response_received_time = chrono::Utc::now().timestamp_millis();
+
+        let synced = self.clock_sync.process_response(
+            client_time,
+            server_receive_time,
+            server_send_time,
+            response_received_time,
+        );
+
+        if synced {
+            let _ = self.event_tx.try_send(ViewerEvent::ClockSynced {
+                offset_ms: self.clock_sync.offset_ms(),
+                rtt_ms: self.clock_sync.avg_rtt_ms(),
+            });
+        }
+
+        synced
+    }
+
+    /// Check if clock sync is complete.
+    pub fn is_clock_synced(&self) -> bool {
+        self.clock_sync.is_synced()
+    }
+
+    /// Check if more time sync exchanges are needed.
+    pub fn needs_time_sync(&self) -> bool {
+        self.clock_sync.needs_more_samples()
+    }
+
+    /// Get the next time sync request sequence.
+    pub fn next_time_sync_sequence(&mut self) -> u8 {
+        self.clock_sync.next_request_sequence()
+    }
+
+    /// Get current packet loss rate.
+    pub fn packet_loss_rate(&self) -> f32 {
+        self.loss_tracker.current_rate()
+    }
+
+    /// Get current adaptive bitrate.
+    pub fn current_bitrate(&self) -> u32 {
+        self.adaptive_bitrate.current_bitrate()
+    }
+
+    /// Record latency sample from frame capture timestamp (legacy).
     pub fn record_latency(&mut self, captured_at_ms: i64) {
         let now_ms = chrono::Utc::now().timestamp_millis();
-        let latency = (now_ms - captured_at_ms).max(0) as u32;
+        let adjusted = if self.clock_sync.is_synced() {
+            self.clock_sync.to_local_time(captured_at_ms)
+        } else {
+            captured_at_ms
+        };
+        let latency = (now_ms - adjusted).max(0) as u32;
 
-        // Keep last 30 samples for averaging
         if self.latency_samples.len() >= 30 {
             self.latency_samples.remove(0);
         }
@@ -633,6 +863,11 @@ impl ScreenViewer {
         }
         let sum: u32 = self.latency_samples.iter().sum();
         sum / self.latency_samples.len() as u32
+    }
+
+    /// Get frame sync state for inspection.
+    pub fn frame_sync(&self) -> &FrameSyncState {
+        &self.frame_sync
     }
 
     /// Handle disconnect request.
@@ -652,6 +887,19 @@ impl ScreenViewer {
         self.frame_buffer.clear();
         self.input_queue.clear();
         self.connected_at = None;
+
+        // Reset sync state
+        self.clock_sync.reset();
+        self.loss_tracker.reset();
+        self.adaptive_bitrate.reset(
+            (self.config.min_bitrate_kbps + self.config.max_bitrate_kbps) / 2,
+        );
+        self.frame_sync = FrameSyncState::new(
+            self.config.target_latency_ms,
+            self.config.max_latency_ms,
+        );
+        self.frames_dropped_latency = 0;
+        self.latency_samples.clear();
 
         self.set_state(ViewerState::Disconnected);
     }
@@ -694,14 +942,18 @@ impl ScreenViewer {
         ViewerStats {
             frames_received: self.frame_buffer.decode_count,
             frames_decoded: self.frame_buffer.decode_count,
-            frames_dropped: 0, // TODO: Track properly
+            frames_dropped: self.frames_dropped_latency,
             current_fps: self.frame_buffer.current_fps(),
             avg_decode_time_us: self.frame_buffer.avg_decode_time_us(),
             bytes_received: self.bytes_received,
             avg_bitrate_kbps,
-            latency_ms: self.avg_latency_ms(),
+            latency_ms: self.frame_sync.avg_latency_ms(),
+            network_rtt_ms: self.clock_sync.avg_rtt_ms(),
+            packet_loss: self.loss_tracker.current_rate(),
             input_events_sent: self.input_queue.events_sent(),
             connected_duration,
+            clock_synced: self.clock_sync.is_synced(),
+            clock_offset_ms: self.clock_sync.offset_ms(),
         }
     }
 

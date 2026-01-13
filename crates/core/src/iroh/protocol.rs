@@ -551,6 +551,28 @@ pub enum ControlMessage {
     },
 
     // ==================== Screen Streaming Messages ====================
+
+    /// Time synchronization request (viewer → host).
+    ///
+    /// Used to synchronize clocks between viewer and host for accurate
+    /// latency measurement. Viewer sends 5 requests, host responds immediately.
+    TimeSyncRequest {
+        /// Viewer's local time when sending (Unix millis)
+        client_time: i64,
+        /// Request sequence (0-4 for initial sync)
+        sequence: u8,
+    },
+
+    /// Time synchronization response (host → viewer).
+    TimeSyncResponse {
+        /// Echo back client_time from request
+        client_time: i64,
+        /// Host's time when request was received (Unix millis)
+        server_receive_time: i64,
+        /// Host's time when sending response (Unix millis)
+        server_send_time: i64,
+    },
+
     /// Request to start screen streaming.
     ScreenStreamRequest {
         /// Unique stream ID
@@ -592,7 +614,7 @@ pub enum ControlMessage {
         metadata: FrameMetadata,
     },
 
-    /// Acknowledge receipt of frames (for flow control).
+    /// Acknowledge receipt of frames (for flow control and adaptive streaming).
     ScreenFrameAck {
         /// Stream ID
         stream_id: String,
@@ -604,6 +626,15 @@ pub enum ControlMessage {
         /// Suggested quality adjustment
         #[serde(skip_serializing_if = "Option::is_none")]
         quality_hint: Option<ScreenQuality>,
+        /// Current end-to-end latency as measured by viewer (ms)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        measured_latency_ms: Option<u32>,
+        /// Packet loss rate in the last window (0.0-1.0)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        packet_loss: Option<f32>,
+        /// Request a keyframe (for recovery after packet loss or sync issues)
+        #[serde(default)]
+        request_keyframe: bool,
     },
 
     /// Request quality/settings change mid-stream.

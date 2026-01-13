@@ -8,6 +8,7 @@ use crate::iroh::identity::Identity;
 use crate::iroh::protocol::{ControlMessage, ALPN_CONTROL};
 use iroh::dns::DnsResolver;
 use iroh::{Endpoint, NodeId, RelayMode, RelayUrl};
+#[cfg(windows)]
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;

@@ -1913,6 +1913,25 @@ impl App {
                             // TODO: Notify viewer that stream has ended
                             let _ = conn.close().await;
                         }
+                        // ==================== Time Sync Handler ====================
+                        ControlMessage::TimeSyncRequest { client_time, sequence } => {
+                            // Respond immediately with server timestamps for clock sync
+                            let server_receive_time = chrono::Utc::now().timestamp_millis();
+                            debug!(
+                                "Time sync request from {} (seq={}, client_time={})",
+                                peer.name, sequence, client_time
+                            );
+                            let response = ControlMessage::TimeSyncResponse {
+                                client_time,
+                                server_receive_time,
+                                server_send_time: chrono::Utc::now().timestamp_millis(),
+                            };
+                            if let Err(e) = conn.send(&response).await {
+                                warn!("Failed to send time sync response: {}", e);
+                            }
+                            // Don't close connection - viewer will send more sync requests
+                            // and then proceed with screen streaming
+                        }
                         other => {
                             warn!("Unexpected message type from {}: {:?}", remote_id, other);
                         }
@@ -7456,6 +7475,25 @@ impl App {
                                             }
                                         });
                                     }
+                                    // Adaptive streaming events - handled internally by viewer
+                                    ViewerEvent::FrameDropped { sequence, reason } => {
+                                        debug!("Frame {} dropped: {}", sequence, reason);
+                                    }
+                                    ViewerEvent::ClockSynced { offset_ms, rtt_ms } => {
+                                        info!("Clock synced: offset={}ms, RTT={}ms", offset_ms, rtt_ms);
+                                    }
+                                    ViewerEvent::QualityAdjustmentNeeded { suggested_quality, reason } => {
+                                        debug!("Quality adjustment needed: {:?}, reason: {}", suggested_quality, reason);
+                                        // TODO: Send quality adjustment request to host
+                                    }
+                                    ViewerEvent::KeyframeNeeded { reason } => {
+                                        debug!("Keyframe needed: {}", reason);
+                                        // TODO: Send keyframe request to host
+                                    }
+                                    ViewerEvent::BitrateAdjustmentNeeded { suggested_kbps } => {
+                                        debug!("Bitrate adjustment needed: {} kbps", suggested_kbps);
+                                        // TODO: Send bitrate adjustment to host
+                                    }
                                 }
                             }
                         });
@@ -7667,6 +7705,10 @@ impl App {
                                         error!("Stream error: {}", msg);
                                         viewer.on_error(msg);
                                         break;
+                                    }
+                                    ScreenStreamEvent::ClockSynced { offset_ms, rtt_ms } => {
+                                        info!("Clock synced with host: offset={}ms, RTT={}ms", offset_ms, rtt_ms);
+                                        // Clock sync is handled internally by the viewer
                                     }
                                 },
                                 None => {
