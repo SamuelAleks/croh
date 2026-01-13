@@ -163,12 +163,16 @@ if [ "$CLEAN_CONFIGS" = true ]; then
     echo "  Removed: $PRIMARY_CONFIG_DIR"
     echo "  Removed: $PRIMARY_DATA_DIR"
 
-    for ((i=1; i<NUM_INSTANCES; i++)); do
+    # Remove ALL secondary instance directories (not just the ones we're launching)
+    # This ensures a clean slate even if you previously ran with more instances
+    for ((i=1; i<${#INSTANCE_NAMES[@]}; i++)); do
         name="${INSTANCE_NAMES[$i]}"
         name_lower=$(echo "$name" | tr '[:upper:]' '[:lower:]')
         instance_dir="/tmp/croh-$name_lower"
-        rm -rf "$instance_dir"
-        echo "  Removed: $instance_dir"
+        if [ -d "$instance_dir" ]; then
+            rm -rf "$instance_dir"
+            echo "  Removed: $instance_dir"
+        fi
     done
 
     # Create fresh configs with nicknames set

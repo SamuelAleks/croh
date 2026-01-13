@@ -121,8 +121,9 @@ if ($Clean) {
         Write-Host "  Removed: $PRIMARY_DATA_DIR"
     }
 
-    # Remove secondary instance directories
-    for ($i = 1; $i -lt $n; $i++) {
+    # Remove ALL secondary instance directories (not just the ones we're launching)
+    # This ensures a clean slate even if you previously ran with more instances
+    for ($i = 1; $i -lt $INSTANCE_NAMES.Count; $i++) {
         $name = $INSTANCE_NAMES[$i]
         $name_lower = $name.ToLower()
         $instance_dir = Join-Path $TEMP_DIR "croh-$name_lower"
