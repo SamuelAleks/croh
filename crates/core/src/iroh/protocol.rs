@@ -119,6 +119,61 @@ pub struct FrameMetadata {
     pub size: u32,
 }
 
+// ==================== Cursor Types ====================
+
+/// Format of cursor image data.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorFormat {
+    /// RGBA 32-bit (standard, 4 bytes per pixel)
+    #[default]
+    Rgba32,
+    /// 1-bit monochrome with mask (legacy Windows cursors)
+    Monochrome,
+    /// Color cursor with separate AND/XOR masks (Windows)
+    MaskedColor,
+}
+
+/// Cursor shape/image data.
+///
+/// Only sent when the cursor shape changes. Position updates
+/// are sent separately via `CursorUpdate`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CursorShape {
+    /// Unique ID for this shape (for caching)
+    pub shape_id: u64,
+    /// Cursor width in pixels
+    pub width: u32,
+    /// Cursor height in pixels
+    pub height: u32,
+    /// X hotspot (click point within image)
+    pub hotspot_x: u32,
+    /// Y hotspot (click point within image)
+    pub hotspot_y: u32,
+    /// Pixel format
+    pub format: CursorFormat,
+    /// Image data (RGBA for Rgba32, packed bits for Monochrome)
+    #[serde(with = "serde_bytes")]
+    pub data: Vec<u8>,
+}
+
+/// Cursor position/visibility update.
+///
+/// Sent frequently (up to 120Hz) to track mouse movement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CursorUpdate {
+    /// X position in screen coordinates
+    pub x: i32,
+    /// Y position in screen coordinates
+    pub y: i32,
+    /// Whether cursor is visible
+    pub visible: bool,
+    /// Shape ID (references a previously sent CursorShape)
+    /// Only present when shape changes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shape: Option<CursorShape>,
+}
+
 /// Input event from viewer to host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -666,6 +721,17 @@ pub enum ControlMessage {
         stream_id: String,
         /// Batch of input events
         events: Vec<InputEvent>,
+    },
+
+    /// Cursor update from host (position and/or shape change).
+    ///
+    /// Sent on a separate channel from video frames for lower latency.
+    /// The viewer should render the cursor on top of the video frame.
+    ScreenCursorUpdate {
+        /// Stream ID
+        stream_id: String,
+        /// Cursor update data
+        cursor: CursorUpdate,
     },
 
     /// Query available displays without starting a stream.

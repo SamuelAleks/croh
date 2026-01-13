@@ -17,14 +17,15 @@
 //! - No special privileges needed
 
 #[cfg(target_os = "windows")]
-use super::{CapturedFrame, Display, PixelFormat, ScreenCapture};
+use super::{CapturedCursor, CapturedFrame, CursorShape, Display, PixelFormat, ScreenCapture};
 #[cfg(target_os = "windows")]
 use crate::error::{Error, Result};
 #[cfg(target_os = "windows")]
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 #[cfg(target_os = "windows")]
 use windows::{
     core::Interface,
+    Win32::Foundation::POINT,
     Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE,
     Win32::Graphics::Direct3D11::{
         D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
@@ -35,10 +36,17 @@ use windows::{
         Common::DXGI_FORMAT_B8G8R8A8_UNORM, CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1,
         IDXGIOutput, IDXGIOutput1, IDXGIOutputDuplication, DXGI_OUTDUPL_FRAME_INFO,
     },
+    Win32::Graphics::Gdi::{
+        CreateCompatibleDC, DeleteDC, DeleteObject, GetBitmapBits, GetDIBits, GetObjectW,
+        SelectObject, BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP,
+    },
+    Win32::UI::WindowsAndMessaging::{
+        CopyIcon, DestroyIcon, GetCursorInfo, GetIconInfo, CURSORINFO, CURSOR_SHOWING, ICONINFO,
+    },
 };
 
 #[cfg(not(target_os = "windows"))]
-use super::{CapturedFrame, Display, ScreenCapture};
+use super::{CapturedCursor, CapturedFrame, Display, ScreenCapture};
 #[cfg(not(target_os = "windows"))]
 use crate::error::{Error, Result};
 #[cfg(not(target_os = "windows"))]
@@ -70,6 +78,14 @@ pub struct DxgiCapture {
     capture_width: u32,
     #[cfg(target_os = "windows")]
     capture_height: u32,
+    #[cfg(target_os = "windows")]
+    /// Display offset for cursor position calculation
+    display_x: i32,
+    #[cfg(target_os = "windows")]
+    display_y: i32,
+    #[cfg(target_os = "windows")]
+    /// Last captured cursor shape ID (to detect changes)
+    last_cursor_shape_id: u64,
 }
 
 impl DxgiCapture {
@@ -102,6 +118,9 @@ impl DxgiCapture {
                 staging_texture: None,
                 capture_width: 0,
                 capture_height: 0,
+                display_x: 0,
+                display_y: 0,
+                last_cursor_shape_id: 0,
             })
         }
         #[cfg(not(target_os = "windows"))]
@@ -267,10 +286,268 @@ impl DxgiCapture {
             self.staging_texture = staging;
             self.capture_width = width;
             self.capture_height = height;
+            self.display_x = desc.DesktopCoordinates.left;
+            self.display_y = desc.DesktopCoordinates.top;
 
             debug!("Output duplication setup: {}x{}", width, height);
         }
         Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    /// Capture cursor using Win32 API.
+    fn capture_cursor_win32(&mut self) -> Result<Option<CapturedCursor>> {
+        unsafe {
+            // Get cursor info
+            let mut cursor_info = CURSORINFO {
+                cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+                ..Default::default()
+            };
+
+            if !GetCursorInfo(&mut cursor_info).as_bool() {
+                return Ok(None);
+            }
+
+            let visible = cursor_info.flags == CURSOR_SHOWING;
+
+            // Calculate position relative to captured display
+            let x = cursor_info.ptScreenPos.x - self.display_x;
+            let y = cursor_info.ptScreenPos.y - self.display_y;
+
+            // Check if cursor is within the capture area
+            let in_bounds = x >= 0
+                && y >= 0
+                && x < self.capture_width as i32
+                && y < self.capture_height as i32;
+
+            // Get cursor shape
+            let shape = if visible && cursor_info.hCursor.0 != 0 {
+                self.get_cursor_shape(cursor_info.hCursor)?
+            } else {
+                None
+            };
+
+            Ok(Some(CapturedCursor {
+                x,
+                y,
+                visible: visible && in_bounds,
+                shape,
+            }))
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    /// Get cursor shape from HCURSOR.
+    fn get_cursor_shape(
+        &mut self,
+        hcursor: windows::Win32::UI::WindowsAndMessaging::HCURSOR,
+    ) -> Result<Option<CursorShape>> {
+        unsafe {
+            // Copy the cursor to get our own handle
+            let hicon = CopyIcon(hcursor)
+                .map_err(|e| Error::Screen(format!("Failed to copy cursor: {:?}", e)))?;
+
+            let mut icon_info = ICONINFO::default();
+            if !GetIconInfo(hicon, &mut icon_info).as_bool() {
+                DestroyIcon(hicon).ok();
+                return Ok(None);
+            }
+
+            // Get bitmap info
+            let hbm_color = icon_info.hbmColor;
+            let hbm_mask = icon_info.hbmMask;
+
+            let result = if hbm_color.0 != 0 {
+                // Color cursor
+                self.extract_color_cursor(hbm_color, icon_info.xHotspot, icon_info.yHotspot)
+            } else if hbm_mask.0 != 0 {
+                // Monochrome cursor (mask only)
+                self.extract_mono_cursor(hbm_mask, icon_info.xHotspot, icon_info.yHotspot)
+            } else {
+                Ok(None)
+            };
+
+            // Cleanup
+            if hbm_color.0 != 0 {
+                DeleteObject(hbm_color).ok();
+            }
+            if hbm_mask.0 != 0 {
+                DeleteObject(hbm_mask).ok();
+            }
+            DestroyIcon(hicon).ok();
+
+            result
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    /// Extract RGBA data from a color cursor bitmap.
+    fn extract_color_cursor(
+        &mut self,
+        hbitmap: HBITMAP,
+        hotspot_x: u32,
+        hotspot_y: u32,
+    ) -> Result<Option<CursorShape>> {
+        unsafe {
+            // Get bitmap dimensions
+            let mut bm = BITMAP::default();
+            if GetObjectW(
+                hbitmap,
+                std::mem::size_of::<BITMAP>() as i32,
+                Some(&mut bm as *mut _ as *mut _),
+            ) == 0
+            {
+                return Ok(None);
+            }
+
+            let width = bm.bmWidth as u32;
+            let height = bm.bmHeight as u32;
+
+            if width == 0 || height == 0 || width > 256 || height > 256 {
+                return Ok(None);
+            }
+
+            // Create compatible DC
+            let hdc = CreateCompatibleDC(None);
+            if hdc.is_invalid() {
+                return Ok(None);
+            }
+
+            // Select bitmap into DC
+            let old_bmp = SelectObject(hdc, hbitmap);
+
+            // Setup BITMAPINFO for 32-bit BGRA
+            let mut bmi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width as i32,
+                    biHeight: -(height as i32), // Negative for top-down
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    biSizeImage: 0,
+                    biXPelsPerMeter: 0,
+                    biYPelsPerMeter: 0,
+                    biClrUsed: 0,
+                    biClrImportant: 0,
+                },
+                bmiColors: [Default::default()],
+            };
+
+            // Allocate buffer for bitmap bits
+            let mut bits = vec![0u8; (width * height * 4) as usize];
+            let result = GetDIBits(
+                hdc,
+                hbitmap,
+                0,
+                height,
+                Some(bits.as_mut_ptr() as *mut _),
+                &mut bmi,
+                DIB_RGB_COLORS,
+            );
+
+            // Cleanup
+            SelectObject(hdc, old_bmp);
+            DeleteDC(hdc).ok();
+
+            if result == 0 {
+                return Ok(None);
+            }
+
+            // Convert BGRA to RGBA
+            for chunk in bits.chunks_exact_mut(4) {
+                chunk.swap(0, 2); // Swap B and R
+            }
+
+            // Check if shape changed
+            let shape_id = CursorShape::calculate_id(&bits);
+            if shape_id == self.last_cursor_shape_id {
+                return Ok(None);
+            }
+            self.last_cursor_shape_id = shape_id;
+
+            Ok(Some(CursorShape::new(width, height, hotspot_x, hotspot_y, bits)))
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    /// Extract RGBA data from a monochrome cursor bitmap.
+    fn extract_mono_cursor(
+        &mut self,
+        hbitmap: HBITMAP,
+        hotspot_x: u32,
+        hotspot_y: u32,
+    ) -> Result<Option<CursorShape>> {
+        unsafe {
+            // Get bitmap dimensions
+            let mut bm = BITMAP::default();
+            if GetObjectW(
+                hbitmap,
+                std::mem::size_of::<BITMAP>() as i32,
+                Some(&mut bm as *mut _ as *mut _),
+            ) == 0
+            {
+                return Ok(None);
+            }
+
+            let width = bm.bmWidth as u32;
+            // Monochrome cursors have AND mask + XOR mask stacked vertically
+            let height = (bm.bmHeight / 2) as u32;
+
+            if width == 0 || height == 0 || width > 256 || height > 256 {
+                return Ok(None);
+            }
+
+            // Get the raw bits
+            let row_bytes = ((width + 31) / 32) * 4; // 1-bit per pixel, DWORD aligned
+            let mask_size = (row_bytes * height) as usize;
+            let mut mask_bits = vec![0u8; mask_size * 2]; // AND + XOR masks
+
+            let bytes_read = GetBitmapBits(hbitmap, mask_bits.len() as i32, mask_bits.as_mut_ptr() as *mut _);
+            if bytes_read == 0 {
+                return Ok(None);
+            }
+
+            // Convert monochrome to RGBA
+            let mut rgba = vec![0u8; (width * height * 4) as usize];
+            let and_mask = &mask_bits[..mask_size];
+            let xor_mask = &mask_bits[mask_size..];
+
+            for y in 0..height {
+                for x in 0..width {
+                    let byte_idx = (y * row_bytes + x / 8) as usize;
+                    let bit_idx = 7 - (x % 8);
+                    let and_bit = (and_mask.get(byte_idx).copied().unwrap_or(0) >> bit_idx) & 1;
+                    let xor_bit = (xor_mask.get(byte_idx).copied().unwrap_or(0) >> bit_idx) & 1;
+
+                    let pixel_idx = ((y * width + x) * 4) as usize;
+                    // AND=0, XOR=0 -> Black
+                    // AND=0, XOR=1 -> White
+                    // AND=1, XOR=0 -> Transparent
+                    // AND=1, XOR=1 -> Inverted (render as semi-transparent)
+                    let (r, g, b, a) = match (and_bit, xor_bit) {
+                        (0, 0) => (0, 0, 0, 255),       // Black
+                        (0, 1) => (255, 255, 255, 255), // White
+                        (1, 0) => (0, 0, 0, 0),         // Transparent
+                        (1, 1) => (128, 128, 128, 128), // Inverted (show as gray)
+                        _ => (0, 0, 0, 0),
+                    };
+                    rgba[pixel_idx] = r;
+                    rgba[pixel_idx + 1] = g;
+                    rgba[pixel_idx + 2] = b;
+                    rgba[pixel_idx + 3] = a;
+                }
+            }
+
+            // Check if shape changed
+            let shape_id = CursorShape::calculate_id(&rgba);
+            if shape_id == self.last_cursor_shape_id {
+                return Ok(None);
+            }
+            self.last_cursor_shape_id = shape_id;
+
+            Ok(Some(CursorShape::new(width, height, hotspot_x, hotspot_y, rgba)))
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -443,12 +720,28 @@ impl ScreenCapture for DxgiCapture {
         }
     }
 
+    async fn capture_cursor(&mut self) -> Result<Option<CapturedCursor>> {
+        if !self.active {
+            return Err(Error::Screen("Capture not started".into()));
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            self.capture_cursor_win32()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Ok(None)
+        }
+    }
+
     async fn stop(&mut self) -> Result<()> {
         info!("Stopping DXGI capture");
 
         #[cfg(target_os = "windows")]
         {
             self.release_resources();
+            self.last_cursor_shape_id = 0;
         }
 
         self.active = false;
@@ -458,5 +751,14 @@ impl ScreenCapture for DxgiCapture {
 
     fn requires_privileges(&self) -> bool {
         false // DXGI doesn't need admin privileges
+    }
+
+    fn info(&self) -> super::BackendInfo {
+        super::BackendInfo {
+            name: self.name(),
+            requires_privileges: self.requires_privileges(),
+            supports_cursor: true, // Windows cursor capture always available
+            supports_region: false,
+        }
     }
 }

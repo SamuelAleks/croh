@@ -156,6 +156,14 @@ pub trait ScreenCapture: Send + Sync {
     /// This method should be called in a loop at the desired frame rate.
     async fn capture_frame(&mut self) -> Result<Option<CapturedFrame>>;
 
+    /// Capture the current cursor state.
+    ///
+    /// Returns cursor position, visibility, and optionally the shape if it changed.
+    /// Default implementation returns None (cursor capture not supported).
+    async fn capture_cursor(&mut self) -> Result<Option<CapturedCursor>> {
+        Ok(None)
+    }
+
     /// Stop capturing and release resources.
     async fn stop(&mut self) -> Result<()>;
 
@@ -184,4 +192,59 @@ pub struct BackendInfo {
     pub supports_cursor: bool,
     /// Whether region capture is supported (vs full display)
     pub supports_region: bool,
+}
+
+// ==================== Cursor Types ====================
+
+/// Captured cursor information.
+#[derive(Debug, Clone)]
+pub struct CapturedCursor {
+    /// X position in screen coordinates
+    pub x: i32,
+    /// Y position in screen coordinates
+    pub y: i32,
+    /// Whether cursor is visible
+    pub visible: bool,
+    /// Cursor shape (only if changed or first capture)
+    pub shape: Option<CursorShape>,
+}
+
+/// Cursor shape/image.
+#[derive(Debug, Clone)]
+pub struct CursorShape {
+    /// Unique ID for this shape (based on content hash)
+    pub shape_id: u64,
+    /// Cursor width in pixels
+    pub width: u32,
+    /// Cursor height in pixels
+    pub height: u32,
+    /// X hotspot (click point within image)
+    pub hotspot_x: u32,
+    /// Y hotspot (click point within image)
+    pub hotspot_y: u32,
+    /// RGBA pixel data (width * height * 4 bytes)
+    pub data: Vec<u8>,
+}
+
+impl CursorShape {
+    /// Calculate a hash-based ID from the cursor data.
+    pub fn calculate_id(data: &[u8]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        data.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Create a new cursor shape with auto-calculated ID.
+    pub fn new(width: u32, height: u32, hotspot_x: u32, hotspot_y: u32, data: Vec<u8>) -> Self {
+        let shape_id = Self::calculate_id(&data);
+        Self {
+            shape_id,
+            width,
+            height,
+            hotspot_x,
+            hotspot_y,
+            data,
+        }
+    }
 }

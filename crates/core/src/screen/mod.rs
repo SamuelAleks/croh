@@ -62,6 +62,7 @@
 //! ```
 
 mod adaptive;
+mod cursor;
 mod decoder;
 mod encoder;
 mod events;
@@ -97,6 +98,7 @@ mod windows_input;
 
 // Re-export public types
 pub use adaptive::*;
+pub use cursor::*;
 pub use decoder::*;
 pub use encoder::*;
 pub use events::*;

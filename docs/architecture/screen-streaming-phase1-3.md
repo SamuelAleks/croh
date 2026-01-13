@@ -7,7 +7,7 @@ Detailed implementation architecture for time sync, adaptive streaming, cursor c
 | Phase | Focus | Key Deliverables | Status |
 |-------|-------|------------------|--------|
 | 1 | Latency & Sync | Clock sync, frame dropping, adaptive bitrate | **IMPLEMENTED** |
-| 2 | Cursor | Cursor capture, transmission, client rendering | Planned |
+| 2 | Cursor | Cursor capture, transmission, client rendering | **IMPLEMENTED** |
 | 3 | Viewer UX | Settings UI, statistics overlay, preferences | Planned |
 
 ---
@@ -358,9 +358,259 @@ impl ScreenViewer {
 
 ## Phase 2: Cursor Capture and Transmission
 
-**Status: Planned**
+**Status: IMPLEMENTED**
 
-See original architecture document for detailed design.
+### 2.1 Protocol Messages
+
+**File:** `crates/core/src/iroh/protocol.rs`
+
+```rust
+/// Cursor pixel format
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum CursorFormat {
+    #[default]
+    Rgba32,      // 32-bit RGBA (most common)
+    Monochrome,  // 1-bit with AND/XOR masks
+    MaskedColor, // Color with transparency mask
+}
+
+/// Cursor shape data for transmission
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CursorShape {
+    pub shape_id: u64,    // Unique ID for caching
+    pub width: u32,
+    pub height: u32,
+    pub hotspot_x: u32,
+    pub hotspot_y: u32,
+    pub format: CursorFormat,
+    #[serde(with = "serde_bytes")]
+    pub data: Vec<u8>,    // RGBA pixel data
+}
+
+/// Cursor update sent to viewer
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CursorUpdate {
+    pub x: i32,           // Screen coordinates
+    pub y: i32,
+    pub visible: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shape: Option<CursorShape>,  // Only sent when shape changes
+}
+
+// In ControlMessage enum:
+ScreenCursorUpdate {
+    stream_id: String,
+    cursor: CursorUpdate,
+},
+```
+
+---
+
+### 2.2 Backend Types
+
+**File:** `crates/core/src/screen/types.rs`
+
+```rust
+/// Captured cursor information from backend
+#[derive(Debug, Clone)]
+pub struct CapturedCursor {
+    pub x: i32,
+    pub y: i32,
+    pub visible: bool,
+    pub shape: Option<CursorShape>,
+}
+
+/// Cursor shape data (backend format)
+#[derive(Debug, Clone)]
+pub struct CursorShape {
+    pub shape_id: u64,    // Hash of cursor data for deduplication
+    pub width: u32,
+    pub height: u32,
+    pub hotspot_x: u32,
+    pub hotspot_y: u32,
+    pub data: Vec<u8>,    // RGBA pixel data
+}
+
+// Added to ScreenCapture trait:
+#[async_trait]
+pub trait ScreenCapture: Send + Sync {
+    // ... existing methods ...
+
+    /// Capture cursor state (position and optionally shape).
+    /// Default implementation returns None (cursor capture not supported).
+    async fn capture_cursor(&mut self) -> Result<Option<CapturedCursor>> {
+        Ok(None)
+    }
+}
+```
+
+---
+
+### 2.3 X11 Cursor Capture
+
+**File:** `crates/core/src/screen/x11.rs`
+
+Uses XFixes extension for hardware cursor capture.
+
+```rust
+impl X11Capture {
+    /// Capture cursor using XFixes extension
+    fn capture_cursor_xfixes(&mut self) -> Result<Option<CapturedCursor>> {
+        // 1. Get cursor image via xfixes_get_cursor_image()
+        // 2. Convert ARGB (X11 format) to RGBA
+        // 3. Calculate shape_id from cursor serial
+        // 4. Return CapturedCursor with position and shape
+    }
+}
+```
+
+**Key Implementation Details:**
+- Uses `x11rb::protocol::xfixes` extension
+- Converts X11 ARGB format to standard RGBA
+- Shape ID derived from cursor serial for efficient caching
+- Handles cursor outside display bounds gracefully
+
+**Dependencies Added:**
+```toml
+# In Cargo.toml
+x11rb = { version = "0.13", features = ["shm", "randr", "xfixes"] }
+```
+
+---
+
+### 2.4 Windows Cursor Capture
+
+**File:** `crates/core/src/screen/dxgi.rs`
+
+Uses Win32 API for cursor capture.
+
+```rust
+impl DxgiCapture {
+    /// Capture cursor using Win32 API
+    fn capture_cursor_win32(&mut self) -> Result<Option<CapturedCursor>> {
+        // 1. GetCursorInfo() for position and visibility
+        // 2. CopyIcon() + GetIconInfo() for cursor image
+        // 3. GetDIBits() to extract pixel data
+        // 4. Handle both color and monochrome cursors
+    }
+
+    /// Extract RGBA data from color cursor
+    fn extract_color_cursor(&self, ...) -> Option<Vec<u8>>;
+
+    /// Extract RGBA data from monochrome cursor (AND/XOR masks)
+    fn extract_mono_cursor(&self, ...) -> Option<Vec<u8>>;
+}
+```
+
+**Key Implementation Details:**
+- Handles both 32-bit color cursors and monochrome (1-bit) cursors
+- Monochrome cursors use AND/XOR mask logic for proper rendering
+- Coordinates adjusted relative to captured display
+- Shape ID based on HCURSOR handle for caching
+
+---
+
+### 2.5 Client-Side Cursor Renderer
+
+**File:** `crates/core/src/screen/cursor.rs`
+
+```rust
+/// Maximum cached cursor shapes
+const MAX_CACHED_SHAPES: usize = 32;
+
+/// Client-side cursor renderer with alpha blending
+pub struct CursorRenderer {
+    position: (i32, i32),
+    visible: bool,
+    current_shape_id: u64,
+    shape_cache: HashMap<u64, CachedShape>,
+    shape_order: Vec<u64>,  // LRU order
+}
+
+struct CachedShape {
+    width: u32,
+    height: u32,
+    hotspot_x: u32,
+    hotspot_y: u32,
+    data: Vec<u8>,  // RGBA
+}
+
+impl CursorRenderer {
+    pub fn new() -> Self;
+
+    /// Update cursor from network message
+    pub fn update(&mut self, update: &CursorUpdate);
+
+    /// Render cursor onto RGBA frame buffer
+    pub fn render_on_frame(&self, frame: &mut [u8], width: u32, height: u32);
+
+    /// Query methods
+    pub fn position(&self) -> (i32, i32);
+    pub fn is_visible(&self) -> bool;
+    pub fn set_visible(&mut self, visible: bool);
+    pub fn clear_cache(&mut self);
+    pub fn cached_shape_count(&self) -> usize;
+}
+```
+
+**Rendering Algorithm:**
+1. Look up current shape in cache
+2. Calculate render position (subtract hotspot)
+3. For each cursor pixel:
+   - Skip if fully transparent (alpha = 0)
+   - If fully opaque (alpha = 255): direct copy
+   - Otherwise: alpha blend with destination
+4. Handle clipping at frame boundaries
+
+**Alpha Blending Formula:**
+```rust
+// For partial transparency
+let alpha = src_a as u16;
+let inv_alpha = 255 - alpha;
+dst_r = ((src_r * alpha + dst_r * inv_alpha) / 255) as u8;
+// Same for G, B channels
+```
+
+---
+
+### 2.6 Usage Flow
+
+1. **Host-side Capture:**
+   - Call `capture.capture_cursor()` alongside frame capture
+   - Compare `shape_id` with previous to detect shape changes
+   - Only include `CursorShape` in update when changed
+
+2. **Transmission:**
+   - Send `ScreenCursorUpdate` message with `CursorUpdate`
+   - Shape data only sent when cursor changes (efficient bandwidth)
+   - Position updates sent at capture rate
+
+3. **Client-side Rendering:**
+   - `CursorRenderer::update()` processes incoming updates
+   - Cache stores shapes by `shape_id` (LRU eviction at 32 entries)
+   - `render_on_frame()` composites cursor onto decoded frame
+
+4. **Bandwidth Optimization:**
+   - Shape ID caching prevents redundant data transmission
+   - Only position/visibility sent when shape unchanged
+   - Typical cursor shape: ~1-4KB (32x32 RGBA)
+
+---
+
+### 2.7 Testing
+
+```bash
+# Run cursor tests
+cargo test -p croh-core --lib -- cursor
+
+# Tests included:
+# - test_cursor_renderer_creation
+# - test_cursor_update
+# - test_cursor_render
+# - test_cache_eviction
+```
+
+All 4 cursor tests pass.
 
 ---
 
@@ -377,10 +627,11 @@ See original architecture document for detailed design.
 ```
 crates/core/src/screen/
 ├── mod.rs                  # Module exports (updated)
-├── adaptive.rs             # NEW: AdaptiveBitrate, PacketLossTracker, FrameSyncState
-├── time_sync.rs            # NEW: ClockSync
+├── adaptive.rs             # Phase 1: AdaptiveBitrate, PacketLossTracker, FrameSyncState
+├── time_sync.rs            # Phase 1: ClockSync
+├── cursor.rs               # Phase 2: CursorRenderer (client-side rendering)
 ├── viewer.rs               # MODIFIED: Integrated new components
-├── types.rs                # Existing
+├── types.rs                # MODIFIED: Added CapturedCursor, CursorShape, capture_cursor()
 ├── session.rs              # Existing
 ├── events.rs               # Existing
 ├── manager.rs              # Existing
@@ -389,11 +640,11 @@ crates/core/src/screen/
 ├── input.rs                # Existing
 ├── portal.rs               # Existing (Linux)
 ├── drm.rs                  # Existing (Linux)
-├── x11.rs                  # Existing (Linux)
-└── dxgi.rs                 # Existing (Windows)
+├── x11.rs                  # MODIFIED: Added XFixes cursor capture
+└── dxgi.rs                 # MODIFIED: Added Win32 cursor capture (Windows)
 
 crates/core/src/iroh/
-├── protocol.rs             # MODIFIED: Added TimeSyncRequest/Response, enhanced ScreenFrameAck
+├── protocol.rs             # MODIFIED: Added TimeSyncRequest/Response, ScreenCursorUpdate, cursor types
 └── transfer.rs             # MODIFIED: Added clock sync to stream_screen_from_peer(), ClockSynced event
 
 crates/gui/src/
@@ -405,11 +656,17 @@ crates/gui/src/
 ## Testing
 
 ```bash
-# Run Phase 1 tests
+# Run Phase 1 tests (time sync, adaptive streaming)
 cargo test -p croh-core --lib -- time_sync adaptive
+
+# Run Phase 2 tests (cursor rendering)
+cargo test -p croh-core --lib -- cursor
 
 # Run viewer tests
 cargo test -p croh-core --lib -- screen::viewer
+
+# Run all screen module tests
+cargo test -p croh-core --lib -- screen::
 ```
 
-All tests pass as of implementation.
+All 154 tests pass as of Phase 2 implementation (150 original + 4 cursor tests).

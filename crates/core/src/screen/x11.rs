@@ -17,13 +17,14 @@
 //! - May work on XWayland but with limitations
 //! - No cursor capture by default
 
-use super::{CapturedFrame, Display, PixelFormat, ScreenCapture};
+use super::{CapturedCursor, CapturedFrame, CursorShape, Display, PixelFormat, ScreenCapture};
 use crate::error::{Error, Result};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::randr::{self, ConnectionExt as RandrExt};
 use x11rb::protocol::shm::{self, ConnectionExt as ShmExt};
+use x11rb::protocol::xfixes::{self, ConnectionExt as XfixesExt};
 use x11rb::protocol::xproto::{self, ImageFormat, Screen};
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as WrapperConnectionExt;
@@ -57,6 +58,10 @@ pub struct X11Capture {
     capture_y: i32,
     /// Depth of the display
     depth: u8,
+    /// Whether XFixes extension is available for cursor capture
+    xfixes_available: bool,
+    /// Last captured cursor shape ID (to detect changes)
+    last_cursor_shape_id: u64,
 }
 
 // Safety: X11Capture manages shared memory safely
@@ -115,6 +120,8 @@ impl X11Capture {
             capture_x: 0,
             capture_y: 0,
             depth: 24,
+            xfixes_available: false,
+            last_cursor_shape_id: 0,
         })
     }
 
@@ -148,10 +155,35 @@ impl X11Capture {
         let root = screen.root;
         let depth = screen.root_depth;
 
+        // Check for XFixes extension (needed for cursor capture)
+        let xfixes_available = if let Ok(Some(xfixes_info)) =
+            conn.extension_information(xfixes::X11_EXTENSION_NAME)
+        {
+            debug!("XFixes extension opcode: {}", xfixes_info.major_opcode);
+            // Initialize XFixes extension
+            if let Ok(version_cookie) = conn.xfixes_query_version(5, 0) {
+                if let Ok(version) = version_cookie.reply() {
+                    info!(
+                        "XFixes version {}.{} (cursor capture available)",
+                        version.major_version, version.minor_version
+                    );
+                    version.major_version >= 2 // XFixes 2.0+ has GetCursorImage
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            debug!("XFixes extension not available");
+            false
+        };
+
         self.conn = Some(Arc::new(conn));
         self.root = Some(root);
         self.screen = Some(screen);
         self.depth = depth;
+        self.xfixes_available = xfixes_available;
 
         // Enumerate displays using RandR
         self.enumerate_displays()?;
@@ -440,6 +472,77 @@ impl X11Capture {
             dmabuf_fd: None,
         })
     }
+
+    /// Capture cursor using XFixes extension.
+    fn capture_cursor_xfixes(&mut self) -> Result<Option<CapturedCursor>> {
+        if !self.xfixes_available {
+            return Ok(None);
+        }
+
+        let conn = self
+            .conn
+            .as_ref()
+            .ok_or_else(|| Error::Screen("Not connected to X server".into()))?;
+
+        // Get cursor image and position using XFixes
+        let cursor_image = conn
+            .xfixes_get_cursor_image()
+            .map_err(|e| Error::Screen(format!("Failed to request cursor image: {:?}", e)))?
+            .reply()
+            .map_err(|e| Error::Screen(format!("Failed to get cursor image reply: {:?}", e)))?;
+
+        // Calculate screen-relative position (subtract capture area offset)
+        let x = cursor_image.x as i32 - self.capture_x;
+        let y = cursor_image.y as i32 - self.capture_y;
+
+        // Check if cursor is within the capture area
+        let visible = x >= 0
+            && y >= 0
+            && x < self.capture_width as i32
+            && y < self.capture_height as i32;
+
+        // XFixes returns ARGB pixels as u32 array, convert to RGBA bytes
+        let width = cursor_image.width as u32;
+        let height = cursor_image.height as u32;
+
+        // Convert cursor_image.cursor_image (Vec<u32> in ARGB format) to RGBA bytes
+        let mut rgba_data = Vec::with_capacity((width * height * 4) as usize);
+        for pixel in &cursor_image.cursor_image {
+            // ARGB -> RGBA
+            let a = ((pixel >> 24) & 0xFF) as u8;
+            let r = ((pixel >> 16) & 0xFF) as u8;
+            let g = ((pixel >> 8) & 0xFF) as u8;
+            let b = (pixel & 0xFF) as u8;
+            rgba_data.push(r);
+            rgba_data.push(g);
+            rgba_data.push(b);
+            rgba_data.push(a);
+        }
+
+        // Calculate shape ID based on cursor data
+        let shape_id = CursorShape::calculate_id(&rgba_data);
+
+        // Only include shape if it changed
+        let shape = if shape_id != self.last_cursor_shape_id {
+            self.last_cursor_shape_id = shape_id;
+            Some(CursorShape::new(
+                width,
+                height,
+                cursor_image.xhot as u32,
+                cursor_image.yhot as u32,
+                rgba_data,
+            ))
+        } else {
+            None
+        };
+
+        Ok(Some(CapturedCursor {
+            x,
+            y,
+            visible,
+            shape,
+        }))
+    }
 }
 
 #[async_trait::async_trait]
@@ -499,15 +602,32 @@ impl ScreenCapture for X11Capture {
         Ok(Some(frame))
     }
 
+    async fn capture_cursor(&mut self) -> Result<Option<CapturedCursor>> {
+        if !self.active {
+            return Err(Error::Screen("Capture not started".into()));
+        }
+        self.capture_cursor_xfixes()
+    }
+
     async fn stop(&mut self) -> Result<()> {
         info!("Stopping X11 capture");
         self.cleanup_shm();
         self.active = false;
         self.current_display = None;
+        self.last_cursor_shape_id = 0;
         Ok(())
     }
 
     fn requires_privileges(&self) -> bool {
         false // X11 capture doesn't need special privileges
+    }
+
+    fn info(&self) -> super::BackendInfo {
+        super::BackendInfo {
+            name: self.name(),
+            requires_privileges: self.requires_privileges(),
+            supports_cursor: self.xfixes_available,
+            supports_region: false,
+        }
     }
 }
