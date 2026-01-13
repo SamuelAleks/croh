@@ -32,11 +32,14 @@ impl IrohEndpoint {
     pub async fn new(identity: Identity) -> Result<Self> {
         let secret_key = identity.secret_key().clone();
 
-        // Use Google DNS (8.8.8.8) as the resolver to avoid issues with broken
-        // system DNS configurations (especially on Windows where DNS can be
-        // intercepted by VPNs, security software, or corporate proxies).
+        // On Windows, use Google DNS (8.8.8.8) to avoid issues with broken system DNS
+        // configurations (DNS can be intercepted by VPNs, Hyper-V, security software,
+        // or corporate proxies). On other platforms, use the system DNS resolver.
+        #[cfg(windows)]
         let dns_resolver =
             DnsResolver::with_nameserver(SocketAddr::from(([8, 8, 8, 8], 53)));
+        #[cfg(not(windows))]
+        let dns_resolver = DnsResolver::new();
 
         let endpoint = Endpoint::builder()
             .secret_key(secret_key)
