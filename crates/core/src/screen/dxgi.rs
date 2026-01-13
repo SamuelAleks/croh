@@ -21,11 +21,10 @@ use super::{CapturedCursor, CapturedFrame, CursorShape, Display, PixelFormat, Sc
 #[cfg(target_os = "windows")]
 use crate::error::{Error, Result};
 #[cfg(target_os = "windows")]
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 #[cfg(target_os = "windows")]
 use windows::{
     core::Interface,
-    Win32::Foundation::POINT,
     Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE,
     Win32::Graphics::Direct3D11::{
         D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
@@ -304,7 +303,7 @@ impl DxgiCapture {
                 ..Default::default()
             };
 
-            if !GetCursorInfo(&mut cursor_info).as_bool() {
+            if GetCursorInfo(&mut cursor_info).is_err() {
                 return Ok(None);
             }
 
@@ -320,8 +319,8 @@ impl DxgiCapture {
                 && x < self.capture_width as i32
                 && y < self.capture_height as i32;
 
-            // Get cursor shape
-            let shape = if visible && cursor_info.hCursor.0 != 0 {
+            // Get cursor shape - check if cursor handle is valid
+            let shape = if visible && !cursor_info.hCursor.is_invalid() {
                 self.get_cursor_shape(cursor_info.hCursor)?
             } else {
                 None
@@ -348,8 +347,8 @@ impl DxgiCapture {
                 .map_err(|e| Error::Screen(format!("Failed to copy cursor: {:?}", e)))?;
 
             let mut icon_info = ICONINFO::default();
-            if !GetIconInfo(hicon, &mut icon_info).as_bool() {
-                DestroyIcon(hicon).ok();
+            if GetIconInfo(hicon, &mut icon_info).is_err() {
+                let _ = DestroyIcon(hicon);
                 return Ok(None);
             }
 
@@ -357,10 +356,10 @@ impl DxgiCapture {
             let hbm_color = icon_info.hbmColor;
             let hbm_mask = icon_info.hbmMask;
 
-            let result = if hbm_color.0 != 0 {
+            let result = if !hbm_color.is_invalid() {
                 // Color cursor
                 self.extract_color_cursor(hbm_color, icon_info.xHotspot, icon_info.yHotspot)
-            } else if hbm_mask.0 != 0 {
+            } else if !hbm_mask.is_invalid() {
                 // Monochrome cursor (mask only)
                 self.extract_mono_cursor(hbm_mask, icon_info.xHotspot, icon_info.yHotspot)
             } else {
@@ -368,13 +367,13 @@ impl DxgiCapture {
             };
 
             // Cleanup
-            if hbm_color.0 != 0 {
-                DeleteObject(hbm_color).ok();
+            if !hbm_color.is_invalid() {
+                let _ = DeleteObject(hbm_color);
             }
-            if hbm_mask.0 != 0 {
-                DeleteObject(hbm_mask).ok();
+            if !hbm_mask.is_invalid() {
+                let _ = DeleteObject(hbm_mask);
             }
-            DestroyIcon(hicon).ok();
+            let _ = DestroyIcon(hicon);
 
             result
         }
@@ -448,7 +447,7 @@ impl DxgiCapture {
 
             // Cleanup
             SelectObject(hdc, old_bmp);
-            DeleteDC(hdc).ok();
+            let _ = DeleteDC(hdc);
 
             if result == 0 {
                 return Ok(None);
