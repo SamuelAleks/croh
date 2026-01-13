@@ -27,8 +27,8 @@ use tokio::sync::{oneshot, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    AppLogic, AppSettings, BrowseEntry, ChatMessageItem, MainWindow, NetworkItem, NetworkMember,
-    PeerItem, SelectedFile, SessionStats, TransferItem,
+    ui_update::invoke_ui_update, AppLogic, AppSettings, BrowseEntry, ChatMessageItem, MainWindow,
+    NetworkItem, NetworkMember, PeerItem, SelectedFile, SessionStats, TransferItem,
 };
 
 /// Connection status for a peer.
@@ -391,20 +391,17 @@ impl App {
                     let status_snapshot: HashMap<String, PeerConnectionStatus> = status_map.clone();
                     drop(status_map);
 
-                    let window_weak_ui = window_weak.clone();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(window) = window_weak_ui.upgrade() {
-                            let logic = window.global::<AppLogic>();
-                            let model = logic.get_peers();
+                    invoke_ui_update(&window_weak, "peer_status_ping", move |window| {
+                        let logic = window.global::<AppLogic>();
+                        let model = logic.get_peers();
 
-                            // Update status for each peer in the model
-                            for i in 0..model.row_count() {
-                                if let Some(mut peer) = model.row_data(i) {
-                                    let id = peer.id.to_string();
-                                    if let Some(status) = status_snapshot.get(&id) {
-                                        apply_status_to_peer_item(&mut peer, status);
-                                        model.set_row_data(i, peer);
-                                    }
+                        // Update status for each peer in the model
+                        for i in 0..model.row_count() {
+                            if let Some(mut peer) = model.row_data(i) {
+                                let id = peer.id.to_string();
+                                if let Some(status) = status_snapshot.get(&id) {
+                                    apply_status_to_peer_item(&mut peer, status);
+                                    model.set_row_data(i, peer);
                                 }
                             }
                         }
@@ -483,12 +480,9 @@ impl App {
                             store.list().iter().map(trusted_peer_to_item).collect();
                         drop(store);
 
-                        let window_weak_ui = window_weak.clone();
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(window) = window_weak_ui.upgrade() {
-                                let logic = window.global::<AppLogic>();
-                                logic.set_peers(ModelRc::new(VecModel::from(peer_items)));
-                            }
+                        invoke_ui_update(&window_weak, "guest_cleanup", move |window| {
+                            let logic = window.global::<AppLogic>();
+                            logic.set_peers(ModelRc::new(VecModel::from(peer_items)));
                         });
                     }
                 }
@@ -547,80 +541,126 @@ impl App {
                     }
                 };
 
-                // Create the shared endpoint (used by all Iroh operations)
-                let endpoint = match IrohEndpoint::new(our_identity).await {
-                    Ok(ep) => ep,
-                    Err(e) => {
-                        error!("Failed to create shared Iroh endpoint: {}", e);
-                        return;
-                    }
-                };
+                // Outer retry loop for endpoint recovery
+                let max_endpoint_retries = 3;
+                let mut endpoint_retry_count = 0;
 
-                // Store the endpoint for use by other operations (trust, push, pull)
-                {
-                    let mut ep_guard = shared_endpoint.write().await;
-                    *ep_guard = Some(endpoint.clone());
-                }
-
-                info!("Background listener started, waiting for incoming connections...");
-
-                // Spawn relay status monitoring task
-                {
-                    let endpoint = endpoint.clone();
-                    let window_weak = window_weak.clone();
-                    let shutdown = shutdown.clone();
-                    tokio::spawn(async move {
-                        let mut last_status = String::new();
-                        loop {
-                            if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
-                                break;
-                            }
-
-                            // Check relay status
-                            let (status, url) = match endpoint.relay_url() {
-                                Some(url) => ("connected".to_string(), url.to_string()),
-                                None => ("disconnected".to_string(), String::new()),
-                            };
-
-                            // Only update UI if status changed
-                            if status != last_status {
-                                last_status = status.clone();
-                                let window_weak = window_weak.clone();
-                                let url_clone = url.clone();
-                                let _ = slint::invoke_from_event_loop(move || {
-                                    if let Some(window) = window_weak.upgrade() {
-                                        window.global::<AppLogic>().set_relay_status(SharedString::from(&status));
-                                        window.global::<AppLogic>().set_relay_url(SharedString::from(&url_clone));
-                                    }
-                                });
-                            }
-
-                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                        }
-                    });
-                }
-
-                // Accept connections in a loop
-                loop {
+                'endpoint_retry: loop {
                     if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
-                        info!("Background listener shutting down");
+                        info!("Background listener shutting down (before endpoint creation)");
                         break;
                     }
 
-                    // Accept with timeout so we can check shutdown flag
-                    let accept_result = tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
-                        endpoint.accept()
-                    ).await;
-
-                    let mut conn = match accept_result {
-                        Ok(Ok(conn)) => conn,
-                        Ok(Err(e)) => {
-                            warn!("Accept error in background listener: {}", e);
-                            continue;
+                    // Create the shared endpoint (used by all Iroh operations)
+                    let endpoint = match IrohEndpoint::new(our_identity.clone()).await {
+                        Ok(ep) => ep,
+                        Err(e) => {
+                            error!("Failed to create shared Iroh endpoint: {}", e);
+                            endpoint_retry_count += 1;
+                            if endpoint_retry_count >= max_endpoint_retries {
+                                error!("Max endpoint creation retries ({}) exceeded, giving up", max_endpoint_retries);
+                                break;
+                            }
+                            warn!("Retrying endpoint creation in 5 seconds (attempt {}/{})", endpoint_retry_count + 1, max_endpoint_retries);
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            continue 'endpoint_retry;
                         }
-                        Err(_) => {
-                            // Timeout, check shutdown flag and continue
+                    };
+
+                    // Reset retry count on successful creation
+                    endpoint_retry_count = 0;
+
+                    // Store the endpoint for use by other operations (trust, push, pull)
+                    {
+                        let mut ep_guard = shared_endpoint.write().await;
+                        *ep_guard = Some(endpoint.clone());
+                    }
+
+                    info!("Background listener started, waiting for incoming connections...");
+
+                    // Spawn relay status monitoring task (will be recreated on endpoint recovery)
+                    let relay_monitor_shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    {
+                        let endpoint = endpoint.clone();
+                        let window_weak = window_weak.clone();
+                        let shutdown = shutdown.clone();
+                        let relay_shutdown = relay_monitor_shutdown.clone();
+                        tokio::spawn(async move {
+                            let mut last_status = String::new();
+                            loop {
+                                if shutdown.load(std::sync::atomic::Ordering::Relaxed) || relay_shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                                    break;
+                                }
+
+                                // Check relay status
+                                let (status, url) = match endpoint.relay_url() {
+                                    Some(url) => ("connected".to_string(), url.to_string()),
+                                    None => ("disconnected".to_string(), String::new()),
+                                };
+
+                                // Only update UI if status changed
+                                if status != last_status {
+                                    last_status = status.clone();
+                                    let url_clone = url.clone();
+                                    invoke_ui_update(&window_weak, "relay_status", move |window| {
+                                        window.global::<AppLogic>().set_relay_status(SharedString::from(&status));
+                                        window.global::<AppLogic>().set_relay_url(SharedString::from(&url_clone));
+                                    });
+                                }
+
+                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            }
+                        });
+                    }
+
+                    // Accept connections in a loop
+                    let mut consecutive_errors: u32 = 0;
+                    let mut endpoint_died = false;
+                    loop {
+                        if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                            info!("Background listener shutting down");
+                            break;
+                        }
+
+                        // Accept with timeout so we can check shutdown flag
+                        let accept_result = tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            endpoint.accept()
+                        ).await;
+
+                        let mut conn = match accept_result {
+                            Ok(Ok(conn)) => {
+                                // Reset error count on successful accept
+                                consecutive_errors = 0;
+                                conn
+                            }
+                            Ok(Err(e)) => {
+                                // Check if the endpoint has been closed
+                                if endpoint.is_closed() {
+                                    info!("Background listener: endpoint closed unexpectedly");
+                                    endpoint_died = true;
+                                    break;
+                                }
+                                consecutive_errors += 1;
+                                // If we get many consecutive errors, the endpoint might be broken
+                                if consecutive_errors >= 10 {
+                                    error!("Background listener: too many consecutive errors ({})", consecutive_errors);
+                                    endpoint_died = true;
+                                    break;
+                                }
+                                warn!("Accept error in background listener: {}", e);
+                                // Small delay to prevent tight error loop
+                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                continue;
+                            }
+                            Err(_) => {
+                                // Timeout, check shutdown flag and continue
+                                // Also check if endpoint was closed during timeout
+                                if endpoint.is_closed() {
+                                    info!("Background listener: endpoint closed unexpectedly");
+                                    endpoint_died = true;
+                                    break;
+                                }
                             continue;
                         }
                     };
@@ -2036,9 +2076,30 @@ impl App {
                             warn!("Unexpected message type from {}: {:?}", remote_id, other);
                         }
                     }
-                }
+                    } // end inner accept loop
 
-                let _ = endpoint.close().await;
+                    // Stop the relay monitor for this endpoint
+                    relay_monitor_shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+
+                    // Close the current endpoint
+                    let _ = endpoint.close().await;
+
+                    // If endpoint died and we haven't hit retry limit, try to recreate it
+                    if endpoint_died && !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                        endpoint_retry_count += 1;
+                        if endpoint_retry_count >= max_endpoint_retries {
+                            error!("Max endpoint recovery retries ({}) exceeded, giving up", max_endpoint_retries);
+                            break 'endpoint_retry;
+                        }
+                        warn!("Endpoint died, attempting recovery in 3 seconds (attempt {}/{})", endpoint_retry_count, max_endpoint_retries);
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                        continue 'endpoint_retry;
+                    }
+
+                    // Normal shutdown
+                    break 'endpoint_retry;
+                } // end outer endpoint_retry loop
+
                 info!("Background listener closed");
             });
         });
@@ -2120,38 +2181,36 @@ impl App {
                 drop(config_guard);
 
                 // Update UI on main thread
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(window) = window_weak.upgrade() {
-                        let settings = AppSettings {
-                            download_dir: SharedString::from(download_dir),
-                            default_relay: SharedString::from(default_relay),
-                            theme: SharedString::from(theme),
-                            croc_path: SharedString::from(croc_path),
-                            croc_found,
-                            device_nickname: SharedString::from(device_nickname),
-                            device_hostname: SharedString::from(device_hostname),
-                            hash_algorithm: SharedString::from(hash_algorithm),
-                            curve: SharedString::from(curve),
-                            throttle: SharedString::from(throttle),
-                            no_local,
-                            browse_show_hidden,
-                            browse_show_protected,
-                            browse_exclude_patterns: SharedString::from(browse_exclude_patterns),
-                            dnd_mode: SharedString::from(dnd_mode),
-                            dnd_message: SharedString::from(dnd_message),
-                            show_session_stats,
-                            keep_completed_transfers,
-                            security_posture: SharedString::from(security_posture),
-                            relay_preference: SharedString::from(relay_preference),
-                            screen_streaming_enabled,
-                            screen_allow_input,
-                            viewer_quality: SharedString::from(viewer_quality),
-                            viewer_show_stats,
-                            viewer_auto_input,
-                            viewer_scale_mode: SharedString::from(viewer_scale_mode),
-                        };
-                        window.global::<AppLogic>().set_settings(settings);
-                    }
+                invoke_ui_update(&window_weak, "settings_load", move |window| {
+                    let settings = AppSettings {
+                        download_dir: SharedString::from(download_dir),
+                        default_relay: SharedString::from(default_relay),
+                        theme: SharedString::from(theme),
+                        croc_path: SharedString::from(croc_path),
+                        croc_found,
+                        device_nickname: SharedString::from(device_nickname),
+                        device_hostname: SharedString::from(device_hostname),
+                        hash_algorithm: SharedString::from(hash_algorithm),
+                        curve: SharedString::from(curve),
+                        throttle: SharedString::from(throttle),
+                        no_local,
+                        browse_show_hidden,
+                        browse_show_protected,
+                        browse_exclude_patterns: SharedString::from(browse_exclude_patterns),
+                        dnd_mode: SharedString::from(dnd_mode),
+                        dnd_message: SharedString::from(dnd_message),
+                        show_session_stats,
+                        keep_completed_transfers,
+                        security_posture: SharedString::from(security_posture),
+                        relay_preference: SharedString::from(relay_preference),
+                        screen_streaming_enabled,
+                        screen_allow_input,
+                        viewer_quality: SharedString::from(viewer_quality),
+                        viewer_show_stats,
+                        viewer_auto_input,
+                        viewer_scale_mode: SharedString::from(viewer_scale_mode),
+                    };
+                    window.global::<AppLogic>().set_settings(settings);
                 });
             });
         });
@@ -2213,12 +2272,10 @@ impl App {
                         info!("Identity loaded");
 
                         // Update UI with endpoint ID
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(window) = window_weak.upgrade() {
-                                window
-                                    .global::<AppLogic>()
-                                    .set_endpoint_id(SharedString::from(display_id));
-                            }
+                        invoke_ui_update(&window_weak, "endpoint_id", move |window| {
+                            window
+                                .global::<AppLogic>()
+                                .set_endpoint_id(SharedString::from(display_id));
                         });
                     }
                     Err(e) => {
@@ -8587,26 +8644,20 @@ async fn update_transfers_ui(window_weak: &Weak<MainWindow>, manager: &TransferM
         })
         .count() as i32;
 
-    let window_weak = window_weak.clone();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(window) = window_weak.upgrade() {
-            let logic = window.global::<AppLogic>();
-            logic.set_transfers(ModelRc::new(VecModel::from(items)));
-            logic.set_active_transfer_count(active_count);
-        }
+    invoke_ui_update(window_weak, "transfers_update", move |window| {
+        let logic = window.global::<AppLogic>();
+        logic.set_transfers(ModelRc::new(VecModel::from(items)));
+        logic.set_active_transfer_count(active_count);
     });
 }
 
 /// Update the status bar.
 fn update_status(window_weak: &Weak<MainWindow>, status: &str) {
-    let window_weak = window_weak.clone();
     let status = status.to_string();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(window) = window_weak.upgrade() {
-            window
-                .global::<AppLogic>()
-                .set_app_status(SharedString::from(status));
-        }
+    invoke_ui_update(window_weak, "status_update", move |window| {
+        window
+            .global::<AppLogic>()
+            .set_app_status(SharedString::from(status));
     });
 }
 

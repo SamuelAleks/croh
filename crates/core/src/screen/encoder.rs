@@ -148,9 +148,12 @@ impl FrameEncoder for RawEncoder {
 /// - Screenshots and single frames
 ///
 /// Uses the `png` crate with configurable compression level.
+/// Performance optimization: reuses RGBA buffer across frames.
 pub struct PngEncoder {
     quality: ScreenQuality,
     compression_level: png::Compression,
+    /// Reusable RGBA conversion buffer
+    rgba_buf: Vec<u8>,
 }
 
 impl PngEncoder {
@@ -159,6 +162,7 @@ impl PngEncoder {
         Self {
             quality: ScreenQuality::default(),
             compression_level: png::Compression::Fast,
+            rgba_buf: Vec::new(),
         }
     }
 
@@ -193,9 +197,9 @@ impl FrameEncoder for PngEncoder {
     fn encode(&mut self, frame: &CapturedFrame) -> Result<EncodedFrame> {
         let start = Instant::now();
 
-        // Convert to RGBA
-        let rgba_data = frame.to_rgba();
-        let original_size = rgba_data.len();
+        // Convert to RGBA using reusable buffer
+        frame.to_rgba_into(&mut self.rgba_buf);
+        let original_size = self.rgba_buf.len();
 
         // Encode to PNG
         let mut png_data = Vec::with_capacity(original_size / 4); // Rough estimate
@@ -211,7 +215,7 @@ impl FrameEncoder for PngEncoder {
                 .map_err(|e| Error::Screen(format!("PNG header error: {}", e)))?;
 
             writer
-                .write_image_data(&rgba_data)
+                .write_image_data(&self.rgba_buf)
                 .map_err(|e| Error::Screen(format!("PNG encode error: {}", e)))?;
         }
 
@@ -242,9 +246,20 @@ impl FrameEncoder for PngEncoder {
 /// - Screen streaming with good compression ratio
 /// - Fast encoding/decoding
 /// - Better than PNG for repeated content
+///
+/// Performance optimizations:
+/// - Reuses header buffer across frames to reduce allocations
+/// - Reuses RGBA conversion buffer to avoid allocation per frame
+/// - Pre-allocates output buffer based on expected compression ratio
 pub struct ZstdEncoder {
     quality: ScreenQuality,
     compression_level: i32,
+    /// Reusable header buffer (12 bytes: magic + width + height)
+    header_buf: Vec<u8>,
+    /// Reusable RGBA conversion buffer
+    rgba_buf: Vec<u8>,
+    /// Last frame size for pre-allocation hints
+    last_output_size: usize,
 }
 
 impl ZstdEncoder {
@@ -253,6 +268,9 @@ impl ZstdEncoder {
         let mut encoder = Self {
             quality: ScreenQuality::default(),
             compression_level: 1, // Default fast
+            header_buf: Vec::with_capacity(12),
+            rgba_buf: Vec::new(),
+            last_output_size: 0,
         };
         encoder.update_compression_level();
         encoder
@@ -287,23 +305,35 @@ impl FrameEncoder for ZstdEncoder {
     fn encode(&mut self, frame: &CapturedFrame) -> Result<EncodedFrame> {
         let start = Instant::now();
 
-        // Convert to RGBA
-        let rgba_data = frame.to_rgba();
-        let original_size = rgba_data.len();
+        // Convert to RGBA using reusable buffer
+        frame.to_rgba_into(&mut self.rgba_buf);
+        let original_size = self.rgba_buf.len();
 
-        // Prepend a simple header: magic + width + height
-        let mut header = Vec::with_capacity(12);
-        header.extend_from_slice(b"ZRGB"); // Magic bytes
-        header.extend_from_slice(&frame.width.to_le_bytes());
-        header.extend_from_slice(&frame.height.to_le_bytes());
+        // Reuse header buffer: magic + width + height
+        self.header_buf.clear();
+        self.header_buf.extend_from_slice(b"ZRGB"); // Magic bytes
+        self.header_buf.extend_from_slice(&frame.width.to_le_bytes());
+        self.header_buf.extend_from_slice(&frame.height.to_le_bytes());
 
         // Compress with zstd
-        let compressed = zstd::encode_all(&rgba_data[..], self.compression_level)
+        let compressed = zstd::encode_all(&self.rgba_buf[..], self.compression_level)
             .map_err(|e| Error::Screen(format!("Zstd encode error: {}", e)))?;
 
-        // Combine header and compressed data
-        let mut data = header;
+        // Pre-allocate output buffer based on previous frame size if available,
+        // otherwise estimate based on header + compressed size
+        let estimated_size = if self.last_output_size > 0 {
+            self.last_output_size
+        } else {
+            12 + compressed.len()
+        };
+
+        // Combine header and compressed data with pre-allocation
+        let mut data = Vec::with_capacity(estimated_size);
+        data.extend_from_slice(&self.header_buf);
         data.extend(compressed);
+
+        // Update hint for next frame
+        self.last_output_size = data.len();
 
         Ok(EncodedFrame {
             data,

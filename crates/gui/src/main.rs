@@ -5,6 +5,7 @@ use croh_core::Config;
 use slint::{ComponentHandle, LogicalSize, Timer, TimerMode, WindowSize};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tracing::{error, info};
 use tracing_subscriber::fmt::format::Writer;
@@ -14,6 +15,7 @@ use tracing_subscriber::EnvFilter;
 slint::include_modules!();
 
 mod app;
+mod ui_update;
 
 /// Custom time format that includes instance name prefix if CROH_INSTANCE_NAME is set.
 #[derive(Clone)]
@@ -87,11 +89,14 @@ fn main() -> Result<()> {
 
     // Set up debounced window size saver
     // Checks every 5000ms, saves 1 second after resizing stops
+    // Config I/O is done on a background thread to avoid blocking the UI
     let window_weak = window.as_weak();
     let last_size: Rc<RefCell<(u32, u32)>> = Rc::new(RefCell::new((initial_width, initial_height)));
     let last_change: Rc<RefCell<Option<Instant>>> = Rc::new(RefCell::new(None));
-    let saved_size: Rc<RefCell<(u32, u32)>> =
-        Rc::new(RefCell::new((initial_width, initial_height)));
+    let saved_size: Arc<Mutex<(u32, u32)>> =
+        Arc::new(Mutex::new((initial_width, initial_height)));
+    // Track if a save is already in progress to avoid overlapping saves
+    let save_in_progress: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
 
     let size_check_timer = Timer::default();
     size_check_timer.start(
@@ -101,6 +106,7 @@ fn main() -> Result<()> {
             let last_size = last_size.clone();
             let last_change = last_change.clone();
             let saved_size = saved_size.clone();
+            let save_in_progress = save_in_progress.clone();
             move || {
                 if let Some(window) = window_weak.upgrade() {
                     let current = window.window().size();
@@ -120,7 +126,7 @@ fn main() -> Result<()> {
                     // Check if we should save (size changed and stable for 1 second)
                     let should_save = {
                         let change_time = *last_change.borrow();
-                        let saved = *saved_size.borrow();
+                        let saved = *saved_size.lock().unwrap_or_else(|e| e.into_inner());
                         if let Some(ct) = change_time {
                             current_size != saved && ct.elapsed().as_secs() >= 1
                         } else {
@@ -129,14 +135,42 @@ fn main() -> Result<()> {
                     };
 
                     if should_save {
-                        // Save the new size
-                        if let Ok(mut config) = Config::load_with_env() {
-                            config.window_size.width = current_size.0;
-                            config.window_size.height = current_size.1;
-                            if config.save().is_ok() {
-                                *saved_size.borrow_mut() = current_size;
-                                *last_change.borrow_mut() = None;
+                        // Check if a save is already in progress
+                        let already_saving = {
+                            let guard = save_in_progress.lock().unwrap_or_else(|e| e.into_inner());
+                            *guard
+                        };
+
+                        if !already_saving {
+                            // Mark save as in progress
+                            {
+                                let mut guard =
+                                    save_in_progress.lock().unwrap_or_else(|e| e.into_inner());
+                                *guard = true;
                             }
+
+                            // Clear last_change now to prevent retriggering
+                            *last_change.borrow_mut() = None;
+
+                            // Spawn background thread for config I/O
+                            let saved_size = saved_size.clone();
+                            let save_in_progress = save_in_progress.clone();
+                            std::thread::spawn(move || {
+                                if let Ok(mut config) = Config::load_with_env() {
+                                    config.window_size.width = current_size.0;
+                                    config.window_size.height = current_size.1;
+                                    if config.save().is_ok() {
+                                        // Update saved_size on success
+                                        if let Ok(mut guard) = saved_size.lock() {
+                                            *guard = current_size;
+                                        }
+                                    }
+                                }
+                                // Clear save_in_progress flag
+                                if let Ok(mut guard) = save_in_progress.lock() {
+                                    *guard = false;
+                                }
+                            });
                         }
                     }
                 }

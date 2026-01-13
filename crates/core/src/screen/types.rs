@@ -73,6 +73,51 @@ impl CapturedFrame {
             }
         }
     }
+
+    /// Convert pixel data to RGBA format, returning a reference if already RGBA.
+    ///
+    /// This avoids allocation when the data is already in RGBA format.
+    pub fn to_rgba_cow(&self) -> std::borrow::Cow<'_, [u8]> {
+        match self.format {
+            PixelFormat::Rgba8 => std::borrow::Cow::Borrowed(&self.data),
+            _ => std::borrow::Cow::Owned(self.to_rgba()),
+        }
+    }
+
+    /// Convert pixel data to RGBA format into a pre-allocated buffer.
+    ///
+    /// This avoids allocation by reusing the provided buffer. The buffer
+    /// will be resized if necessary.
+    pub fn to_rgba_into(&self, buffer: &mut Vec<u8>) {
+        let required_size = self.expected_size();
+        buffer.clear();
+        buffer.reserve(required_size);
+
+        match self.format {
+            PixelFormat::Rgba8 => {
+                buffer.extend_from_slice(&self.data);
+            }
+            PixelFormat::Bgra8 => {
+                buffer.extend_from_slice(&self.data);
+                for chunk in buffer.chunks_exact_mut(4) {
+                    chunk.swap(0, 2);
+                }
+            }
+            PixelFormat::Rgbx8 => {
+                buffer.extend_from_slice(&self.data);
+                for chunk in buffer.chunks_exact_mut(4) {
+                    chunk[3] = 255;
+                }
+            }
+            PixelFormat::Bgrx8 => {
+                buffer.extend_from_slice(&self.data);
+                for chunk in buffer.chunks_exact_mut(4) {
+                    chunk.swap(0, 2);
+                    chunk[3] = 255;
+                }
+            }
+        }
+    }
 }
 
 /// Pixel format of captured frames.

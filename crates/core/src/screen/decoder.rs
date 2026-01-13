@@ -207,12 +207,21 @@ impl FrameDecoder for PngDecoder {
 }
 
 /// Zstd decoder - fast lossless decompression.
-pub struct ZstdDecoder;
+///
+/// Performance optimizations:
+/// - Reuses decompression buffer across frames
+/// - Pre-allocates based on expected frame size
+pub struct ZstdDecoder {
+    /// Reusable decompression buffer
+    decompress_buf: Vec<u8>,
+}
 
 impl ZstdDecoder {
     /// Create a new Zstd decoder.
     pub fn new() -> Self {
-        Self
+        Self {
+            decompress_buf: Vec::new(),
+        }
     }
 }
 
@@ -247,22 +256,33 @@ impl FrameDecoder for ZstdDecoder {
         let width = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
         let height = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
 
-        // Decompress
+        // Pre-allocate buffer for expected decompressed size
+        let expected_size = DecodedFrame::expected_size(width, height);
+        self.decompress_buf.clear();
+        self.decompress_buf.reserve(expected_size);
+
+        // Decompress using streaming decoder into our buffer
         let compressed = &data[12..];
-        let decompressed = zstd::decode_all(compressed)
+        let mut decoder = zstd::stream::Decoder::new(compressed)
+            .map_err(|e| Error::Screen(format!("Zstd decoder init error: {}", e)))?;
+
+        std::io::copy(&mut decoder, &mut self.decompress_buf)
             .map_err(|e| Error::Screen(format!("Zstd decode error: {}", e)))?;
 
-        let expected_size = DecodedFrame::expected_size(width, height);
-        if decompressed.len() != expected_size {
+        if self.decompress_buf.len() != expected_size {
             return Err(Error::Screen(format!(
                 "Zstd decompressed size mismatch: expected {}, got {}",
                 expected_size,
-                decompressed.len()
+                self.decompress_buf.len()
             )));
         }
 
+        // We need to return owned data, so swap with a new buffer
+        let mut result_data = Vec::with_capacity(expected_size);
+        std::mem::swap(&mut result_data, &mut self.decompress_buf);
+
         Ok(DecodedFrame {
-            data: decompressed,
+            data: result_data,
             width,
             height,
             decode_time_us: start.elapsed().as_micros() as u64,

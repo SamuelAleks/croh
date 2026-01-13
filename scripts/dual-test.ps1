@@ -226,7 +226,7 @@ if ($Clean) {
     }
 }
 
-# Create directories for secondary instances
+# Create directories and config files for secondary instances (if not already created by -Clean)
 for ($i = 1; $i -lt $n; $i++) {
     $name = $INSTANCE_NAMES[$i]
     $name_lower = $name.ToLower()
@@ -238,6 +238,45 @@ for ($i = 1; $i -lt $n; $i++) {
     New-Item -ItemType Directory -Force -Path $instance_config_dir | Out-Null
     New-Item -ItemType Directory -Force -Path $instance_data_dir | Out-Null
     New-Item -ItemType Directory -Force -Path $instance_downloads_dir | Out-Null
+
+    # Create config file if it doesn't exist (e.g., first run without -Clean)
+    $config_path = Join-Path $instance_config_dir "config.json"
+    if (-not (Test-Path $config_path)) {
+        Write-Host "Creating config for $name..."
+        $config = @{
+            download_dir = $instance_downloads_dir
+            default_relay = $null
+            theme = "system"
+            croc_path = $null
+            device_nickname = $name
+            default_hash = $null
+            default_curve = $null
+            throttle = $null
+            no_local = $false
+            window_size = @{ width = 700; height = 600 }
+            browse_settings = @{
+                show_hidden = $false
+                show_protected = $false
+                exclude_patterns = @("node_modules", ".git", "__pycache__", "*.tmp", "*.swp")
+                allowed_paths = @()
+            }
+            dnd_mode = "off"
+            dnd_message = $null
+            show_session_stats = $false
+            keep_completed_transfers = $true
+            security_posture = "balanced"
+            guest_policy = @{
+                default_duration_hours = 72
+                max_duration_hours = 168
+                allow_extensions = $true
+                max_extensions = 3
+                allow_promotion_requests = $true
+                auto_accept_guest_pushes = $true
+            }
+        }
+        $config_json = $config | ConvertTo-Json -Depth 10
+        $config_json | Out-File -FilePath $config_path -Encoding UTF8
+    }
 }
 
 Write-Host ""
@@ -263,15 +302,26 @@ Write-Host ""
 $PROCESSES = @()
 
 # Launch primary instance (default config)
+# IMPORTANT: Clear env vars that might be set from previous runs
 Write-Host "Launching $($INSTANCE_NAMES[0]) (log level: $LOG_LEVEL)..."
 $env:CROH_INSTANCE_NAME = $INSTANCE_NAMES[0]
 $env:RUST_LOG = $LOG_LEVEL
+# Clear secondary instance env vars so primary uses defaults
+Remove-Item Env:CROH_CONFIG_DIR -ErrorAction SilentlyContinue
+Remove-Item Env:CROH_DATA_DIR -ErrorAction SilentlyContinue
+Remove-Item Env:CROH_DOWNLOAD_DIR -ErrorAction SilentlyContinue
+
 $process = Start-Process -FilePath $BINARY -PassThru -WindowStyle Normal
+if ($null -eq $process) {
+    Write-Error "Failed to launch primary instance ($($INSTANCE_NAMES[0]))"
+    exit 1
+}
 $PROCESSES += $process
+Write-Host "  PID: $($process.Id)"
 
 # Launch secondary instances with isolated configs
 for ($i = 1; $i -lt $n; $i++) {
-    Start-Sleep -Milliseconds 500  # Small delay to avoid window overlap
+    Start-Sleep -Milliseconds 750  # Delay to avoid window overlap
 
     $name = $INSTANCE_NAMES[$i]
     $name_lower = $name.ToLower()
@@ -289,7 +339,19 @@ for ($i = 1; $i -lt $n; $i++) {
     $env:RUST_LOG = $LOG_LEVEL
 
     $process = Start-Process -FilePath $BINARY -PassThru -WindowStyle Normal
+    if ($null -eq $process) {
+        Write-Error "Failed to launch instance $name"
+        continue
+    }
     $PROCESSES += $process
+    Write-Host "  PID: $($process.Id)"
+}
+
+# Verify we launched the expected number of instances
+Write-Host ""
+Write-Host "Successfully launched $($PROCESSES.Count) of $n instance(s)"
+if ($PROCESSES.Count -lt $n) {
+    Write-Warning "Some instances failed to launch!"
 }
 
 # Cleanup function
@@ -298,18 +360,25 @@ function Cleanup {
     Write-Host "Stopping $($PROCESSES.Count) instance(s)..."
     foreach ($process in $PROCESSES) {
         if (-not $process.HasExited) {
+            Write-Host "  Stopping PID $($process.Id)..."
             Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
         }
     }
+    # Clear environment variables
+    Remove-Item Env:CROH_INSTANCE_NAME -ErrorAction SilentlyContinue
+    Remove-Item Env:CROH_CONFIG_DIR -ErrorAction SilentlyContinue
+    Remove-Item Env:CROH_DATA_DIR -ErrorAction SilentlyContinue
+    Remove-Item Env:CROH_DOWNLOAD_DIR -ErrorAction SilentlyContinue
     Write-Host "Done."
 }
 
-# Register cleanup on Ctrl+C
-$null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action { Cleanup }
+# Register cleanup on Ctrl+C (note: this may not fire in all cases, but finally block will)
+$null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action { Cleanup } -ErrorAction SilentlyContinue
 
 try {
     # Wait for any instance to exit
     Write-Host "Waiting for instances to finish (Ctrl+C to stop all)..."
+    Write-Host ""
     while ($true) {
         $running = $false
         foreach ($process in $PROCESSES) {
