@@ -156,28 +156,27 @@ impl X11Capture {
         let depth = screen.root_depth;
 
         // Check for XFixes extension (needed for cursor capture)
-        let xfixes_available = if let Ok(Some(xfixes_info)) =
-            conn.extension_information(xfixes::X11_EXTENSION_NAME)
-        {
-            debug!("XFixes extension opcode: {}", xfixes_info.major_opcode);
-            // Initialize XFixes extension
-            if let Ok(version_cookie) = conn.xfixes_query_version(5, 0) {
-                if let Ok(version) = version_cookie.reply() {
-                    info!(
-                        "XFixes version {}.{} (cursor capture available)",
-                        version.major_version, version.minor_version
-                    );
-                    version.major_version >= 2 // XFixes 2.0+ has GetCursorImage
+        let xfixes_available =
+            if let Ok(Some(xfixes_info)) = conn.extension_information(xfixes::X11_EXTENSION_NAME) {
+                debug!("XFixes extension opcode: {}", xfixes_info.major_opcode);
+                // Initialize XFixes extension
+                if let Ok(version_cookie) = conn.xfixes_query_version(5, 0) {
+                    if let Ok(version) = version_cookie.reply() {
+                        info!(
+                            "XFixes version {}.{} (cursor capture available)",
+                            version.major_version, version.minor_version
+                        );
+                        version.major_version >= 2 // XFixes 2.0+ has GetCursorImage
+                    } else {
+                        false
+                    }
                 } else {
                     false
                 }
             } else {
+                debug!("XFixes extension not available");
                 false
-            }
-        } else {
-            debug!("XFixes extension not available");
-            false
-        };
+            };
 
         self.conn = Some(Arc::new(conn));
         self.root = Some(root);
@@ -496,10 +495,8 @@ impl X11Capture {
         let y = cursor_image.y as i32 - self.capture_y;
 
         // Check if cursor is within the capture area
-        let visible = x >= 0
-            && y >= 0
-            && x < self.capture_width as i32
-            && y < self.capture_height as i32;
+        let visible =
+            x >= 0 && y >= 0 && x < self.capture_width as i32 && y < self.capture_height as i32;
 
         // XFixes returns ARGB pixels as u32 array, convert to RGBA bytes
         let width = cursor_image.width as u32;

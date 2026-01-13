@@ -609,7 +609,6 @@ pub enum ControlMessage {
     },
 
     // ==================== Screen Streaming Messages ====================
-
     /// Time synchronization request (viewer → host).
     ///
     /// Used to synchronize clocks between viewer and host for accurate

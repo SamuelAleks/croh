@@ -211,7 +211,12 @@ mod tests {
     #[test]
     fn test_compositor_detection_gnome() {
         with_env_vars(
-            &["XDG_CURRENT_DESKTOP", "DESKTOP_SESSION", "SWAYSOCK", "HYPRLAND_INSTANCE_SIGNATURE"],
+            &[
+                "XDG_CURRENT_DESKTOP",
+                "DESKTOP_SESSION",
+                "SWAYSOCK",
+                "HYPRLAND_INSTANCE_SIGNATURE",
+            ],
             || {
                 env::remove_var("SWAYSOCK");
                 env::remove_var("HYPRLAND_INSTANCE_SIGNATURE");
@@ -229,7 +234,12 @@ mod tests {
     #[test]
     fn test_compositor_detection_kde() {
         with_env_vars(
-            &["XDG_CURRENT_DESKTOP", "DESKTOP_SESSION", "SWAYSOCK", "HYPRLAND_INSTANCE_SIGNATURE"],
+            &[
+                "XDG_CURRENT_DESKTOP",
+                "DESKTOP_SESSION",
+                "SWAYSOCK",
+                "HYPRLAND_INSTANCE_SIGNATURE",
+            ],
             || {
                 env::remove_var("SWAYSOCK");
                 env::remove_var("HYPRLAND_INSTANCE_SIGNATURE");
@@ -247,7 +257,12 @@ mod tests {
     #[test]
     fn test_compositor_detection_sway() {
         with_env_vars(
-            &["XDG_CURRENT_DESKTOP", "DESKTOP_SESSION", "SWAYSOCK", "HYPRLAND_INSTANCE_SIGNATURE"],
+            &[
+                "XDG_CURRENT_DESKTOP",
+                "DESKTOP_SESSION",
+                "SWAYSOCK",
+                "HYPRLAND_INSTANCE_SIGNATURE",
+            ],
             || {
                 env::remove_var("HYPRLAND_INSTANCE_SIGNATURE");
                 env::remove_var("DESKTOP_SESSION");
@@ -268,7 +283,12 @@ mod tests {
     #[test]
     fn test_compositor_detection_hyprland() {
         with_env_vars(
-            &["XDG_CURRENT_DESKTOP", "DESKTOP_SESSION", "SWAYSOCK", "HYPRLAND_INSTANCE_SIGNATURE"],
+            &[
+                "XDG_CURRENT_DESKTOP",
+                "DESKTOP_SESSION",
+                "SWAYSOCK",
+                "HYPRLAND_INSTANCE_SIGNATURE",
+            ],
             || {
                 env::remove_var("XDG_CURRENT_DESKTOP");
                 env::remove_var("DESKTOP_SESSION");

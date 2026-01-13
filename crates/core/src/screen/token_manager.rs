@@ -229,7 +229,10 @@ mod tests {
         tm.update_token(Some("token".into())).unwrap();
         // Note: actual result depends on compositor detection
         // Most compositors support restore tokens
-        assert!(tm.can_likely_restore_silently() || !tm.compositor_capabilities().supports_restore_tokens);
+        assert!(
+            tm.can_likely_restore_silently()
+                || !tm.compositor_capabilities().supports_restore_tokens
+        );
     }
 
     #[test]

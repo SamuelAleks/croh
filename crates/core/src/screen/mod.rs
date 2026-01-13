@@ -79,9 +79,9 @@ pub mod ffmpeg;
 
 // Wayland support modules (Linux only)
 #[cfg(target_os = "linux")]
-pub mod wayland;
-#[cfg(target_os = "linux")]
 pub mod token_manager;
+#[cfg(target_os = "linux")]
+pub mod wayland;
 
 // Backend modules - conditionally compiled
 #[cfg(target_os = "linux")]
@@ -232,7 +232,9 @@ pub async fn create_capture_backend_with_token_manager(
         CaptureBackend::Auto => auto_detect_backend_with_token_manager(token_manager).await,
         CaptureBackend::Portal => {
             if let Some(tm) = token_manager {
-                Ok(Box::new(portal::PortalCapture::new_with_token_manager(tm).await?))
+                Ok(Box::new(
+                    portal::PortalCapture::new_with_token_manager(tm).await?,
+                ))
             } else {
                 let token = settings.portal_restore_token.clone();
                 Ok(Box::new(portal::PortalCapture::new(token).await?))

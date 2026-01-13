@@ -3,25 +3,57 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - 'misc/**'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - 'misc/**'
+
+# Cancel in-progress runs when a new run is triggered on the same branch/PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
-  # Run clippy and rustfmt checks
-  lint:
-    name: Lint
+  # Fast formatting check - runs first and fast
+  fmt:
+    name: Format Check
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  # Clippy linting - needs dependencies but can run parallel to tests
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Install Linux dependencies
         run: |
@@ -29,19 +61,10 @@ jobs:
           sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libxkbcommon-dev libssl-dev libgtk-3-dev libpipewire-0.3-dev
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-lint-
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+          shared-key: "clippy"
 
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -50,6 +73,7 @@ jobs:
   test-core:
     name: Test Core (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -67,16 +91,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libpipewire-0.3-dev
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-core-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-core-
+          shared-key: "test-${{ runner.os }}"
 
       - name: Build core library
         run: cargo build -p croh-core
@@ -87,14 +105,22 @@ jobs:
       - name: Run integration tests
         run: cargo test -p croh-core --test iroh_integration
 
-  # Build and test GUI application
+  # Build GUI application (release only for artifacts)
   build-gui:
     name: Build GUI (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            artifact-name: croh-linux
+            artifact-path: target/release/croh
+          - os: windows-latest
+            artifact-name: croh-windows
+            artifact-path: target/release/croh.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -109,45 +135,36 @@ jobs:
           sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libxkbcommon-dev libssl-dev libgtk-3-dev libpipewire-0.3-dev
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-gui-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-gui-
-
-      - name: Build GUI (debug)
-        run: cargo build -p croh
+          shared-key: "build-${{ runner.os }}"
 
       - name: Build GUI (release)
         run: cargo build -p croh --release
 
-      - name: Upload GUI binary (Linux)
-        if: runner.os == 'Linux'
+      - name: Upload GUI binary
         uses: actions/upload-artifact@v4
         with:
-          name: croh-linux
-          path: target/release/croh
+          name: ${{ matrix.artifact-name }}
+          path: ${{ matrix.artifact-path }}
 
-      - name: Upload GUI binary (Windows)
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: croh-windows
-          path: target/release/croh.exe
-
-  # Build daemon
+  # Build daemon (release only for artifacts)
   build-daemon:
     name: Build Daemon (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            artifact-name: croh-daemon-linux
+            artifact-path: target/release/croh-daemon
+          - os: windows-latest
+            artifact-name: croh-daemon-windows
+            artifact-path: target/release/croh-daemon.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -161,41 +178,25 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libpipewire-0.3-dev
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-daemon-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-daemon-
-
-      - name: Build daemon (debug)
-        run: cargo build -p croh-daemon
+          shared-key: "build-${{ runner.os }}"
 
       - name: Build daemon (release)
         run: cargo build -p croh-daemon --release
 
-      - name: Upload daemon binary (Linux)
-        if: runner.os == 'Linux'
+      - name: Upload daemon binary
         uses: actions/upload-artifact@v4
         with:
-          name: croh-daemon-linux
-          path: target/release/croh-daemon
+          name: ${{ matrix.artifact-name }}
+          path: ${{ matrix.artifact-path }}
 
-      - name: Upload daemon binary (Windows)
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: croh-daemon-windows
-          path: target/release/croh-daemon.exe
-
-  # Run comprehensive tests with relay (optional, may be slower)
+  # Run comprehensive tests with relay
   test-relay:
     name: Test with Relay
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -207,16 +208,46 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libpipewire-0.3-dev
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-relay-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-relay-
+          shared-key: "test-Linux"
 
       - name: Run relay tests
         run: cargo test -p croh-core --features test-relay
+
+  # Summary job for branch protection rules
+  ci-success:
+    name: CI Success
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [fmt, clippy, test-core, build-gui, build-daemon, test-relay]
+    if: always()
+    steps:
+      - name: Check all jobs passed
+        run: |
+          if [[ "${{ needs.fmt.result }}" != "success" ]]; then
+            echo "Format check failed"
+            exit 1
+          fi
+          if [[ "${{ needs.clippy.result }}" != "success" ]]; then
+            echo "Clippy failed"
+            exit 1
+          fi
+          if [[ "${{ needs.test-core.result }}" != "success" ]]; then
+            echo "Core tests failed"
+            exit 1
+          fi
+          if [[ "${{ needs.build-gui.result }}" != "success" ]]; then
+            echo "GUI build failed"
+            exit 1
+          fi
+          if [[ "${{ needs.build-daemon.result }}" != "success" ]]; then
+            echo "Daemon build failed"
+            exit 1
+          fi
+          if [[ "${{ needs.test-relay.result }}" != "success" ]]; then
+            echo "Relay tests failed"
+            exit 1
+          fi
+          echo "All CI checks passed!"

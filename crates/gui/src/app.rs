@@ -3391,7 +3391,8 @@ impl App {
                         let viewer_quality = config_guard.viewer.quality.to_ui_string().to_string();
                         let viewer_show_stats = config_guard.viewer.show_stats_overlay;
                         let viewer_auto_input = config_guard.viewer.auto_enable_input;
-                        let viewer_scale_mode = config_guard.viewer.scale_mode.to_ui_string().to_string();
+                        let viewer_scale_mode =
+                            config_guard.viewer.scale_mode.to_ui_string().to_string();
                         let device_nickname =
                             config_guard.device_nickname.clone().unwrap_or_default();
                         let device_hostname = Config::get_hostname();

@@ -161,8 +161,7 @@ impl AdaptiveBitrate {
     /// Halves the current bitrate down to minimum.
     pub fn force_decrease(&mut self) -> u32 {
         let old = self.current_bitrate_kbps;
-        self.current_bitrate_kbps =
-            (self.current_bitrate_kbps / 2).max(self.min_bitrate_kbps);
+        self.current_bitrate_kbps = (self.current_bitrate_kbps / 2).max(self.min_bitrate_kbps);
         self.state = BitrateState::Decrease;
         self.frames_since_adjust = 0;
 
@@ -218,7 +217,8 @@ impl AdaptiveBitrate {
 
     /// Reset the controller state.
     pub fn reset(&mut self, initial_bitrate: u32) {
-        self.current_bitrate_kbps = initial_bitrate.clamp(self.min_bitrate_kbps, self.max_bitrate_kbps);
+        self.current_bitrate_kbps =
+            initial_bitrate.clamp(self.min_bitrate_kbps, self.max_bitrate_kbps);
         self.rtt_history.clear();
         self.loss_history.clear();
         self.state = BitrateState::Hold;
@@ -388,8 +388,8 @@ impl FrameSyncState {
             latency_window_size: 30,
             frames_behind: 0,
             catching_up: false,
-            quality_reduction_threshold: 10,  // Request reduction after 10 late frames
-            flush_threshold: 20,               // Flush after 20 late frames
+            quality_reduction_threshold: 10, // Request reduction after 10 late frames
+            flush_threshold: 20,             // Flush after 20 late frames
         }
     }
 

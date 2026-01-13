@@ -198,10 +198,7 @@ pub enum ViewerEvent {
         height: u32,
     },
     /// Frame was dropped (too old or decode error).
-    FrameDropped {
-        sequence: u64,
-        reason: String,
-    },
+    FrameDropped { sequence: u64, reason: String },
     /// Statistics updated.
     StatsUpdated(ViewerStats),
     /// Available displays received.
@@ -216,23 +213,16 @@ pub enum ViewerEvent {
     /// Stream ended.
     StreamEnded { reason: String },
     /// Clock synchronized with host.
-    ClockSynced {
-        offset_ms: i64,
-        rtt_ms: u32,
-    },
+    ClockSynced { offset_ms: i64, rtt_ms: u32 },
     /// Quality adjustment recommended (send to host).
     QualityAdjustmentNeeded {
         suggested_quality: ScreenQuality,
         reason: String,
     },
     /// Keyframe needed (send to host).
-    KeyframeNeeded {
-        reason: String,
-    },
+    KeyframeNeeded { reason: String },
     /// Bitrate adjustment recommended (send to host).
-    BitrateAdjustmentNeeded {
-        suggested_kbps: u32,
-    },
+    BitrateAdjustmentNeeded { suggested_kbps: u32 },
     /// Error occurred.
     Error(String),
 }
@@ -712,10 +702,12 @@ impl ScreenViewer {
             }
             FrameAction::RequestQualityReduction => {
                 let suggested = self.frame_sync.suggest_quality(self.current_quality);
-                let _ = self.event_tx.try_send(ViewerEvent::QualityAdjustmentNeeded {
-                    suggested_quality: suggested,
-                    reason: format!("Falling behind: {}ms latency", latency_ms),
-                });
+                let _ = self
+                    .event_tx
+                    .try_send(ViewerEvent::QualityAdjustmentNeeded {
+                        suggested_quality: suggested,
+                        reason: format!("Falling behind: {}ms latency", latency_ms),
+                    });
             }
             FrameAction::RequestKeyframeFlush => {
                 self.frame_buffer.clear();
@@ -732,9 +724,11 @@ impl ScreenViewer {
         if self.config.enable_adaptive_bitrate {
             let rtt = self.clock_sync.avg_rtt_ms();
             if let Some(new_bitrate) = self.adaptive_bitrate.update(rtt, packet_loss) {
-                let _ = self.event_tx.try_send(ViewerEvent::BitrateAdjustmentNeeded {
-                    suggested_kbps: new_bitrate,
-                });
+                let _ = self
+                    .event_tx
+                    .try_send(ViewerEvent::BitrateAdjustmentNeeded {
+                        suggested_kbps: new_bitrate,
+                    });
             }
         }
 
@@ -907,13 +901,10 @@ impl ScreenViewer {
         // Reset sync state
         self.clock_sync.reset();
         self.loss_tracker.reset();
-        self.adaptive_bitrate.reset(
-            (self.config.min_bitrate_kbps + self.config.max_bitrate_kbps) / 2,
-        );
-        self.frame_sync = FrameSyncState::new(
-            self.config.target_latency_ms,
-            self.config.max_latency_ms,
-        );
+        self.adaptive_bitrate
+            .reset((self.config.min_bitrate_kbps + self.config.max_bitrate_kbps) / 2);
+        self.frame_sync =
+            FrameSyncState::new(self.config.target_latency_ms, self.config.max_latency_ms);
         self.frames_dropped_latency = 0;
         self.latency_samples.clear();
 

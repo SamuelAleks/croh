@@ -488,19 +488,14 @@ impl PortalCapture {
         tracing::warn!("Session error: {}", error);
 
         // Check if this is a recoverable error
-        if error.contains("stream ended")
-            || error.contains("pipewire")
-            || error.contains("timeout")
+        if error.contains("stream ended") || error.contains("pipewire") || error.contains("timeout")
         {
             // Transient error - try to recover
             self.restore_failures = 0; // Don't penalize restore attempts
             return RecoveryAction::Retry;
         }
 
-        if error.contains("permission")
-            || error.contains("denied")
-            || error.contains("revoked")
-        {
+        if error.contains("permission") || error.contains("denied") || error.contains("revoked") {
             // Permission revoked - need new authorization
             if let Some(ref tm) = self.token_manager {
                 tm.invalidate_token();

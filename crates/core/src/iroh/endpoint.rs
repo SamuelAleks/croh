@@ -37,8 +37,7 @@ impl IrohEndpoint {
         // configurations (DNS can be intercepted by VPNs, Hyper-V, security software,
         // or corporate proxies). On other platforms, use the system DNS resolver.
         #[cfg(windows)]
-        let dns_resolver =
-            DnsResolver::with_nameserver(SocketAddr::from(([8, 8, 8, 8], 53)));
+        let dns_resolver = DnsResolver::with_nameserver(SocketAddr::from(([8, 8, 8, 8], 53)));
         #[cfg(not(windows))]
         let dns_resolver = DnsResolver::new();
 

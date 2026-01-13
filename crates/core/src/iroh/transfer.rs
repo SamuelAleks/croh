@@ -1161,12 +1161,9 @@ pub async fn stream_screen_from_peer(
         conn.send(&request).await?;
 
         // Wait for response with timeout
-        let response = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            conn.recv(),
-        )
-        .await
-        .map_err(|_| Error::Iroh("time sync timeout".to_string()))??;
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), conn.recv())
+            .await
+            .map_err(|_| Error::Iroh("time sync timeout".to_string()))??;
 
         match response {
             ControlMessage::TimeSyncResponse {

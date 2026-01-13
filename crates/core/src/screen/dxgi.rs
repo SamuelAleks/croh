@@ -314,10 +314,8 @@ impl DxgiCapture {
             let y = cursor_info.ptScreenPos.y - self.display_y;
 
             // Check if cursor is within the capture area
-            let in_bounds = x >= 0
-                && y >= 0
-                && x < self.capture_width as i32
-                && y < self.capture_height as i32;
+            let in_bounds =
+                x >= 0 && y >= 0 && x < self.capture_width as i32 && y < self.capture_height as i32;
 
             // Get cursor shape - check if cursor handle is valid
             let shape = if visible && !cursor_info.hCursor.is_invalid() {
@@ -465,7 +463,9 @@ impl DxgiCapture {
             }
             self.last_cursor_shape_id = shape_id;
 
-            Ok(Some(CursorShape::new(width, height, hotspot_x, hotspot_y, bits)))
+            Ok(Some(CursorShape::new(
+                width, height, hotspot_x, hotspot_y, bits,
+            )))
         }
     }
 
@@ -502,7 +502,11 @@ impl DxgiCapture {
             let mask_size = (row_bytes * height) as usize;
             let mut mask_bits = vec![0u8; mask_size * 2]; // AND + XOR masks
 
-            let bytes_read = GetBitmapBits(hbitmap, mask_bits.len() as i32, mask_bits.as_mut_ptr() as *mut _);
+            let bytes_read = GetBitmapBits(
+                hbitmap,
+                mask_bits.len() as i32,
+                mask_bits.as_mut_ptr() as *mut _,
+            );
             if bytes_read == 0 {
                 return Ok(None);
             }
@@ -545,7 +549,9 @@ impl DxgiCapture {
             }
             self.last_cursor_shape_id = shape_id;
 
-            Ok(Some(CursorShape::new(width, height, hotspot_x, hotspot_y, rgba)))
+            Ok(Some(CursorShape::new(
+                width, height, hotspot_x, hotspot_y, rgba,
+            )))
         }
     }
 
