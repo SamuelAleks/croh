@@ -361,6 +361,25 @@ pub struct ScreenStreamSettings {
     /// Note: Only used on Linux with the Portal capture backend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub portal_restore_token: Option<String>,
+
+    /// Whether to prefer unattended-capable backends.
+    ///
+    /// When true, backend selection will prioritize backends that can capture
+    /// without user interaction (DRM with CAP_SYS_ADMIN, or Portal with valid token).
+    #[serde(default)]
+    pub prefer_unattended: bool,
+
+    /// Last detected compositor name (for debugging).
+    ///
+    /// Automatically populated when using Portal capture on Wayland.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_compositor: Option<String>,
+
+    /// Last successful restore timestamp (Unix epoch, for debugging).
+    ///
+    /// Tracks when the last successful token-based restore occurred.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_restore_success: Option<i64>,
 }
 
 fn default_max_buffer_frames() -> u32 {
@@ -398,6 +417,9 @@ impl Default for ScreenStreamSettings {
             highlight_clicks: false,
             max_buffer_frames: 10,
             portal_restore_token: None,
+            prefer_unattended: false,
+            last_compositor: None,
+            last_restore_success: None,
         }
     }
 }

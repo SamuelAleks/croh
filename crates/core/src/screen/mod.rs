@@ -77,6 +77,12 @@ mod viewer;
 #[cfg(feature = "ffmpeg")]
 pub mod ffmpeg;
 
+// Wayland support modules (Linux only)
+#[cfg(target_os = "linux")]
+pub mod wayland;
+#[cfg(target_os = "linux")]
+pub mod token_manager;
+
 // Backend modules - conditionally compiled
 #[cfg(target_os = "linux")]
 mod drm;
@@ -109,8 +115,16 @@ pub use time_sync::*;
 pub use types::*;
 pub use viewer::*;
 
+// Re-export Portal types on Linux
+#[cfg(target_os = "linux")]
+pub use portal::{RecoveryAction, UnattendedStatus};
+
 use crate::config::{CaptureBackend, ScreenStreamSettings};
 use crate::error::{Error, Result};
+use std::sync::Arc;
+
+#[cfg(target_os = "linux")]
+use token_manager::TokenManager;
 
 /// Create the appropriate capture backend for the current platform and settings.
 ///
@@ -183,6 +197,136 @@ pub async fn create_capture_backend(
             }
         }
     }
+}
+
+/// Create a capture backend with token manager for persistent unattended access.
+///
+/// This is the preferred method for creating a Portal capture backend on Linux,
+/// as it automatically persists restore tokens to enable unattended access after
+/// the initial permission grant.
+///
+/// # Arguments
+///
+/// * `settings` - Screen stream settings including backend preference
+/// * `token_manager` - Token manager for persistent restore tokens (Linux only)
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use croh_core::screen::{create_capture_backend_with_token_manager, TokenManager};
+/// use croh_core::config::{Config, ScreenStreamSettings};
+/// use std::sync::{Arc, RwLock};
+///
+/// let config = Arc::new(RwLock::new(Config::load()?));
+/// let token_manager = Arc::new(TokenManager::new(config.clone()));
+/// let settings = ScreenStreamSettings::default();
+///
+/// let capture = create_capture_backend_with_token_manager(&settings, Some(token_manager)).await?;
+/// ```
+#[cfg(target_os = "linux")]
+pub async fn create_capture_backend_with_token_manager(
+    settings: &ScreenStreamSettings,
+    token_manager: Option<Arc<TokenManager>>,
+) -> Result<Box<dyn ScreenCapture>> {
+    match settings.capture_backend {
+        CaptureBackend::Auto => auto_detect_backend_with_token_manager(token_manager).await,
+        CaptureBackend::Portal => {
+            if let Some(tm) = token_manager {
+                Ok(Box::new(portal::PortalCapture::new_with_token_manager(tm).await?))
+            } else {
+                let token = settings.portal_restore_token.clone();
+                Ok(Box::new(portal::PortalCapture::new(token).await?))
+            }
+        }
+        // For other backends, fall back to standard creation
+        _ => create_capture_backend(settings).await,
+    }
+}
+
+/// Auto-detect backend with token manager support.
+#[cfg(target_os = "linux")]
+async fn auto_detect_backend_with_token_manager(
+    token_manager: Option<Arc<TokenManager>>,
+) -> Result<Box<dyn ScreenCapture>> {
+    // Try backends in order of preference
+
+    // 1. DRM/KMS (best, but needs CAP_SYS_ADMIN)
+    if drm::DrmCapture::is_available().await {
+        match drm::DrmCapture::new().await {
+            Ok(mut capture) => {
+                // Try to actually capture a frame to verify it works
+                let displays = capture.list_displays().await.unwrap_or_default();
+                if let Some(display) = displays.first() {
+                    if capture.start(&display.id).await.is_ok() {
+                        match capture.capture_frame().await {
+                            Ok(Some(_)) => {
+                                tracing::info!("Using DRM/KMS capture backend");
+                                return Ok(Box::new(capture));
+                            }
+                            Ok(None) => {
+                                tracing::debug!(
+                                    "DRM capture returned no frame, trying next backend"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::debug!(
+                                    "DRM capture failed test frame: {}, trying next backend",
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!("DRM capture not available: {}", e);
+            }
+        }
+    }
+
+    // 2. XDG Portal with token manager (Wayland - may need one-time user approval)
+    if portal::PortalCapture::is_available().await {
+        let capture_result = if let Some(tm) = token_manager {
+            let caps = tm.compositor_capabilities();
+            tracing::info!(
+                "Portal available on {} (has_token: {}, can_restore: {})",
+                caps.compositor.name(),
+                tm.has_token(),
+                tm.can_likely_restore_silently()
+            );
+            portal::PortalCapture::new_with_token_manager(tm).await
+        } else {
+            portal::PortalCapture::new(None).await
+        };
+
+        match capture_result {
+            Ok(capture) => {
+                tracing::info!("Using XDG Portal capture backend (Wayland)");
+                return Ok(Box::new(capture));
+            }
+            Err(e) => {
+                tracing::debug!("Portal capture not available: {}", e);
+            }
+        }
+    }
+
+    // 3. X11 SHM (if X11 session)
+    if x11::X11Capture::is_available().await {
+        match x11::X11Capture::new().await {
+            Ok(capture) => {
+                tracing::info!("Using X11 SHM capture backend");
+                return Ok(Box::new(capture));
+            }
+            Err(e) => {
+                tracing::debug!("X11 capture not available: {}", e);
+            }
+        }
+    }
+
+    // No backend available
+    Err(Error::Screen(
+        "No capture backend available. DRM requires CAP_SYS_ADMIN, Portal requires Wayland+xdg-desktop-portal, X11 requires X11 session.".into()
+    ))
 }
 
 /// Auto-detect the best available capture backend.

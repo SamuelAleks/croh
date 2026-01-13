@@ -40,7 +40,9 @@ use ashpd::desktop::PersistMode;
 use ashpd::enumflags2::BitFlags;
 
 use crate::error::{Error, Result};
+use crate::screen::token_manager::TokenManager;
 use crate::screen::types::{BackendInfo, CapturedFrame, Display, PixelFormat, ScreenCapture};
+use crate::screen::wayland::{CompositorCapabilities, WaylandCompositor};
 
 /// Portal session state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +77,32 @@ struct PipeWireFrame {
     timestamp: Instant,
 }
 
+/// Action to take after session error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryAction {
+    /// Retry with existing token
+    Retry,
+    /// Need user to grant permission again
+    ReauthorizeRequired,
+    /// User explicitly cancelled
+    UserCancelled,
+    /// Unrecoverable error
+    Fatal,
+}
+
+/// Status of unattended access capability.
+#[derive(Debug, Clone)]
+pub struct UnattendedStatus {
+    /// Whether unattended is currently possible
+    pub available: bool,
+    /// Human-readable explanation
+    pub message: String,
+    /// Action user can take to enable (if any)
+    pub action_hint: Option<String>,
+    /// Whether a dialog will be shown on next capture
+    pub dialog_expected: bool,
+}
+
 /// XDG Desktop Portal screen capture backend.
 ///
 /// Uses the ScreenCast portal interface for Wayland screen capture with
@@ -99,6 +127,14 @@ pub struct PortalCapture {
     /// Last captured frame dimensions
     frame_width: u32,
     frame_height: u32,
+    /// Token manager for persistent restore tokens (optional)
+    token_manager: Option<Arc<TokenManager>>,
+    /// Detected compositor
+    compositor: WaylandCompositor,
+    /// Whether last session used restore (no dialog shown)
+    last_session_was_silent: bool,
+    /// Number of consecutive restore failures
+    restore_failures: u32,
 }
 
 impl PortalCapture {
@@ -114,6 +150,8 @@ impl PortalCapture {
             ));
         }
 
+        let compositor = WaylandCompositor::detect();
+
         Ok(Self {
             state: SessionState::Created,
             restore_token,
@@ -125,6 +163,49 @@ impl PortalCapture {
             pipewire_thread: None,
             frame_width: 0,
             frame_height: 0,
+            token_manager: None,
+            compositor,
+            last_session_was_silent: false,
+            restore_failures: 0,
+        })
+    }
+
+    /// Create with token manager for persistent tokens.
+    ///
+    /// This constructor uses a TokenManager to automatically persist restore tokens
+    /// to the config file after each session.
+    pub async fn new_with_token_manager(token_manager: Arc<TokenManager>) -> Result<Self> {
+        if !Self::is_available().await {
+            return Err(Error::Screen(
+                "XDG Desktop Portal ScreenCast not available".into(),
+            ));
+        }
+
+        let compositor = WaylandCompositor::detect();
+        let caps = compositor.capabilities();
+
+        tracing::info!(
+            "Portal capture initializing on {} (restore_tokens: {}, unattended: {})",
+            compositor.name(),
+            caps.supports_restore_tokens,
+            caps.supports_unattended
+        );
+
+        Ok(Self {
+            state: SessionState::Created,
+            restore_token: token_manager.get_token(),
+            current_display: None,
+            displays: Vec::new(),
+            pipewire_node_id: None,
+            frame_receiver: None,
+            command_sender: None,
+            pipewire_thread: None,
+            frame_width: 0,
+            frame_height: 0,
+            token_manager: Some(token_manager),
+            compositor,
+            last_session_was_silent: false,
+            restore_failures: 0,
         })
     }
 
@@ -159,8 +240,37 @@ impl PortalCapture {
     }
 
     /// Create a portal session, start it, and get PipeWire stream info.
+    ///
+    /// This method implements smart restore handling:
+    /// - Attempts to use restore token if available
+    /// - Retries without token on failure (up to 2 failures)
+    /// - Saves new token via token manager if available
     async fn create_and_start_portal_session(&mut self) -> Result<(u32, OwnedFd)> {
-        tracing::info!("Creating Portal screencast session");
+        // Get token from manager if available, otherwise use stored token
+        let restore_token = if let Some(ref tm) = self.token_manager {
+            tm.get_token()
+        } else {
+            self.restore_token.clone()
+        };
+        let attempting_restore = restore_token.is_some();
+
+        tracing::info!(
+            "Creating Portal session (attempting_restore: {}, failures: {})",
+            attempting_restore,
+            self.restore_failures
+        );
+
+        // If we've failed to restore multiple times, clear token and force dialog
+        let use_token = if self.restore_failures >= 2 {
+            tracing::warn!("Multiple restore failures, clearing token and forcing dialog");
+            if let Some(ref tm) = self.token_manager {
+                tm.invalidate_token();
+            }
+            self.restore_token = None;
+            None
+        } else {
+            restore_token
+        };
 
         let screencast = Screencast::new()
             .await
@@ -171,7 +281,7 @@ impl PortalCapture {
             .await
             .map_err(|e| Error::Screen(format!("Failed to create Portal session: {}", e)))?;
 
-        let restore_token_ref = self.restore_token.as_deref();
+        let restore_token_ref = use_token.as_deref();
         tracing::debug!(
             "Selecting sources with restore_token: {}",
             restore_token_ref.is_some()
@@ -179,7 +289,8 @@ impl PortalCapture {
 
         let source_types: BitFlags<SourceType> = SourceType::Monitor.into();
 
-        screencast
+        // Handle select_sources failure (token may be invalid)
+        let select_result = screencast
             .select_sources(
                 &session,
                 CursorMode::Embedded,
@@ -188,8 +299,33 @@ impl PortalCapture {
                 restore_token_ref,
                 PersistMode::ExplicitlyRevoked,
             )
-            .await
-            .map_err(|e| Error::Screen(format!("Failed to select sources: {}", e)))?;
+            .await;
+
+        if let Err(e) = select_result {
+            if attempting_restore && self.restore_failures < 2 {
+                tracing::warn!("Restore failed ({}), will retry without token", e);
+                self.restore_failures += 1;
+                if let Some(ref tm) = self.token_manager {
+                    tm.invalidate_token();
+                }
+                self.restore_token = None;
+
+                // Retry without token
+                screencast
+                    .select_sources(
+                        &session,
+                        CursorMode::Embedded,
+                        source_types,
+                        false,
+                        None,
+                        PersistMode::ExplicitlyRevoked,
+                    )
+                    .await
+                    .map_err(|e| Error::Screen(format!("Failed to select sources: {}", e)))?;
+            } else {
+                return Err(Error::Screen(format!("Failed to select sources: {}", e)));
+            }
+        }
 
         tracing::info!("Starting Portal session...");
 
@@ -207,10 +343,24 @@ impl PortalCapture {
             .response()
             .map_err(|e| Error::Screen(format!("Portal start response error: {}", e)))?;
 
-        // Save restore token
+        // Success! Save new token immediately
         if let Some(token) = response.restore_token() {
             tracing::info!("Received new restore token from Portal");
-            self.restore_token = Some(token.to_string());
+            let token_str = token.to_string();
+            self.restore_token = Some(token_str.clone());
+
+            // Persist via token manager if available
+            if let Some(ref tm) = self.token_manager {
+                if let Err(e) = tm.update_token(Some(token_str)) {
+                    tracing::warn!("Failed to persist token: {}", e);
+                }
+            }
+
+            // Reset failure count on success
+            self.restore_failures = 0;
+
+            // Track if this was a silent restore (no user interaction)
+            self.last_session_was_silent = attempting_restore && self.restore_failures == 0;
         }
 
         // Get stream info
@@ -297,6 +447,127 @@ impl PortalCapture {
 
         self.frame_receiver = None;
         self.pipewire_node_id = None;
+    }
+
+    /// Check if the last session started silently (no user dialog).
+    pub fn was_silent_restore(&self) -> bool {
+        self.last_session_was_silent
+    }
+
+    /// Get compositor capabilities for UI hints.
+    pub fn compositor_capabilities(&self) -> CompositorCapabilities {
+        self.compositor.capabilities()
+    }
+
+    /// Get the detected compositor.
+    pub fn compositor(&self) -> WaylandCompositor {
+        self.compositor
+    }
+
+    /// Attempt to recover a broken session.
+    pub async fn recover_session(&mut self) -> Result<()> {
+        tracing::info!("Attempting session recovery");
+
+        // Stop existing PipeWire thread
+        self.stop_pipewire_thread();
+
+        // Clear session state
+        self.state = SessionState::Stopped;
+
+        // Try to restart - this will attempt restore first
+        let display_id = self
+            .current_display
+            .clone()
+            .unwrap_or_else(|| "portal-default".to_string());
+
+        self.start(&display_id).await
+    }
+
+    /// Handle session errors with smart recovery.
+    pub fn handle_session_error(&mut self, error: &str) -> RecoveryAction {
+        tracing::warn!("Session error: {}", error);
+
+        // Check if this is a recoverable error
+        if error.contains("stream ended")
+            || error.contains("pipewire")
+            || error.contains("timeout")
+        {
+            // Transient error - try to recover
+            self.restore_failures = 0; // Don't penalize restore attempts
+            return RecoveryAction::Retry;
+        }
+
+        if error.contains("permission")
+            || error.contains("denied")
+            || error.contains("revoked")
+        {
+            // Permission revoked - need new authorization
+            if let Some(ref tm) = self.token_manager {
+                tm.invalidate_token();
+            }
+            self.restore_token = None;
+            return RecoveryAction::ReauthorizeRequired;
+        }
+
+        if error.contains("cancelled") {
+            // User cancelled - don't auto-retry
+            return RecoveryAction::UserCancelled;
+        }
+
+        // Unknown error
+        RecoveryAction::Fatal
+    }
+
+    /// Get status of unattended access capability.
+    pub fn unattended_status(&self) -> UnattendedStatus {
+        let caps = self.compositor.capabilities();
+        let has_token = if let Some(ref tm) = self.token_manager {
+            tm.has_token()
+        } else {
+            self.restore_token.is_some()
+        };
+
+        if !caps.supports_restore_tokens {
+            return UnattendedStatus {
+                available: false,
+                message: format!(
+                    "{} doesn't support session restore tokens",
+                    caps.compositor.name()
+                ),
+                action_hint: Some("Consider using DRM backend with CAP_SYS_ADMIN".into()),
+                dialog_expected: true,
+            };
+        }
+
+        if !has_token {
+            return UnattendedStatus {
+                available: false,
+                message: "No restore token saved. Permission dialog will be shown.".into(),
+                action_hint: Some(
+                    "Grant permission once - subsequent sessions will be automatic.".into(),
+                ),
+                dialog_expected: true,
+            };
+        }
+
+        if self.restore_failures >= 2 {
+            return UnattendedStatus {
+                available: false,
+                message: "Restore token appears invalid. Re-authorization required.".into(),
+                action_hint: None,
+                dialog_expected: true,
+            };
+        }
+
+        UnattendedStatus {
+            available: true,
+            message: format!(
+                "Restore token available for {}. Should connect without dialog.",
+                caps.compositor.name()
+            ),
+            action_hint: None,
+            dialog_expected: false,
+        }
     }
 }
 
