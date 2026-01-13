@@ -117,6 +117,9 @@ pub struct FrameMetadata {
     pub is_keyframe: bool,
     /// Compressed frame size in bytes
     pub size: u32,
+    /// Cursor state at the time of frame capture (bundled with frame for sync)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<CursorUpdate>,
 }
 
 // ==================== Cursor Types ====================

@@ -1313,7 +1313,20 @@ pub async fn stream_screen_from_peer(
                         if let Err(e) = conn.recv_raw(&mut frame_data).await {
                             error!("Failed to receive frame data: {}", e);
                             let _ = event_tx.send(ScreenStreamEvent::Error(format!("frame receive error: {}", e))).await;
-                            continue;
+                            // Break on recv_raw error - stream is desynced, cannot recover
+                            let _ = event_tx.send(ScreenStreamEvent::Ended {
+                                stream_id: stream_id.clone(),
+                                reason: format!("frame receive error: {}", e),
+                            }).await;
+                            return Err(Error::Iroh(format!("frame receive error: {}", e)));
+                        }
+
+                        // Extract cursor from frame metadata if present
+                        if let Some(cursor) = metadata.cursor.clone() {
+                            let _ = event_tx.send(ScreenStreamEvent::CursorReceived {
+                                stream_id: frame_stream_id.clone(),
+                                cursor,
+                            }).await;
                         }
 
                         // Send frame to event channel
@@ -1569,7 +1582,30 @@ pub async fn handle_screen_stream_request(
                     }
                 };
 
-                // Send frame header - use capture timestamp for accurate latency measurement
+                // Capture cursor state to bundle with frame
+                let cursor_update = if let Ok(Some(cursor)) = capture.capture_cursor().await {
+                    // Convert backend CursorShape to protocol CursorShape
+                    let proto_shape = cursor.shape.map(|s| protocol::CursorShape {
+                        shape_id: s.shape_id,
+                        width: s.width,
+                        height: s.height,
+                        hotspot_x: s.hotspot_x,
+                        hotspot_y: s.hotspot_y,
+                        format: protocol::CursorFormat::Rgba32,
+                        data: s.data,
+                    });
+
+                    Some(CursorUpdate {
+                        x: cursor.x,
+                        y: cursor.y,
+                        visible: cursor.visible,
+                        shape: proto_shape,
+                    })
+                } else {
+                    None
+                };
+
+                // Send frame header with cursor bundled - use capture timestamp for accurate latency measurement
                 let metadata = FrameMetadata {
                     sequence,
                     width: encoded.width,
@@ -1578,6 +1614,7 @@ pub async fn handle_screen_stream_request(
                     compression: actual_compression,
                     is_keyframe: true, // All frames are keyframes for now
                     size: encoded.data.len() as u32,
+                    cursor: cursor_update,
                 };
 
                 let frame_msg = ControlMessage::ScreenFrame {
@@ -1594,37 +1631,6 @@ pub async fn handle_screen_stream_request(
                 if let Err(e) = conn.send_raw(&encoded.data).await {
                     info!("Connection closed during frame data send: {}", e);
                     break;
-                }
-
-                // Capture and send cursor update
-                if let Ok(Some(cursor)) = capture.capture_cursor().await {
-                    // Convert backend CursorShape to protocol CursorShape
-                    let proto_shape = cursor.shape.map(|s| protocol::CursorShape {
-                        shape_id: s.shape_id,
-                        width: s.width,
-                        height: s.height,
-                        hotspot_x: s.hotspot_x,
-                        hotspot_y: s.hotspot_y,
-                        format: protocol::CursorFormat::Rgba32,
-                        data: s.data,
-                    });
-
-                    let cursor_update = CursorUpdate {
-                        x: cursor.x,
-                        y: cursor.y,
-                        visible: cursor.visible,
-                        shape: proto_shape,
-                    };
-
-                    let cursor_msg = ControlMessage::ScreenCursorUpdate {
-                        stream_id: stream_id.clone(),
-                        cursor: cursor_update,
-                    };
-
-                    // Non-critical - don't break stream if cursor send fails
-                    if let Err(e) = conn.send(&cursor_msg).await {
-                        debug!("Failed to send cursor update: {}", e);
-                    }
                 }
 
                 sequence += 1;
