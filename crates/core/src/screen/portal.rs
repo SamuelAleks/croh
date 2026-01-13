@@ -129,7 +129,8 @@ pub struct PortalCapture {
     frame_height: u32,
     /// Token manager for persistent restore tokens (optional)
     token_manager: Option<Arc<TokenManager>>,
-    /// Detected compositor
+    /// Detected compositor (stored for future use)
+    #[allow(dead_code)]
     compositor: WaylandCompositor,
     /// Whether last session used restore (no dialog shown)
     last_session_was_silent: bool,
@@ -450,21 +451,25 @@ impl PortalCapture {
     }
 
     /// Check if the last session started silently (no user dialog).
+    #[allow(dead_code)]
     pub fn was_silent_restore(&self) -> bool {
         self.last_session_was_silent
     }
 
     /// Get compositor capabilities for UI hints.
+    #[allow(dead_code)]
     pub fn compositor_capabilities(&self) -> CompositorCapabilities {
         self.compositor.capabilities()
     }
 
     /// Get the detected compositor.
+    #[allow(dead_code)]
     pub fn compositor(&self) -> WaylandCompositor {
         self.compositor
     }
 
     /// Attempt to recover a broken session.
+    #[allow(dead_code)]
     pub async fn recover_session(&mut self) -> Result<()> {
         tracing::info!("Attempting session recovery");
 
@@ -484,6 +489,7 @@ impl PortalCapture {
     }
 
     /// Handle session errors with smart recovery.
+    #[allow(dead_code)]
     pub fn handle_session_error(&mut self, error: &str) -> RecoveryAction {
         tracing::warn!("Session error: {}", error);
 
@@ -514,6 +520,7 @@ impl PortalCapture {
     }
 
     /// Get status of unattended access capability.
+    #[allow(dead_code)]
     pub fn unattended_status(&self) -> UnattendedStatus {
         let caps = self.compositor.capabilities();
         let has_token = if let Some(ref tm) = self.token_manager {

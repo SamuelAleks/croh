@@ -153,7 +153,7 @@ impl TokenManager {
 
     /// Get the last successful restore timestamp.
     pub fn last_restore_success(&self) -> Option<i64> {
-        self.last_restore_success.read().ok()?.clone()
+        *self.last_restore_success.read().ok()?
     }
 
     /// Record a successful restore (silent session start).

@@ -293,7 +293,7 @@ mod tests {
             let client_time = 1000 + i as i64 * 100;
             let server_receive_time = client_time + 100 + rtt / 2;
             let server_send_time = server_receive_time + 1;
-            let response_received_time = client_time + *rtt as i64 + 1;
+            let response_received_time = client_time + *rtt + 1;
 
             sync.process_response(
                 client_time,

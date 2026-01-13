@@ -121,8 +121,9 @@ pub use portal::{RecoveryAction, UnattendedStatus};
 
 use crate::config::{CaptureBackend, ScreenStreamSettings};
 use crate::error::{Error, Result};
-use std::sync::Arc;
 
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
 #[cfg(target_os = "linux")]
 use token_manager::TokenManager;
 

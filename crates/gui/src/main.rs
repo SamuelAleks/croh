@@ -38,10 +38,10 @@ fn main() -> Result<()> {
         // Attach to parent console if available (e.g., when run from cmd/powershell)
         // This is a no-op if already attached or if there's no parent console
         unsafe {
-            windows::Win32::System::Console::AttachConsole(
+            let _ = windows::Win32::System::Console::AttachConsole(
                 windows::Win32::System::Console::ATTACH_PARENT_PROCESS,
-            )
-        };
+            );
+        }
     }
 
     // Check for instance name (used by multi-instance test script)

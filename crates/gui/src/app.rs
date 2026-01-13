@@ -2763,8 +2763,8 @@ impl App {
                                 #[cfg(target_os = "windows")]
                                 {
                                     let path_str = p.to_string_lossy();
-                                    if path_str.starts_with(r"\\?\") {
-                                        PathBuf::from(&path_str[4..])
+                                    if let Some(stripped) = path_str.strip_prefix(r"\\?\") {
+                                        PathBuf::from(stripped)
                                     } else {
                                         p
                                     }

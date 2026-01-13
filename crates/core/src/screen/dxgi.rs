@@ -89,6 +89,7 @@ pub struct DxgiCapture {
 
 impl DxgiCapture {
     /// Check if DXGI capture is available.
+    #[allow(dead_code)]
     pub async fn is_available() -> bool {
         #[cfg(target_os = "windows")]
         {
@@ -498,7 +499,7 @@ impl DxgiCapture {
             }
 
             // Get the raw bits
-            let row_bytes = ((width + 31) / 32) * 4; // 1-bit per pixel, DWORD aligned
+            let row_bytes = width.div_ceil(32) * 4; // 1-bit per pixel, DWORD aligned
             let mask_size = (row_bytes * height) as usize;
             let mut mask_bits = vec![0u8; mask_size * 2]; // AND + XOR masks
 

@@ -1602,7 +1602,7 @@ pub async fn handle_screen_stream_request(
                         });
 
                         // Log cursor info periodically
-                        if sequence % 30 == 0 {
+                        if sequence.is_multiple_of(30) {
                             debug!(
                                 "Cursor captured: pos=({}, {}), visible={}, has_shape={}",
                                 cursor.x, cursor.y, cursor.visible, proto_shape.is_some()
@@ -1624,7 +1624,7 @@ pub async fn handle_screen_stream_request(
                         None
                     }
                     Err(e) => {
-                        if sequence % 30 == 0 {
+                        if sequence.is_multiple_of(30) {
                             debug!("Cursor capture error: {}", e);
                         }
                         None
