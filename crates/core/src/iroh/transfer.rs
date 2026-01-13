@@ -1056,7 +1056,7 @@ pub async fn browse_remote(
 // Screen Streaming
 // ============================================================================
 
-use crate::iroh::protocol::{self, FrameMetadata, ScreenCompression, ScreenQuality};
+use crate::iroh::protocol::{self, CursorUpdate, FrameMetadata, ScreenCompression, ScreenQuality};
 
 /// Events from a screen streaming session.
 #[derive(Debug, Clone)]
@@ -1081,6 +1081,11 @@ pub enum ScreenStreamEvent {
         stream_id: String,
         metadata: FrameMetadata,
         data: Vec<u8>,
+    },
+    /// Cursor update received.
+    CursorReceived {
+        stream_id: String,
+        cursor: CursorUpdate,
     },
     /// Stream ended.
     Ended { stream_id: String, reason: String },
@@ -1346,8 +1351,15 @@ pub async fn stream_screen_from_peer(
                         let _ = conn.close().await;
                         return Ok(stream_id);
                     }
+                    Ok(ControlMessage::ScreenCursorUpdate { stream_id: cursor_stream_id, cursor }) => {
+                        // Forward cursor update to the viewer
+                        let _ = event_tx.send(ScreenStreamEvent::CursorReceived {
+                            stream_id: cursor_stream_id,
+                            cursor,
+                        }).await;
+                    }
                     Ok(other) => {
-                        warn!("Unexpected message during screen stream: {:?}", other);
+                        debug!("Ignoring unexpected message during screen stream: {:?}", other);
                     }
                     Err(e) => {
                         error!("Screen stream connection error: {}", e);
@@ -1582,6 +1594,37 @@ pub async fn handle_screen_stream_request(
                 if let Err(e) = conn.send_raw(&encoded.data).await {
                     info!("Connection closed during frame data send: {}", e);
                     break;
+                }
+
+                // Capture and send cursor update
+                if let Ok(Some(cursor)) = capture.capture_cursor().await {
+                    // Convert backend CursorShape to protocol CursorShape
+                    let proto_shape = cursor.shape.map(|s| protocol::CursorShape {
+                        shape_id: s.shape_id,
+                        width: s.width,
+                        height: s.height,
+                        hotspot_x: s.hotspot_x,
+                        hotspot_y: s.hotspot_y,
+                        format: protocol::CursorFormat::Rgba32,
+                        data: s.data,
+                    });
+
+                    let cursor_update = CursorUpdate {
+                        x: cursor.x,
+                        y: cursor.y,
+                        visible: cursor.visible,
+                        shape: proto_shape,
+                    };
+
+                    let cursor_msg = ControlMessage::ScreenCursorUpdate {
+                        stream_id: stream_id.clone(),
+                        cursor: cursor_update,
+                    };
+
+                    // Non-critical - don't break stream if cursor send fails
+                    if let Err(e) = conn.send(&cursor_msg).await {
+                        debug!("Failed to send cursor update: {}", e);
+                    }
                 }
 
                 sequence += 1;

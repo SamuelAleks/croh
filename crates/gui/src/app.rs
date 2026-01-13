@@ -10,8 +10,8 @@ use croh_core::{
     default_browsable_paths, files, generate_id, handle_browse_request, handle_incoming_pull,
     handle_incoming_push, handle_screen_stream_request, platform, pull_files, push_files,
     screen::{
-        viewer_command_channel, viewer_event_channel, RemoteInputEvent, ScreenViewer,
-        ViewerCommand, ViewerCommandSender, ViewerConfig, ViewerEvent,
+        viewer_command_channel, viewer_event_channel, CursorRenderer, RemoteInputEvent,
+        ScreenViewer, ViewerCommand, ViewerCommandSender, ViewerConfig, ViewerEvent,
     },
     serde_json, stream_screen_from_peer, ChatHandler, ChatStore, Config, ControlMessage,
     FileRequest, Identity, IrohEndpoint, NetworkStore, NodeAddr, NodeId, PeerAddress, PeerInfo,
@@ -7451,9 +7451,10 @@ impl App {
                             }
                         });
 
-                        // Create the viewer
+                        // Create the viewer and cursor renderer
                         let config = ViewerConfig::default();
                         let mut viewer = ScreenViewer::new(config, event_tx);
+                        let mut cursor_renderer = CursorRenderer::new();
 
                         // Start connection
                         viewer.start_connect(peer.endpoint_id.clone(), None);
@@ -7611,7 +7612,7 @@ impl App {
                         };
 
                         // Create cancellation channel
-                        let (_cancel_tx, cancel_rx) = tokio::sync::mpsc::channel::<()>(1);
+                        let (cancel_tx, cancel_rx) = tokio::sync::mpsc::channel::<()>(1);
 
                         // Create stream event channel
                         let (stream_event_tx, mut stream_event_rx) =
@@ -7624,6 +7625,9 @@ impl App {
 
                         // Clone for the streaming task
                         let peer_clone = peer.clone();
+
+                        // Keep cancel_tx for the command handler
+                        let cancel_tx_for_cmd = cancel_tx;
 
                         // Spawn the streaming task
                         let stream_task = tokio::spawn(async move {
@@ -7652,6 +7656,12 @@ impl App {
                             info!("Viewer command handler task started");
                             while let Some(cmd) = cmd_rx.recv().await {
                                 match cmd {
+                                    ViewerCommand::Disconnect => {
+                                        info!("Viewer disconnect command received, sending cancel signal");
+                                        // Signal the stream task to stop gracefully
+                                        let _ = cancel_tx_for_cmd.send(()).await;
+                                        break;
+                                    }
                                     ViewerCommand::SendInput(event) => {
                                         debug!("Received SendInput command: {:?}", event);
                                         // Convert RemoteInputEvent to protocol InputEvent
@@ -7701,10 +7711,6 @@ impl App {
                                         {
                                             warn!("Failed to send input event to channel: {}", e);
                                         }
-                                    }
-                                    ViewerCommand::Disconnect => {
-                                        info!("Viewer disconnect command received");
-                                        break;
                                     }
                                     _ => {
                                         // Other commands like AdjustQuality, SwitchDisplay, etc.
@@ -7779,7 +7785,13 @@ impl App {
                                         if let Some(frame) = viewer.latest_frame() {
                                             let width = frame.width;
                                             let height = frame.height;
-                                            let rgba_data = frame.data.clone();
+                                            let mut rgba_data = frame.data.clone();
+
+                                            // Render cursor on top of frame
+                                            cursor_renderer.render_on_frame(&mut rgba_data, width, height);
+
+                                            // Get current state to ensure UI knows we're streaming
+                                            let viewer_state = viewer.state().to_string();
 
                                             // Update UI with the frame image
                                             let window_weak_frame = window_weak_stream.clone();
@@ -7795,6 +7807,9 @@ impl App {
                                                         slint::Image::from_rgba8(pixel_buffer);
 
                                                     let logic = window.global::<AppLogic>();
+                                                    // Set status first to ensure frame is visible
+                                                    // (UI only shows frame when status == "streaming")
+                                                    logic.set_screen_viewer_status(SharedString::from(&viewer_state));
                                                     logic.set_screen_viewer_frame(image);
                                                     logic.set_screen_viewer_width(width as i32);
                                                     logic.set_screen_viewer_height(height as i32);
@@ -7806,6 +7821,10 @@ impl App {
                                         if metadata.sequence % 30 == 0 {
                                             viewer.emit_stats();
                                         }
+                                    }
+                                    ScreenStreamEvent::CursorReceived { cursor, .. } => {
+                                        // Update cursor renderer with new position/shape
+                                        cursor_renderer.update(&cursor);
                                     }
                                     ScreenStreamEvent::Ended { reason, .. } => {
                                         info!("Stream ended: {}", reason);

@@ -712,9 +712,9 @@ fn run_pipewire_capture(
     let timer_count = std::sync::atomic::AtomicU64::new(0);
     let timer = mainloop.loop_().add_timer(move |_| {
         let count = timer_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        if count.is_multiple_of(30) {
-            // Log every ~1 second
-            tracing::info!("PipeWire timer tick #{}", count + 1);
+        if count.is_multiple_of(1800) {
+            // Log every ~60 seconds at debug level (not spammy)
+            tracing::debug!("PipeWire timer tick #{}", count + 1);
         }
 
         // Check for stream error
