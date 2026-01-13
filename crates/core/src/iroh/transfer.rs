@@ -1093,6 +1093,25 @@ pub enum ScreenStreamEvent {
     Error(String),
 }
 
+/// Commands that can be sent to a screen streaming session.
+#[derive(Debug, Clone)]
+pub enum ScreenStreamCommand {
+    /// Request a quality adjustment from the host.
+    AdjustQuality {
+        /// New quality setting (None to leave unchanged)
+        quality: Option<ScreenQuality>,
+        /// New target FPS (None to leave unchanged)
+        target_fps: Option<u32>,
+    },
+    /// Request a keyframe from the host (for recovery after issues).
+    RequestKeyframe,
+    /// Suggest a bitrate adjustment to the host.
+    SuggestBitrate {
+        /// Suggested bitrate in kbps
+        bitrate_kbps: u32,
+    },
+}
+
 /// Connect to a remote peer and start receiving their screen stream.
 ///
 /// This function establishes a connection, sends a ScreenStreamRequest,
@@ -1109,6 +1128,7 @@ pub enum ScreenStreamEvent {
 /// * `event_tx` - Channel to send stream events to
 /// * `cancel_rx` - Channel to receive cancellation signals
 /// * `input_rx` - Channel to receive input events to forward to remote
+/// * `command_rx` - Channel to receive quality/stream adjustment commands
 ///
 /// # Returns
 /// The stream ID on success, or an error.
@@ -1119,6 +1139,7 @@ pub async fn stream_screen_from_peer(
     event_tx: mpsc::Sender<ScreenStreamEvent>,
     mut cancel_rx: mpsc::Receiver<()>,
     mut input_rx: mpsc::Receiver<Vec<InputEvent>>,
+    mut command_rx: mpsc::Receiver<ScreenStreamCommand>,
 ) -> Result<String> {
     // Check permissions
     if !peer.their_permissions.screen_view {
@@ -1297,6 +1318,52 @@ pub async fn stream_screen_from_peer(
                         warn!("Failed to send input events: {}", e);
                     } else {
                         debug!("Input events sent successfully");
+                    }
+                }
+            }
+
+            // Handle quality/stream adjustment commands
+            Some(cmd) = command_rx.recv() => {
+                match cmd {
+                    ScreenStreamCommand::AdjustQuality { quality, target_fps } => {
+                        info!("Sending quality adjustment: quality={:?}, fps={:?}", quality, target_fps);
+                        let adjust_msg = ControlMessage::ScreenStreamAdjust {
+                            stream_id: stream_id.clone(),
+                            quality,
+                            target_fps,
+                            request_keyframe: false,
+                        };
+                        if let Err(e) = conn.send(&adjust_msg).await {
+                            warn!("Failed to send quality adjustment: {}", e);
+                        }
+                    }
+                    ScreenStreamCommand::RequestKeyframe => {
+                        info!("Sending keyframe request");
+                        let adjust_msg = ControlMessage::ScreenStreamAdjust {
+                            stream_id: stream_id.clone(),
+                            quality: None,
+                            target_fps: None,
+                            request_keyframe: true,
+                        };
+                        if let Err(e) = conn.send(&adjust_msg).await {
+                            warn!("Failed to send keyframe request: {}", e);
+                        }
+                    }
+                    ScreenStreamCommand::SuggestBitrate { bitrate_kbps } => {
+                        // Send via ScreenFrameAck with quality hint
+                        debug!("Suggesting bitrate: {} kbps", bitrate_kbps);
+                        let ack = ControlMessage::ScreenFrameAck {
+                            stream_id: stream_id.clone(),
+                            up_to_sequence: 0, // Not acknowledging specific frames
+                            estimated_bandwidth: Some(bitrate_kbps as u64),
+                            quality_hint: None,
+                            measured_latency_ms: None,
+                            packet_loss: None,
+                            request_keyframe: false,
+                        };
+                        if let Err(e) = conn.send(&ack).await {
+                            warn!("Failed to send bitrate suggestion: {}", e);
+                        }
                     }
                 }
             }

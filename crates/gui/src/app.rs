@@ -15,8 +15,9 @@ use croh_core::{
     },
     serde_json, stream_screen_from_peer, ChatHandler, ChatStore, Config, ControlMessage,
     FileRequest, Identity, IrohEndpoint, NetworkStore, NodeAddr, NodeId, PeerAddress, PeerInfo,
-    PeerStore, Permissions, ScreenStreamEvent, Transfer, TransferEvent, TransferHistory,
-    TransferId, TransferManager, TransferStatus, TransferType, TrustBundle, TrustedPeer,
+    PeerStore, Permissions, ScreenStreamCommand, ScreenStreamEvent, Transfer, TransferEvent,
+    TransferHistory, TransferId, TransferManager, TransferStatus, TransferType, TrustBundle,
+    TrustedPeer,
 };
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 use std::collections::HashMap;
@@ -7447,6 +7448,10 @@ impl App {
                         // Create viewer command channel
                         let (cmd_tx, mut cmd_rx) = viewer_command_channel(64);
 
+                        // Create stream command channel for quality adjustments (passed to streaming task later)
+                        let (stream_cmd_tx, stream_cmd_rx) =
+                            tokio::sync::mpsc::channel::<ScreenStreamCommand>(32);
+
                         // Store command sender for UI callbacks
                         {
                             let mut cmd_guard = screen_viewer_cmd.write().await;
@@ -7480,6 +7485,7 @@ impl App {
 
                         // Spawn event handler task
                         let window_weak_events = window_weak.clone();
+                        let stream_cmd_tx_for_events = stream_cmd_tx.clone();
                         let event_handler = tokio::spawn(async move {
                             while let Some(event) = event_rx.recv().await {
                                 let window_weak = window_weak_events.clone();
@@ -7616,7 +7622,7 @@ impl App {
                                             }
                                         });
                                     }
-                                    // Adaptive streaming events - handled internally by viewer
+                                    // Adaptive streaming events - send quality commands to host
                                     ViewerEvent::FrameDropped { sequence, reason } => {
                                         debug!("Frame {} dropped: {}", sequence, reason);
                                     }
@@ -7624,16 +7630,55 @@ impl App {
                                         info!("Clock synced: offset={}ms, RTT={}ms", offset_ms, rtt_ms);
                                     }
                                     ViewerEvent::QualityAdjustmentNeeded { suggested_quality, reason } => {
-                                        debug!("Quality adjustment needed: {:?}, reason: {}", suggested_quality, reason);
-                                        // TODO: Send quality adjustment request to host
+                                        info!("Quality adjustment needed: {:?}, reason: {}", suggested_quality, reason);
+                                        // Send quality adjustment request to host
+                                        let cmd = ScreenStreamCommand::AdjustQuality {
+                                            quality: Some(suggested_quality),
+                                            target_fps: None,
+                                        };
+                                        if let Err(e) = stream_cmd_tx_for_events.send(cmd).await {
+                                            warn!("Failed to send quality adjustment command: {}", e);
+                                        }
                                     }
                                     ViewerEvent::KeyframeNeeded { reason } => {
-                                        debug!("Keyframe needed: {}", reason);
-                                        // TODO: Send keyframe request to host
+                                        info!("Keyframe needed: {}", reason);
+                                        // Send keyframe request to host
+                                        let cmd = ScreenStreamCommand::RequestKeyframe;
+                                        if let Err(e) = stream_cmd_tx_for_events.send(cmd).await {
+                                            warn!("Failed to send keyframe request command: {}", e);
+                                        }
                                     }
                                     ViewerEvent::BitrateAdjustmentNeeded { suggested_kbps } => {
-                                        debug!("Bitrate adjustment needed: {} kbps", suggested_kbps);
-                                        // TODO: Send bitrate adjustment to host
+                                        info!("Bitrate adjustment needed: {} kbps", suggested_kbps);
+                                        // Send bitrate suggestion to host
+                                        let cmd = ScreenStreamCommand::SuggestBitrate {
+                                            bitrate_kbps: suggested_kbps,
+                                        };
+                                        if let Err(e) = stream_cmd_tx_for_events.send(cmd).await {
+                                            warn!("Failed to send bitrate suggestion command: {}", e);
+                                        }
+                                    }
+                                    ViewerEvent::ConnectionLost { reason, retry_count, can_retry } => {
+                                        warn!("Connection lost: {} (attempt {}, can_retry={})", reason, retry_count, can_retry);
+                                        let status = if can_retry { "reconnecting" } else { "disconnected" };
+                                        let error_msg = format!("Connection lost: {}", reason);
+                                        let _ = slint::invoke_from_event_loop(move || {
+                                            if let Some(window) = window_weak.upgrade() {
+                                                let logic = window.global::<AppLogic>();
+                                                logic.set_screen_viewer_status(SharedString::from(status));
+                                                logic.set_screen_viewer_error(SharedString::from(&error_msg));
+                                            }
+                                        });
+                                    }
+                                    ViewerEvent::ReconnectAttempt { attempt, max_attempts } => {
+                                        info!("Reconnection attempt {}/{}", attempt, max_attempts);
+                                        let status_msg = format!("reconnecting ({}/{})", attempt, max_attempts);
+                                        let _ = slint::invoke_from_event_loop(move || {
+                                            if let Some(window) = window_weak.upgrade() {
+                                                let logic = window.global::<AppLogic>();
+                                                logic.set_screen_viewer_status(SharedString::from(&status_msg));
+                                            }
+                                        });
                                     }
                                 }
                             }
@@ -7679,6 +7724,7 @@ impl App {
                                 stream_event_tx,
                                 cancel_rx,
                                 input_rx,
+                                stream_cmd_rx,
                             )
                             .await
                             {

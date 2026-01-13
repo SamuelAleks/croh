@@ -44,8 +44,8 @@ pub use iroh::{
     handle_incoming_push, handle_screen_stream_request, handle_speed_test_request, pull_files,
     push_files, run_speed_test, stream_screen_from_peer, ControlConnection, ControlMessage,
     DirectoryEntry, FileRequest, HandshakeResult, Identity, IrohEndpoint, NodeAddr, NodeId,
-    PeerAddress, RelayUrl, ScreenStreamEvent, SpeedTestResult, TransferEvent, ALPN_CONTROL,
-    DEFAULT_TEST_SIZE,
+    PeerAddress, RelayUrl, ScreenStreamCommand, ScreenStreamEvent, SpeedTestResult, TransferEvent,
+    ALPN_CONTROL, DEFAULT_TEST_SIZE,
 };
 pub use networks::{NetworkSettings, NetworkStore, PeerNetwork};
 pub use peers::{PeerStore, Permissions, TrustedPeer};

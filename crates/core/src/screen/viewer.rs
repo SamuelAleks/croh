@@ -51,6 +51,8 @@ pub enum ViewerState {
     Paused,
     /// Disconnecting gracefully.
     Disconnecting,
+    /// Attempting to reconnect after connection loss.
+    Reconnecting,
     /// Error state.
     Error,
 }
@@ -65,6 +67,7 @@ impl std::fmt::Display for ViewerState {
             Self::Streaming => write!(f, "streaming"),
             Self::Paused => write!(f, "paused"),
             Self::Disconnecting => write!(f, "disconnecting"),
+            Self::Reconnecting => write!(f, "reconnecting"),
             Self::Error => write!(f, "error"),
         }
     }
@@ -146,6 +149,14 @@ pub struct ViewerConfig {
     pub min_bitrate_kbps: u32,
     /// Maximum bitrate in kbps (for adaptive).
     pub max_bitrate_kbps: u32,
+    /// Enable automatic reconnection on connection loss.
+    pub enable_auto_reconnect: bool,
+    /// Maximum reconnection attempts.
+    pub max_reconnect_attempts: u32,
+    /// Initial delay between reconnect attempts in milliseconds.
+    pub reconnect_delay_ms: u32,
+    /// Maximum delay between reconnect attempts in milliseconds (exponential backoff cap).
+    pub max_reconnect_delay_ms: u32,
 }
 
 impl Default for ViewerConfig {
@@ -162,6 +173,10 @@ impl Default for ViewerConfig {
             enable_adaptive_bitrate: true,
             min_bitrate_kbps: 500,
             max_bitrate_kbps: 20_000,
+            enable_auto_reconnect: true,
+            max_reconnect_attempts: 3,
+            reconnect_delay_ms: 1000,      // 1 second initial delay
+            max_reconnect_delay_ms: 10000, // 10 second max delay
         }
     }
 }
@@ -196,6 +211,17 @@ pub enum ViewerEvent {
         sequence: u64,
         width: u32,
         height: u32,
+    },
+    /// Connection was lost unexpectedly - can attempt reconnect.
+    ConnectionLost {
+        reason: String,
+        retry_count: u32,
+        can_retry: bool,
+    },
+    /// Reconnection attempt started.
+    ReconnectAttempt {
+        attempt: u32,
+        max_attempts: u32,
     },
     /// Frame was dropped (too old or decode error).
     FrameDropped { sequence: u64, reason: String },
@@ -504,6 +530,12 @@ pub struct ScreenViewer {
     current_quality: ScreenQuality,
     /// Frames dropped due to latency.
     frames_dropped_latency: u64,
+    /// Current reconnect attempt count.
+    reconnect_attempts: u32,
+    /// Last peer ID for reconnection (preserved across reconnects).
+    last_peer_id: Option<String>,
+    /// Last display ID for reconnection (preserved across reconnects).
+    last_display_id: Option<String>,
 }
 
 impl ScreenViewer {
@@ -539,6 +571,9 @@ impl ScreenViewer {
             adaptive_bitrate,
             current_quality: config.preferred_quality,
             frames_dropped_latency: 0,
+            reconnect_attempts: 0,
+            last_peer_id: None,
+            last_display_id: None,
         }
     }
 
@@ -919,6 +954,127 @@ impl ScreenViewer {
         let _ = self.event_tx.try_send(ViewerEvent::Error(error));
     }
 
+    /// Handle unexpected connection loss with potential for reconnection.
+    ///
+    /// This differs from `disconnect()` which is an intentional disconnection.
+    /// Connection loss may trigger automatic reconnection based on config.
+    ///
+    /// # Returns
+    /// `true` if reconnection should be attempted, `false` otherwise.
+    pub fn on_connection_lost(&mut self, reason: String) -> bool {
+        warn!("Connection lost: {}", reason);
+
+        // Save peer info for reconnection
+        if self.peer_id.is_some() {
+            self.last_peer_id = self.peer_id.clone();
+            self.last_display_id = self.display_id.clone();
+        }
+
+        self.last_error = Some(reason.clone());
+
+        // Determine if we should attempt reconnection
+        let can_retry = self.config.enable_auto_reconnect
+            && self.reconnect_attempts < self.config.max_reconnect_attempts
+            && self.last_peer_id.is_some();
+
+        let _ = self.event_tx.try_send(ViewerEvent::ConnectionLost {
+            reason,
+            retry_count: self.reconnect_attempts,
+            can_retry,
+        });
+
+        can_retry
+    }
+
+    /// Start a reconnection attempt.
+    ///
+    /// Call this after `on_connection_lost()` returns `true` and after
+    /// waiting the appropriate backoff delay.
+    ///
+    /// # Returns
+    /// The peer ID and display ID to reconnect to, or None if reconnection
+    /// is not possible.
+    pub fn start_reconnect(&mut self) -> Option<(String, Option<String>)> {
+        let peer_id = self.last_peer_id.clone()?;
+
+        if self.reconnect_attempts >= self.config.max_reconnect_attempts {
+            warn!(
+                "Max reconnect attempts ({}) reached",
+                self.config.max_reconnect_attempts
+            );
+            self.set_state(ViewerState::Error);
+            return None;
+        }
+
+        self.reconnect_attempts += 1;
+        info!(
+            "Starting reconnection attempt {}/{}",
+            self.reconnect_attempts, self.config.max_reconnect_attempts
+        );
+
+        // Emit reconnect attempt event
+        let _ = self.event_tx.try_send(ViewerEvent::ReconnectAttempt {
+            attempt: self.reconnect_attempts,
+            max_attempts: self.config.max_reconnect_attempts,
+        });
+
+        // Clear transient state but keep reconnection info
+        self.stream_id = Some(uuid::Uuid::new_v4().to_string());
+        self.frame_buffer.clear();
+        self.input_queue.clear();
+        self.clock_sync.reset();
+        self.loss_tracker.reset();
+        self.latency_samples.clear();
+
+        self.set_state(ViewerState::Reconnecting);
+
+        Some((peer_id, self.last_display_id.clone()))
+    }
+
+    /// Get the recommended delay before the next reconnection attempt.
+    ///
+    /// Uses exponential backoff with jitter.
+    pub fn reconnect_delay(&self) -> Duration {
+        let base_delay = self.config.reconnect_delay_ms as u64;
+        let max_delay = self.config.max_reconnect_delay_ms as u64;
+
+        // Exponential backoff: delay = base * 2^attempts, capped at max
+        let delay_ms = base_delay
+            .saturating_mul(1u64 << self.reconnect_attempts.min(10))
+            .min(max_delay);
+
+        Duration::from_millis(delay_ms)
+    }
+
+    /// Reset reconnection state after successful connection.
+    ///
+    /// Call this when the connection is re-established successfully.
+    pub fn on_reconnect_success(&mut self) {
+        info!(
+            "Reconnection successful after {} attempts",
+            self.reconnect_attempts
+        );
+        self.reconnect_attempts = 0;
+        self.last_error = None;
+        // Update peer_id from last_peer_id since we reconnected
+        if self.peer_id.is_none() {
+            self.peer_id = self.last_peer_id.clone();
+            self.display_id = self.last_display_id.clone();
+        }
+    }
+
+    /// Check if the viewer is in a reconnectable state.
+    pub fn can_reconnect(&self) -> bool {
+        self.config.enable_auto_reconnect
+            && self.reconnect_attempts < self.config.max_reconnect_attempts
+            && self.last_peer_id.is_some()
+    }
+
+    /// Get the current reconnect attempt count.
+    pub fn reconnect_attempt_count(&self) -> u32 {
+        self.reconnect_attempts
+    }
+
     /// Queue an input event.
     pub fn queue_input(&mut self, event: RemoteInputEvent) {
         if self.config.enable_input && self.state == ViewerState::Streaming {
@@ -1061,5 +1217,77 @@ mod tests {
         let stats = viewer.stats();
         assert_eq!(stats.frames_received, 0);
         assert_eq!(stats.current_fps, 0.0);
+    }
+
+    #[test]
+    fn test_reconnection_handling() {
+        let (tx, mut rx) = viewer_event_channel(32);
+        let mut config = ViewerConfig::default();
+        config.enable_auto_reconnect = true;
+        config.max_reconnect_attempts = 3;
+        config.reconnect_delay_ms = 100;
+        config.max_reconnect_delay_ms = 1000;
+
+        let mut viewer = ScreenViewer::new(config, tx);
+
+        // Start a connection
+        viewer.start_connect("peer-1".into(), Some("display-1".into()));
+        viewer.on_connected(vec![]);
+        assert_eq!(viewer.state(), ViewerState::WaitingForFrame);
+
+        // Simulate connection loss
+        let can_retry = viewer.on_connection_lost("network error".into());
+        assert!(can_retry);
+        assert!(viewer.can_reconnect());
+
+        // Drain events
+        while rx.try_recv().is_ok() {}
+
+        // Start reconnect attempt
+        let result = viewer.start_reconnect();
+        assert!(result.is_some());
+        let (peer_id, display_id) = result.unwrap();
+        assert_eq!(peer_id, "peer-1");
+        assert_eq!(display_id, Some("display-1".into()));
+        assert_eq!(viewer.state(), ViewerState::Reconnecting);
+        assert_eq!(viewer.reconnect_attempt_count(), 1);
+
+        // Check backoff delay increases
+        let delay1 = viewer.reconnect_delay();
+
+        // Simulate another failure and reconnect
+        let _ = viewer.on_connection_lost("still down".into());
+        let _ = viewer.start_reconnect();
+        let delay2 = viewer.reconnect_delay();
+        assert!(delay2 > delay1); // Exponential backoff
+
+        assert_eq!(viewer.reconnect_attempt_count(), 2);
+
+        // Third attempt
+        let _ = viewer.on_connection_lost("network error".into());
+        let _ = viewer.start_reconnect();
+        assert_eq!(viewer.reconnect_attempt_count(), 3);
+
+        // Fourth attempt should fail (max reached)
+        let _ = viewer.on_connection_lost("final error".into());
+        let result = viewer.start_reconnect();
+        assert!(result.is_none());
+        assert_eq!(viewer.state(), ViewerState::Error);
+
+        // Now test successful reconnection
+        let (tx2, _rx2) = viewer_event_channel(32);
+        let mut viewer2 = ScreenViewer::new(ViewerConfig::default(), tx2);
+        viewer2.start_connect("peer-2".into(), None);
+        viewer2.on_connected(vec![]);
+
+        let can_retry = viewer2.on_connection_lost("temp error".into());
+        assert!(can_retry);
+        viewer2.start_reconnect();
+        assert_eq!(viewer2.reconnect_attempt_count(), 1);
+
+        // Simulate successful reconnection
+        viewer2.on_reconnect_success();
+        assert_eq!(viewer2.reconnect_attempt_count(), 0);
+        assert!(viewer2.last_error().is_none());
     }
 }

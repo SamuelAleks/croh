@@ -46,7 +46,7 @@ pub use speedtest::{
 pub use transfer::{
     browse_remote, handle_browse_request, handle_incoming_pull, handle_incoming_push,
     handle_screen_stream_request, pull_files, push_files, stream_screen_from_peer,
-    ScreenStreamEvent, TransferEvent,
+    ScreenStreamCommand, ScreenStreamEvent, TransferEvent,
 };
 
 // Re-export iroh types used by the GUI

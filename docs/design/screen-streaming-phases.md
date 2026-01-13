@@ -10,7 +10,7 @@ Phase 3: Basic Encoding                    ██████████  COMPL
 Phase 4: Input Injection                   ██████████  COMPLETE
 Phase 5: Daemon Integration                ██████████  COMPLETE
 Phase 6: Viewer (Receiver Side)            ██████████  COMPLETE
-Phase 7: Polish & Testing                  ██████░░░░  IN PROGRESS
+Phase 7: Polish & Testing                  ███████░░░  IN PROGRESS
 ```
 
 ---
@@ -508,6 +508,7 @@ zstd = "0.13"
   - Permission checks ✅ (daemon handler tests)
   - Session state transitions ✅ (viewer tests)
   - Encoder/decoder round-trips ✅ (5 tests passing)
+  - Reconnection handling ✅ (test_reconnection_handling test)
 
 - [ ] **7.2** Add integration tests
   - Full stream lifecycle
@@ -519,15 +520,22 @@ zstd = "0.13"
   - Optimize memory allocations
   - Reduce copying (DMA-BUF path)
 
-- [ ] **7.4** Add adaptive quality
-  - Monitor RTT and bandwidth
-  - Auto-adjust quality preset
-  - Keyframe on quality change
+- [x] **7.4** Add adaptive quality ✅
+  - `ScreenStreamCommand` enum for quality adjustments (AdjustQuality, RequestKeyframe, SuggestBitrate)
+  - `stream_screen_from_peer()` updated to accept command channel
+  - ViewerEvent handlers wired up to send quality commands to host
+  - ScreenStreamAdjust messages sent for quality/fps/keyframe requests
+  - ScreenFrameAck enhanced with bitrate suggestions
 
-- [ ] **7.5** Add reconnection handling
-  - Detect connection loss
-  - Clean up resources
-  - Allow re-streaming
+- [x] **7.5** Add reconnection handling ✅
+  - `ViewerState::Reconnecting` state added
+  - `ViewerEvent::ConnectionLost` and `ViewerEvent::ReconnectAttempt` events
+  - `ViewerConfig` extended with reconnection settings (enable, max attempts, delays)
+  - `ScreenViewer::on_connection_lost()` - handles unexpected disconnection
+  - `ScreenViewer::start_reconnect()` - initiates reconnection attempt
+  - `ScreenViewer::reconnect_delay()` - exponential backoff calculation
+  - `ScreenViewer::on_reconnect_success()` - resets state after successful reconnect
+  - GUI wired up to display reconnection status
 
 - [x] **7.6** Add logging and metrics
   - Debug logging for troubleshooting ✅
