@@ -6,7 +6,9 @@
 use crate::error::{Error, Result};
 use crate::iroh::identity::Identity;
 use crate::iroh::protocol::{ControlMessage, ALPN_CONTROL};
+use iroh::dns::DnsResolver;
 use iroh::{Endpoint, NodeId, RelayMode, RelayUrl};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
@@ -30,10 +32,17 @@ impl IrohEndpoint {
     pub async fn new(identity: Identity) -> Result<Self> {
         let secret_key = identity.secret_key().clone();
 
+        // Use Google DNS (8.8.8.8) as the resolver to avoid issues with broken
+        // system DNS configurations (especially on Windows where DNS can be
+        // intercepted by VPNs, security software, or corporate proxies).
+        let dns_resolver =
+            DnsResolver::with_nameserver(SocketAddr::from(([8, 8, 8, 8], 53)));
+
         let endpoint = Endpoint::builder()
             .secret_key(secret_key)
             .alpns(vec![ALPN_CONTROL.to_vec()])
             .relay_mode(RelayMode::Default)
+            .dns_resolver(dns_resolver)
             .discovery_n0() // Enable n0 DNS discovery for peer address publishing/resolution
             .bind()
             .await
